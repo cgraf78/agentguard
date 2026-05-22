@@ -508,6 +508,37 @@ HOME="$HM_HOME" \
   TMPDIR="$HM_TMP" \
   HM_LOG="$HM_LOG" \
   HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_NAME=codex \
+  CODEX_THREAD_ID="hm-session" \
+  bash -c '
+    source "$1"
+    _hook_hm_tool_complete
+  ' _ "$HELPERS" </dev/null >/dev/null 2>/dev/null
+_assert_contains "hm hook: tool-complete defaults missing status to zero" \
+  "args=hook tool-complete --json --status 0" "$(cat "$HM_LOG")"
+
+: >"$HM_LOG"
+printf '%s' 'not-json' |
+  HOME="$HM_HOME" \
+    PATH="$HM_BIN:$PATH" \
+    TMPDIR="$HM_TMP" \
+    HM_LOG="$HM_LOG" \
+    HIVE_MEMORY_HOOKS=1 \
+    AGENTGUARD_NAME=codex \
+    CODEX_THREAD_ID="hm-session" \
+    bash -c '
+      source "$1"
+      _hook_hm_tool_complete
+    ' _ "$HELPERS" >/dev/null 2>/dev/null
+_assert_contains "hm hook: tool-complete defaults malformed status to zero" \
+  "args=hook tool-complete --json --status 0" "$(cat "$HM_LOG")"
+
+: >"$HM_LOG"
+HOME="$HM_HOME" \
+  PATH="$HM_BIN:$PATH" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  HIVE_MEMORY_HOOKS=1 \
   AGENTGUARD_NAME=claude \
   CODEX_THREAD_ID="" \
   CLAUDE_CODE_CURRENT_SESSION_ID="hm-session" \

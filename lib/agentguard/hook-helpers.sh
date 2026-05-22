@@ -318,7 +318,8 @@ _hook_hm_prompt_text() {
 
 _hook_hm_tool_status() {
   _hook_hm_read_input
-  printf '%s' "${_HOOK_INPUT:-}" | jq -r '
+  local status
+  status=$(printf '%s' "${_HOOK_INPUT:-}" | jq -r '
     def status_code(v):
       if v == null then empty
       elif (v | type) == "number" then v
@@ -339,7 +340,16 @@ _hook_hm_tool_status() {
     // .status
     // 0
     | status_code(.) // 0
-  ' 2>/dev/null
+  ' 2>/dev/null) || status=''
+
+  case "$status" in
+    '' | *[!0-9]*)
+      printf '0\n'
+      ;;
+    *)
+      printf '%s\n' "$status"
+      ;;
+  esac
 }
 
 _hook_hm_apply_response() {
