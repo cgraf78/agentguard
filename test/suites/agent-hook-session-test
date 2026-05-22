@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# agent-hook-session-test — session-start hook behavior.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+# ---------------------------------------------------------------------------
+# Tests: agent-hook-session-start — VCS detection
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== session-start: VCS detection ==="
+
+# Copy into a shdeps-shaped temp install so _hook_source_work cannot find a
+# real -work variant while the hook's relative library path still resolves.
+MOCK_SS_DIR=$(_tmpdir)
+_install_hook_fixture "$MOCK_SS_DIR" agent-hook-session-start
+MOCK_SS="$MOCK_SS_DIR/bin/agent-hook-session-start"
+
+# Not inside any repo -> no VCS/change context. Disk warnings may still be
+# emitted because session-start reports host health independently of VCS state.
+ss_out=$(
+  cd "$MOCK_SS_DIR" &&
+    AGENTGUARD_SESSION_ID="$TEST_SID" \
+      TMPDIR="$TEST_TMPDIR" \
+      AGENTGUARD_NAME="agent" \
+      "$MOCK_SS" </dev/null 2>/dev/null
+)
+echo "$ss_out" | jq -e '((.context // "") | contains("Uncommitted changes") | not)' >/dev/null 2>&1
+_assert_eq "session-start: no repo has no VCS context" "0" "$?"
+
+# Git repo with untracked file → emits context JSON
+MOCK_GIT_DIR=$(_tmpdir)
+_install_hook_fixture "$MOCK_GIT_DIR" agent-hook-session-start
+MOCK_GIT_SS="$MOCK_GIT_DIR/bin/agent-hook-session-start"
+git init "$MOCK_GIT_DIR/repo" >/dev/null 2>&1
+touch "$MOCK_GIT_DIR/repo/newfile"
+ss_out=$(
+  cd "$MOCK_GIT_DIR/repo" &&
+    AGENTGUARD_SESSION_ID="$TEST_SID" \
+      TMPDIR="$TEST_TMPDIR" \
+      AGENTGUARD_NAME="agent" \
+      "$MOCK_GIT_SS" </dev/null 2>/dev/null
+)
+echo "$ss_out" | jq -e '.context' >/dev/null 2>&1
+_assert_eq "session-start: git repo with changes → emits context JSON" "0" "$?"
+
+# Smoke test — no crash
+(
+  AGENTGUARD_SESSION_ID="$TEST_SID" \
+    TMPDIR="$TEST_TMPDIR" \
+    AGENTGUARD_NAME="agent" \
+    "$MOCK_SS" </dev/null >/dev/null 2>/dev/null
+)
+_assert_eq "session-start: no crash" "0" "$?"
+
+echo ""
+echo "=== stop: response JSON ==="
+
+MOCK_STOP_DIR=$(_tmpdir)
+_install_hook_fixture "$MOCK_STOP_DIR" agent-hook-stop
+MOCK_STOP="$MOCK_STOP_DIR/bin/agent-hook-stop"
+cat >"$MOCK_STOP_DIR/bin/term-notify-sound" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "notification noise"
+MOCK
+chmod +x "$MOCK_STOP_DIR/bin/term-notify-sound"
+
+stop_out=$(
+  AGENTGUARD_SESSION_ID="$TEST_SID" \
+    TMPDIR="$TEST_TMPDIR" \
+    AGENTGUARD_NAME="codex" \
+    PATH="$MOCK_STOP_DIR/bin:$PATH" \
+    "$MOCK_STOP" </dev/null 2>/dev/null
+)
+echo "$stop_out" | jq -e '. == {}' >/dev/null 2>&1
+_assert_eq "stop: notification stdout does not corrupt JSON" "0" "$?"
+_assert_not_contains "stop: notification output is suppressed" \
+  "notification noise" "$stop_out"
+
+_test_summary

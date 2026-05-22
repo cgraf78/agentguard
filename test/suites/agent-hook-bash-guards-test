@@ -1,0 +1,367 @@
+#!/usr/bin/env bash
+# agent-hook-bash-guards-test — pre-bash destructive-operation guards:
+#   sudo, git reset --hard, git clean -f, git push --force,
+#   TTY-required commands, broad kills, chmod overreach.
+# pre-edit secrets file guard.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+# ---------------------------------------------------------------------------
+# Tests: sudo guard
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-bash: sudo guard ==="
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"sudo apt install vim"}}'
+_assert_eq "sudo: blocked" "2" "$HOOK_EXIT"
+_assert_contains "sudo: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"/usr/bin/sudo rm -rf /var/cache"}}'
+_assert_eq "path-qualified sudo: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"bash -c '\''sudo chmod 755 /etc'\''"}}'
+_assert_eq "nested shell sudo: blocked" "2" "$HOOK_EXIT"
+
+# echo of sudo is prose, not execution
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"echo sudo apt install vim"}}'
+_assert_eq "echo sudo: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "echo sudo: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# ---------------------------------------------------------------------------
+# Tests: git reset --hard guard
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-bash: git reset --hard guard ==="
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git reset --hard"}}'
+_assert_eq "git reset --hard: blocked" "2" "$HOOK_EXIT"
+_assert_contains "git reset --hard: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git reset --hard HEAD~1"}}'
+_assert_eq "git reset --hard HEAD~1: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git -C /tmp/repo reset --hard origin/main"}}'
+_assert_eq "git -C reset --hard: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'bash -c "git reset --hard"' '{"tool_input":{"command":$c}}')"
+_assert_eq "nested bash git reset --hard: blocked" "2" "$HOOK_EXIT"
+
+# git reset without --hard is fine
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git reset HEAD file.txt"}}'
+_assert_eq "git reset (no --hard): allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "git reset (no --hard): no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git reset --soft HEAD~1"}}'
+_assert_eq "git reset --soft: allowed" "0" "$HOOK_EXIT"
+
+# echo of git reset --hard is prose
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"echo git reset --hard"}}'
+_assert_eq "echo git reset --hard: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "echo git reset --hard: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# ---------------------------------------------------------------------------
+# Tests: git clean -f guard
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-bash: git clean -f guard ==="
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git clean -f"}}'
+_assert_eq "git clean -f: blocked" "2" "$HOOK_EXIT"
+_assert_contains "git clean -f: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git clean -fd"}}'
+_assert_eq "git clean -fd: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git clean -df"}}'
+_assert_eq "git clean -df: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git clean -fdx"}}'
+_assert_eq "git clean -fdx: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git clean --force"}}'
+_assert_eq "git clean --force: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git -C /tmp/repo clean -fd"}}'
+_assert_eq "git -C clean -fd: blocked" "2" "$HOOK_EXIT"
+
+# dry-run does not trigger our guard (tests use /tmp path to avoid the
+# separate protected bare-Git-repo guard that fires when CWD is $HOME)
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git -C /tmp clean -n"}}'
+_assert_not_contains "git clean -n: no clean-force BLOCKED" "git clean -f deletes" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git -C /tmp clean --dry-run"}}'
+_assert_not_contains "git clean --dry-run: no clean-force BLOCKED" "git clean -f deletes" "$HOOK_STDERR"
+
+# echo of git clean -f is prose
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"echo git clean -fd"}}'
+_assert_eq "echo git clean -fd: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "echo git clean -fd: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# ---------------------------------------------------------------------------
+# Tests: git push --force guard
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-bash: git push --force guard ==="
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git push --force"}}'
+_assert_eq "git push --force: blocked" "2" "$HOOK_EXIT"
+_assert_contains "git push --force: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git push -f origin main"}}'
+_assert_eq "git push -f: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git push --force origin main"}}'
+_assert_eq "git push --force origin main: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git push --force-with-lease origin feat"}}'
+_assert_eq "git push --force-with-lease: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git push --force-with-lease=HEAD origin feat"}}'
+_assert_eq "git push --force-with-lease=ref: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git -C /tmp/repo push -f"}}'
+_assert_eq "git -C push -f: blocked" "2" "$HOOK_EXIT"
+
+# normal push is fine
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git push origin main"}}'
+_assert_eq "git push (no force): allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "git push (no force): no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git push -u origin feat/foo"}}'
+_assert_eq "git push -u: allowed" "0" "$HOOK_EXIT"
+
+# echo of git push --force is prose
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"echo git push --force"}}'
+_assert_eq "echo git push --force: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "echo git push --force: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# ---------------------------------------------------------------------------
+# Tests: TTY-required command guard
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-bash: TTY-required command guard ==="
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"vim src/main.c"}}'
+_assert_eq "vim: blocked" "2" "$HOOK_EXIT"
+_assert_contains "vim: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"vi README.md"}}'
+_assert_eq "vi: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nvim ."}}'
+_assert_eq "nvim: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nano /etc/hosts"}}'
+_assert_eq "nano: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"emacs -nw main.py"}}'
+_assert_eq "emacs: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"man git"}}'
+_assert_eq "man: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"info bash"}}'
+_assert_eq "info: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"top"}}'
+_assert_eq "top: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"htop"}}'
+_assert_eq "htop: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"gdb ./myapp core"}}'
+_assert_eq "gdb: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"watch -n 1 ps aux"}}'
+_assert_eq "watch: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"/usr/bin/vim file.txt"}}'
+_assert_eq "path-qualified vim: blocked" "2" "$HOOK_EXIT"
+
+# Non-TTY commands are fine
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"cat README.md"}}'
+_assert_eq "cat: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "cat: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# echo of a TTY command is prose
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"echo vim src/main.c"}}'
+_assert_eq "echo vim: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "echo vim: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# ---------------------------------------------------------------------------
+# Tests: broad process kill guard
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-bash: broad kill guard ==="
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill 1"}}'
+_assert_eq "kill 1: blocked" "2" "$HOOK_EXIT"
+_assert_contains "kill 1: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -9 1"}}'
+_assert_eq "kill -9 1: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -KILL 1"}}'
+_assert_eq "kill -KILL 1: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -s KILL 1"}}'
+_assert_eq "kill -s KILL 1: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"killall vim"}}'
+_assert_eq "killall: warns" "0" "$HOOK_EXIT"
+_assert_contains "killall: WARNING msg" "WARNING" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"pkill -f myprocess"}}'
+_assert_eq "pkill: warns" "0" "$HOOK_EXIT"
+_assert_contains "pkill: WARNING msg" "WARNING" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -9 1234"}}'
+_assert_eq "kill -9 PID: warns" "0" "$HOOK_EXIT"
+_assert_contains "kill -9 PID: WARNING msg" "WARNING" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -s KILL 5678"}}'
+_assert_eq "kill -s KILL PID: warns" "0" "$HOOK_EXIT"
+
+# Normal kill (SIGTERM) of a non-init process is fine
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill 1234"}}'
+_assert_eq "kill SIGTERM PID: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "kill SIGTERM PID: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+_assert_not_contains "kill SIGTERM PID: no WARNING" "WARNING" "$HOOK_STDERR"
+
+# echo of kill is prose
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"echo kill 1"}}'
+_assert_eq "echo kill 1: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "echo kill 1: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# ---------------------------------------------------------------------------
+# Tests: chmod overreach guard
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-bash: chmod overreach guard ==="
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"chmod 777 script.sh"}}'
+_assert_eq "chmod 777: blocked" "2" "$HOOK_EXIT"
+_assert_contains "chmod 777: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"chmod 0777 script.sh"}}'
+_assert_eq "chmod 0777: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"chmod -R 777 /tmp/deploy"}}'
+_assert_eq "chmod -R 777: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"chmod 666 file.txt"}}'
+_assert_eq "chmod 666: warns" "0" "$HOOK_EXIT"
+_assert_contains "chmod 666: WARNING msg" "WARNING" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"chmod o+w file.txt"}}'
+_assert_eq "chmod o+w: warns" "0" "$HOOK_EXIT"
+_assert_contains "chmod o+w: WARNING msg" "WARNING" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"chmod a+w dir/"}}'
+_assert_eq "chmod a+w: warns" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"chmod a=rwx script.sh"}}'
+_assert_eq "chmod a=rwx: warns" "0" "$HOOK_EXIT"
+
+# Safe modes are fine
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"chmod 755 script.sh"}}'
+_assert_eq "chmod 755: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "chmod 755: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+_assert_not_contains "chmod 755: no WARNING" "WARNING" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"chmod 644 file.txt"}}'
+_assert_eq "chmod 644: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"chmod u+x script.sh"}}'
+_assert_eq "chmod u+x: allowed" "0" "$HOOK_EXIT"
+
+# u=rwx and g=rwx grant no world-write access — must not warn
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"chmod u=rwx script.sh"}}'
+_assert_eq "chmod u=rwx: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "chmod u=rwx: no WARNING" "WARNING" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"chmod g=rwx script.sh"}}'
+_assert_eq "chmod g=rwx: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "chmod g=rwx: no WARNING" "WARNING" "$HOOK_STDERR"
+
+# echo of chmod is prose
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"echo chmod 777 foo"}}'
+_assert_eq "echo chmod 777: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "echo chmod 777: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# ---------------------------------------------------------------------------
+# Tests: pre-edit secrets file guard
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-edit: secrets file guard ==="
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/project/.env"}}'
+_assert_eq ".env: blocked" "2" "$HOOK_EXIT"
+_assert_contains ".env: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/project/.env.production"}}'
+_assert_eq ".env.production: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/project/prod.env"}}'
+_assert_eq "prod.env: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/.ssh/id_rsa"}}'
+_assert_eq "id_rsa: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/.ssh/id_ed25519"}}'
+_assert_eq "id_ed25519: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/certs/server.pem"}}'
+_assert_eq ".pem: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/certs/keystore.p12"}}'
+_assert_eq ".p12: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/config/private.key"}}'
+_assert_eq ".key: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/project/credentials.json"}}'
+_assert_eq "credentials.json: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/project/secrets.yaml"}}'
+_assert_eq "secrets.yaml: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/.netrc"}}'
+_assert_eq ".netrc: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/.npmrc"}}'
+_assert_eq ".npmrc: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/.aws/credentials"}}'
+_assert_eq ".aws/credentials: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/.ssh/config"}}'
+_assert_eq ".ssh/config: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/.ssh/authorized_keys"}}'
+_assert_eq ".ssh/authorized_keys: blocked" "2" "$HOOK_EXIT"
+
+# Normal source files are fine
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/project/src/main.py"}}'
+_assert_eq "main.py: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "main.py: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/project/config/settings.yaml"}}'
+_assert_eq "settings.yaml: allowed" "0" "$HOOK_EXIT"
+
+# .env.example should be allowed (example/template files)
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/project/.env.example"}}'
+# NOTE: .env.example matches *.env.* so it IS blocked — intentional conservative policy
+_assert_eq ".env.example: blocked (conservative)" "2" "$HOOK_EXIT"
+
+_test_summary

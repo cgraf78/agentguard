@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# agent-hook-bash-protected-git-substitution-test — nested and substitution Git guards.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+_mock_protected_bare_git_home
+
+echo ""
+echo "=== pre-bash: protected bare-Git nested and substitution guards ==="
+
+_nested_cmd="bash -lc 'git status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "nested bash git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_nested_cmd="/opt/homebrew/bin/bash -lc 'git status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "nested homebrew bash git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_nested_cmd="bash -ec 'git status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "nested bash -ec git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_nested_cmd="sh -ec 'git status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "nested sh -ec git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_nested_cmd="zsh -fc 'git status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "nested zsh -fc git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_nested_cmd="eval 'git status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "eval git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_nested_cmd="eval -- 'git status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "eval -- git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_nested_cmd='eval git status -uall'
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "unquoted eval git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_nested_cmd='bash -lc git\ status\ -uall'
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "unquoted bash -lc git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'echo $(git status -uall)' '{"tool_input":{"command":$c}}')"
+_assert_eq "command substitution git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'echo "$(git status -uall)"' '{"tool_input":{"command":$c}}')"
+_assert_eq "quoted command substitution git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "echo \"'\$(git status -uall)'\"" '{"tool_input":{"command":$c}}')"
+_assert_eq "double-quoted command substitution with single quotes git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'echo '\''$(git status -uall)'\''' '{"tool_input":{"command":$c}}')"
+_assert_eq "single-quoted command substitution git status -uall: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'repo=$HOME/.protected-bare-git; echo $(git --git-dir=$repo --work-tree=$HOME status -uall)' '{"tool_input":{"command":$c}}')"
+_assert_eq "command substitution sees shell-local repo alias: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'git --version $(git status -uall)' '{"tool_input":{"command":$c}}')"
+_assert_eq "base git parent with command substitution git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'cat <(git status -uall)' '{"tool_input":{"command":$c}}')"
+_assert_eq "process substitution git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'git --version <(git status -uall)' '{"tool_input":{"command":$c}}')"
+_assert_eq "base git parent with process substitution git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'echo $((git status -uall))' '{"tool_input":{"command":$c}}')"
+_assert_eq "arithmetic expansion text git status -uall: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'echo $(( $(git status -uall) + 1 ))' '{"tool_input":{"command":$c}}')"
+_assert_eq "arithmetic nested command substitution git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c $'echo \'\ngit status -uall\n\'' '{"tool_input":{"command":$c}}')"
+_assert_eq "multiline single-quoted git status -uall text: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'git --version '\''$(git status -uall)'\''' '{"tool_input":{"command":$c}}')"
+_assert_eq "base git parent with single-quoted command substitution git status -uall: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'git --version '\''<(git status -uall)'\''' '{"tool_input":{"command":$c}}')"
+_assert_eq "base git parent with single-quoted process substitution git status -uall: allowed" "0" "$HOOK_EXIT"
+
+_test_summary

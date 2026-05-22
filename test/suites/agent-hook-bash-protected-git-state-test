@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# agent-hook-bash-protected-git-state-test — protected bare-Git guard state forms.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+_mock_protected_bare_git_home
+
+echo ""
+echo "=== pre-bash: protected bare-Git state guards ==="
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"/usr/bin/env -S git status --untracked-files=all"}}'
+_assert_eq "/usr/bin/env split-string git with trailing status args: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env -S '\''git status'\'' --untracked-files=all"}}'
+_assert_eq "env split-string git status with trailing untracked arg: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"/usr/bin/env bash -lc '\''git status --untracked-files=all'\''"}}'
+_assert_eq "/usr/bin/env bash nested git status untracked: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'GIT_DIR=$BARE_HOME_GIT GIT_WORK_TREE=$HOME git status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "GIT_DIR via BARE_HOME_GIT status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'GIT_DIR=$BARE_HOME_GIT/. GIT_WORK_TREE=$HOME git status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "GIT_DIR via BARE_HOME_GIT trailing marker path: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'BARE_HOME_GIT=$HOME/.protected-bare-git; GIT_DIR=$BARE_HOME_GIT GIT_WORK_TREE=$HOME git status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "assigned BARE_HOME_GIT then GIT_DIR status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'repo=$HOME/.protected-bare-git; git --git-dir=$repo --work-tree=$HOME status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "assigned repo then raw git-dir status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'home=$HOME; repo=$home/.protected-bare-git; git --git-dir=$repo --work-tree=$home status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "assigned home alias then raw git-dir status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'repo=$HOME; repo=$repo/.protected-bare-git; git --git-dir=$repo --work-tree=$HOME status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "updated repo alias then raw git-dir status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'repo=$HOME/.protected-bare-git; repo=$repo/.; git --git-dir=$repo --work-tree=$HOME status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "self-referential repo alias then raw git-dir status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'repo=$HOME/.protected-bare-git; GIT_DIR=$repo GIT_WORK_TREE=$HOME git status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "assigned repo then GIT_DIR status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'repo=$HOME/.protected-bare-git; GIT_DIR=$repo/. GIT_WORK_TREE=$HOME git status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "assigned repo then GIT_DIR trailing marker path: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'export repo=$HOME/.protected-bare-git; git --git-dir=$repo --work-tree=$HOME status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "exported repo then raw git-dir status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'export repo=$HOME/.protected-bare-git; export -n repo; git --git-dir=$repo --work-tree=$HOME status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "unexported repo still visible to parent shell: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'repo=$HOME/.protected-bare-git; unset -f repo; git --git-dir=$repo --work-tree=$HOME status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "unset -f repo leaves parent variable visible: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'export GIT_DIR=$HOME/.protected-bare-git GIT_WORK_TREE=$HOME; git status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "exported GIT_DIR then status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'export GIT_DIR=$HOME/.protected-bare-git GIT_WORK_TREE=$HOME; unset GIT_DIR; git status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "unset exported GIT_DIR before parent status: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'export GIT_DIR=$HOME/.protected-bare-git GIT_WORK_TREE=$HOME; unset -v GIT_DIR; git status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "unset -v exported GIT_DIR before parent status: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'readonly repo=$HOME/.protected-bare-git; git --git-dir=$repo --work-tree=$HOME status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "readonly repo then raw git-dir status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'readonly repo=$HOME/.protected-bare-git; unset repo; git --git-dir=$repo --work-tree=$HOME status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "readonly repo survives unset attempt: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'declare repo=$HOME/.protected-bare-git; git --git-dir=$repo --work-tree=$HOME status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "declared repo then raw git-dir status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'declare -x repo=$HOME/.protected-bare-git; bash -lc '\''git --git-dir=$repo --work-tree=$HOME status -uall'\''' '{"tool_input":{"command":$c}}')"
+_assert_eq "declare -x repo visible to nested bash: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'typeset -x repo=$HOME/.protected-bare-git; bash -lc '\''git --git-dir=$repo --work-tree=$HOME status -uall'\''' '{"tool_input":{"command":$c}}')"
+_assert_eq "typeset -x repo visible to nested bash: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'export home=$HOME; export repo=$home/.protected-bare-git; bash -lc '\''git --git-dir=$repo --work-tree=$home status -uall'\''' '{"tool_input":{"command":$c}}')"
+_assert_eq "exported home alias visible to nested bash: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'home=$HOME; export repo=$home/.protected-bare-git; bash -lc '\''git --git-dir=$repo --work-tree=$HOME status -uall'\''' '{"tool_input":{"command":$c}}')"
+_assert_eq "exported expanded alias visible to nested bash: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'export repo=$HOME/.protected-bare-git; declare +x repo; bash -lc '\''git --git-dir=$repo --work-tree=$HOME status -uall'\''' '{"tool_input":{"command":$c}}')"
+_assert_eq "declare +x repo hidden from nested bash: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'repo=$HOME/.protected-bare-git; export -f repo; bash -lc '\''git --git-dir=$repo --work-tree=$HOME status -uall'\''' '{"tool_input":{"command":$c}}')"
+_assert_eq "export -f repo does not export variable to nested bash: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'export repo=$HOME/.protected-bare-git; export -f repo; bash -lc '\''git --git-dir=$repo --work-tree=$HOME status -uall'\''' '{"tool_input":{"command":$c}}')"
+_assert_eq "export -f repo leaves existing exported variable visible: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=status.showUntrackedFiles GIT_CONFIG_VALUE_0=all git status"}}'
+_assert_eq "git config env untracked status: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=status.show'Untracked'Files GIT_CONFIG_VALUE_0=all git status" '{"tool_input":{"command":$c}}')"
+_assert_eq "quoted git config env untracked status: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=status.showUntrackedFiles GIT_CONFIG_VALUE_0=false git status"}}'
+_assert_eq "git config env false untracked status: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=status.showUntrackedFiles GIT_CONFIG_VALUE_0=false GIT_CONFIG_KEY_1=status.showUntrackedFiles GIT_CONFIG_VALUE_1=all git status"}}'
+_assert_eq "git config env later untracked status: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=status.showUntrackedFiles GIT_CONFIG_VALUE_0=all GIT_CONFIG_KEY_1=status.showUntrackedFiles GIT_CONFIG_VALUE_1=false git status"}}'
+_assert_eq "git config env later false status: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_1=status.showUntrackedFiles GIT_CONFIG_VALUE_1=all GIT_CONFIG_KEY_0=status.showUntrackedFiles GIT_CONFIG_VALUE_0=false git status"}}'
+_assert_eq "git config env indexed later untracked status: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=status.showUntrackedFiles GIT_CONFIG_VALUE_0=all; git status"}}'
+_assert_eq "exported git config env then status: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git -c status.showUntrackedFiles=all status --untracked-files=no"}}'
+_assert_eq "git config overridden by status --untracked-files=no: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=status.showUntrackedFiles GIT_CONFIG_VALUE_0=all git status --untracked-files=no"}}'
+_assert_eq "git config env overridden by status --untracked-files=no: allowed" "0" "$HOOK_EXIT"
+
+_test_summary

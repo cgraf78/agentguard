@@ -1,0 +1,708 @@
+#!/usr/bin/env bash
+# agent-hook-pre-bash — PreToolUse guard for Bash commands.
+
+# macOS can resolve `/usr/bin/env bash` to Bash 3 when launchers provide a
+# minimal PATH. The classifier uses Bash 4+ features, so re-exec a modern Bash
+# before reading stdin; the JSON payload is still available to the new process.
+if [ -n "${BASH_VERSION:-}" ] && [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] &&
+  [ -z "${AGENTGUARD_HOOK_BASH_REEXEC:-}" ]; then
+  for _hook_bash in "$HOME/.local/bin/bash" /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    if [ -x "$_hook_bash" ]; then
+      AGENTGUARD_HOOK_BASH_REEXEC=1 exec "$_hook_bash" "$0" "$@"
+    fi
+  done
+fi
+
+set -u
+_HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}" # captured before sourcing so _hook_source_extensions finds agent/local variants
+_hook_script_parent() {
+  case "$1" in
+    */*) printf '%s\n' "${1%/*}" ;;
+    *) printf '.\n' ;;
+  esac
+}
+
+_hook_script_dir() {
+  local path="$1" dir target
+  while [[ -L "$path" ]]; do
+    dir=$(cd -P -- "$(_hook_script_parent "$path")" && pwd) || return 1
+    target=$(readlink "$path") || return 1
+    [[ "$target" == /* ]] || target="$dir/$target"
+    path="$target"
+  done
+  cd -P -- "$(_hook_script_parent "$path")" && pwd
+}
+
+_HOOK_BIN_DIR=$(_hook_script_dir "${BASH_SOURCE[0]}") || {
+  echo "${0##*/}: cannot resolve executable path" >&2
+  exit 2
+}
+source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
+
+_hook_parse_command
+
+_pre_bash_git_env_forces_classifier() {
+  # Git env can redirect even a plain `git status --short` to a configured
+  # protected bare repo or override untracked behavior, so keep those cases on
+  # the full scanner that understands ambient Git state.
+  [ -n "${GIT_DIR:-}" ] && return 0
+  [ -n "${GIT_WORK_TREE:-}" ] && return 0
+
+  local count="${GIT_CONFIG_COUNT:-}" key_name value_name key value i
+  [[ "$count" =~ ^[0-9]+$ ]] || return 1
+
+  for ((i = 0; i < count; i++)); do
+    key_name="GIT_CONFIG_KEY_$i"
+    value_name="GIT_CONFIG_VALUE_$i"
+    key="${!key_name-}"
+    value="${!value_name-}"
+    [ "$key" = "status.showUntrackedFiles" ] || continue
+    case "$value" in
+      no | false | 0)
+        ;;
+      *)
+        return 0
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+_pre_bash_safe_git_status_command() {
+  local text="$1" word status_seen=0 status_mode=0 i
+  local -a words=()
+
+  # Keep this parser intentionally narrower than Bash. Anything needing
+  # quoting, globbing, pathspecs, or config/env interpretation stays on the
+  # full classifier path.
+  case "$text" in
+    *"'"* | *\"* | *\\* | *"["* | *"]"* | *"*"* | *"?"*)
+      return 1
+      ;;
+  esac
+  _pre_bash_git_env_forces_classifier && return 1
+
+  read -r -a words <<<"$text"
+  [ "${#words[@]}" -ge 3 ] || return 1
+
+  word="${words[0]##*/}"
+  [ "$word" = "git" ] || return 1
+
+  i=1
+  while [ "$i" -lt "${#words[@]}" ]; do
+    word="${words[$i]}"
+    case "$word" in
+      --no-optional-locks | --no-pager)
+        i=$((i + 1))
+        ;;
+      status)
+        status_seen=1
+        i=$((i + 1))
+        break
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done
+  [ "$status_seen" -eq 1 ] || return 1
+
+  while [ "$i" -lt "${#words[@]}" ]; do
+    word="${words[$i]}"
+    case "$word" in
+      --short | -s | -sb | -bs | --porcelain | --porcelain=v1 | --porcelain=v2)
+        # Require an explicit machine/short output mode so a bare `git status`
+        # cannot inherit a config that performs an expensive untracked scan.
+        status_mode=1
+        ;;
+      --branch | -b | --show-stash | --ahead-behind | --no-ahead-behind | \
+        --renames | --no-renames | --find-renames | --find-renames=* | \
+        --ignore-submodules | --ignore-submodules=*)
+        ;;
+      --untracked-files=no | --untracked-files=never | --untracked=no | \
+        --untracked=never | -uno)
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+    i=$((i + 1))
+  done
+
+  [ "$status_mode" -eq 1 ]
+}
+
+_pre_bash_needs_classifier() {
+  local text="$1" word _rest
+
+  # Keep the common "plain inspection command" path cheap. Shell control
+  # syntax, nesting, heredocs, and escapes still go through the full classifier;
+  # otherwise only the actual leading command word decides. This keeps commands
+  # like `rg sley_hook_lint_file` or `sed ...agent-hook-pre-bash` fast without
+  # weakening guarded top-level commands such as `sley`, `bash`, or `rm`.
+  case "$text" in
+    *\$\(* | *\`* | *\<\(* | *\>\(* | *\<\<* | *\&\&* | *\|\|* | \
+      *";"* | *"|"* | *"!"* | *"{"* | *"}"* | *"("* | *")"* | *\\* | *$'\n'*)
+      return 0
+      ;;
+  esac
+
+  read -r word _rest <<<"$text"
+  [ -n "$word" ] || return 1
+  case "$word" in
+    *=* | *"'"* | *\"* | *\\*)
+      return 0
+      ;;
+  esac
+  word="${word%\"}"
+  word="${word#\"}"
+  word="${word%\'}"
+  word="${word#\'}"
+  word="${word//\\/}"
+  word="${word##*/}"
+
+  case "$word" in
+    git)
+      _pre_bash_safe_git_status_command "$text" && return 1
+      return 0
+      ;;
+    grep | find | git-absorb | sl | sley | \
+      rm | sudo | doas | kill | pkill | killall | chmod | \
+      vim | vi | nvim | view | nano | pico | joe | micro | emacs | \
+      man | info | top | htop | btop | atop | gdb | lldb | watch | \
+      bash | sh | zsh | fish | env | eval | \
+      coproc | time | command | builtin | nohup | nice | timeout | xargs)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+if _pre_bash_needs_classifier "$CMD_TRIMMED"; then
+  # shellcheck source=../lib/agentguard/hook-command-classifier.sh
+  source "$_HOOK_BIN_DIR/../lib/agentguard/hook-command-classifier.sh"
+  _hook_cache_executable_fragments "$CMD_TRIMMED"
+else
+  _hook_source_extensions
+  _hook_finish
+fi
+
+# --- Sley commit gate helpers ---
+# Defined before _hook_run_guards so both the bulk classifier and
+# _sley_commit_gate can call them.
+
+# Pre-commit readiness gate. `sley ready` runs status, check, secrets, and
+# verify with cache receipts and returns a single rc:
+#   0 → all phases pass; gate is silent
+#   1 → a phase is blocking; surface the report and block the commit
+#   2 → unsupported repo or hard error. Skip silently when sley reports
+#       "unsupported repo" so untyped checkouts still commit; surface other
+#       rc=2 cases as warnings without blocking.
+# Plain `git commit` can operate on a configured protected bare repo via a Git
+# launcher. Run plain `sley` from the command cwd so the Sley launcher applies
+# the same buffer/cwd-local repository decision.
+# `sl amend|commit` forces `_REPO_TYPE=sl` so dual-managed repos (Sapling clone
+# with .git dir) don't fall back to git auto-detection.
+
+_git_commit_command() {
+  local fragment
+  while IFS= read -r fragment; do
+    _git_subcommand_is "$fragment" "commit" && return 0
+  done < <(_hook_executable_fragments "$CMD_TRIMMED")
+  return 1
+}
+
+_git_commit_effective_dir() {
+  local fragment
+  while IFS= read -r fragment; do
+    _git_subcommand_effective_dir "$fragment" "commit" && return 0
+  done < <(_hook_executable_fragments "$CMD_TRIMMED")
+  return 1
+}
+
+_git_commit_amend_command() {
+  local fragment
+  while IFS= read -r fragment; do
+    _git_subcommand_has_option "$fragment" "commit" "--amend" && return 0
+  done < <(_hook_executable_fragments "$CMD_TRIMMED")
+  return 1
+}
+
+_sl_metadata_only_fragment() {
+  local fragment="$1"
+  _command_subcommand_is "$fragment" "sl" "metaedit" && return 0
+  _command_subcommand_has_option "$fragment" "sl" "amend" "-m" && return 0
+  _command_subcommand_has_option "$fragment" "sl" "amend" "--message" && return 0
+  return 1
+}
+
+_sl_commit_command() {
+  local fragment
+  while IFS= read -r fragment; do
+    _command_subcommand_is "$fragment" "sl" "amend" "commit" || continue
+    _sl_metadata_only_fragment "$fragment" && continue
+    return 0
+  done < <(_hook_executable_fragments "$CMD_TRIMMED")
+  return 1
+}
+
+_sley_commit_command() {
+  _git_commit_command || _sl_commit_command
+}
+
+# The gate enforces mechanical readiness; review/simplify are separate
+# design checks. Suppress the review nudge for message-only amends.
+_sley_commit_gate() {
+  _sley_commit_command || return 0
+
+  local skip=0
+  local run_dir="$PWD"
+  local repo_type=""
+  local sley_out=""
+  local rc=0
+
+  if [ "${SLEY_AGENT_GATE:-1}" != "0" ]; then
+    _hook_require_sley || return 0
+
+    run_dir="$(_git_commit_effective_dir || printf '%s' "$PWD")"
+
+    # Force `_REPO_TYPE=sl` only when the target dir is actually a Sapling
+    # checkout; dual-managed repos with `.git` need Sapling detection, but
+    # non-Sapling trees should not call environment-specific Sapling hooks.
+    if _sl_commit_command && [ -d "$run_dir/.sl" ]; then
+      repo_type=sl
+    fi
+
+    # Message-only git amends do not change code, so the original commit gate
+    # result still applies. Amends with staged content continue through sley.
+    if _git_commit_amend_command; then
+      git -C "$run_dir" diff --cached --quiet 2>/dev/null && skip=1
+    fi
+
+    if [ "$skip" -eq 0 ]; then
+      # --quiet emits only failures. SLEY_VERIFY_STATE_DIR lets local extensions check
+      # whether the verify phase ran without parsing sley's human output.
+      sley_out=$(
+        cd "$run_dir" 2>/dev/null || exit 0
+        if [ -n "$repo_type" ]; then
+          _REPO_TYPE="$repo_type" SLEY_VERIFY_STATE_DIR="$_HOOK_STATE_DIR" \
+            sley ready --fix --quiet --commit
+        else
+          SLEY_VERIFY_STATE_DIR="$_HOOK_STATE_DIR" \
+            sley ready --fix --quiet --commit
+        fi
+      ) 2>&1
+      rc=$?
+
+      case "$rc" in
+        0) ;;
+        1)
+          _hook_block "sley ready blocked the commit:
+$sley_out"
+          ;;
+        2)
+          case "$sley_out" in
+            *"unsupported repo"*) ;;
+            *) _hook_warn "sley ready could not run cleanly (rc=2):
+$sley_out" ;;
+          esac
+          ;;
+        *)
+          _hook_warn "sley ready exited with status $rc:
+$sley_out"
+          ;;
+      esac
+    fi
+  fi
+
+  if [ "$skip" -eq 0 ]; then
+    _hook_remind 'Consider running /review or /simplify on your changes before committing.'
+  fi
+}
+
+# --- Bulk guard classification ---
+# Performance optimization: the original code ran 13+ independent guard
+# functions, each iterating all cached fragments and calling
+# _fragment_command_word (~20ms per call due to tokenizer subshells).
+# For a simple `ls -la`, that was 13 × 20ms = ~260ms just for command
+# word extraction, plus process substitution overhead per guard.
+#
+# This single-pass approach iterates fragments once, extracts the command
+# word once per fragment, and dispatches all guards from a case statement.
+# Guards that need deeper analysis (git subcommands, rm flags, kill signals)
+# only fire when the command word matches their target — which is rare for
+# the vast majority of agent commands. Non-matching commands (ls, echo, cat,
+# etc.) fall through the case statement in ~0ms after the single
+# _fragment_command_word call.
+#
+# Results are stored in _GUARD_* variables (0/1 for boolean guards, ""
+# or "block"/"warn" for classification guards) and applied after the
+# function returns so block/warn messages maintain the same order as the
+# original sequential checks.
+#
+# The plain-command prefilter above means commands like fd/rg/sed/cat/ls skip
+# this classifier entirely. This dispatcher is still worth keeping for the
+# conservative path, but it intentionally duplicates some policy parsing from
+# hook-command-classifier.sh to avoid re-tokenizing each fragment per guard.
+# If future changes add or move guard logic, keep that single-pass constraint
+# in mind and run the broad pre-bash guard suites; otherwise it is easy to
+# regain latency or leave the fast dispatcher out of sync with the helpers.
+
+_hook_run_guards() {
+  _GUARD_GREP_RECURSIVE=0
+  _GUARD_FIND_BLOCK=0
+  _GUARD_GIT_ABSORB=0
+  _GUARD_SUDO=0
+  _GUARD_GIT_RESET_HARD=0
+  _GUARD_GIT_CLEAN_FORCE=0
+  _GUARD_GIT_PUSH_FORCE=0
+  _GUARD_TTY_REQUIRED=0
+  _GUARD_GIT_COMMIT=0
+  _GUARD_SL_COMMIT=0
+  _GUARD_RM_RF=""
+  _GUARD_KILL=""
+  _GUARD_CHMOD=""
+
+  [ -n "${_HOOK_EXECUTABLE_FRAGMENTS_CACHE_VALUE:-}" ] || return 0
+
+  local frag cw word i
+  local -a words=()
+
+  while IFS= read -r frag; do
+    [ -n "$frag" ] || continue
+
+    # THE key optimization: one _fragment_command_word per fragment instead
+    # of 13. This single call costs ~20ms; the case dispatch below is free
+    # for non-matching command words.
+    cw=$(_fragment_command_word "$frag") || continue
+
+    # Sudo/doas: agents have no legitimate need for root privilege escalation.
+    # _fragment_command_word skips privilege wrappers transparently, so we
+    # check the token preamble (everything before the real command index)
+    # directly. String prefilter avoids paying for tokenization on fragments
+    # that don't contain sudo/doas at all.
+    if [ "$_GUARD_SUDO" -eq 0 ]; then
+      case "$frag" in
+        *sudo* | *doas*)
+          words=()
+          while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$frag")
+          local ci
+          ci=$(_fragment_command_index "$frag") || ci=${#words[@]}
+          for ((i = 0; i < ci; i++)); do
+            _word_is_privilege_wrapper "${words[$i]:-}" && {
+              _GUARD_SUDO=1
+              break
+            }
+          done
+          ;;
+      esac
+    fi
+
+    case "$cw" in
+      # Block grep -r/grep -R — they don't respect .ignore rules and will
+      # crawl into large repos. Use rg instead.
+      grep | */grep)
+        if [ "$_GUARD_GREP_RECURSIVE" -eq 0 ]; then
+          read -r -a words <<<"$frag"
+          for word in "${words[@]}"; do
+            word=$(_shell_word_token "$word")
+            [ "$word" = "--" ] && break
+            [[ "$word" == -* ]] || continue
+            if [[ "$word" == --* ]]; then
+              [ "$word" = "--recursive" ] && {
+                _GUARD_GREP_RECURSIVE=1
+                break
+              }
+            else
+              [[ "${word#-}" == *[rR]* ]] && {
+                _GUARD_GREP_RECURSIVE=1
+                break
+              }
+            fi
+          done
+        fi
+        ;;
+
+      # Block `find` invocations. Bare `find` recursively lists CWD;
+      # `find <path>` with a path-like first argument crawls that tree.
+      # _fragment_first_arg strips quotes and backslashes, so this catches
+      # quoted targets, escaped paths, and variable-based starts like
+      # `$HOME`/`${repo}` without tripping on prose such as "find next/prev".
+      find | */find)
+        if [ "$_GUARD_FIND_BLOCK" -eq 0 ]; then
+          local fnext
+          fnext=$(_fragment_first_arg "$frag") || {
+            _GUARD_FIND_BLOCK=1
+            continue
+          }
+          [[ "$fnext" == [./~*-]* || "$fnext" == \$* ]] && _GUARD_FIND_BLOCK=1
+        fi
+        ;;
+
+      # Git subcommand guards. Only tokenize for subcommands that need
+      # option parsing (clean -f, push --force); absorb, reset, and commit
+      # use the classifier's existing subcommand matchers directly.
+      git | */git)
+        # `git absorb` leaves fixup commits behind unless the caller runs
+        # the matching autosquash rebase; use absorb-and-rebase instead.
+        [ "$_GUARD_GIT_ABSORB" -eq 0 ] &&
+          _git_subcommand_is "$frag" "absorb" && _GUARD_GIT_ABSORB=1
+        # `git reset --hard` discards all uncommitted changes without recovery.
+        [ "$_GUARD_GIT_RESET_HARD" -eq 0 ] &&
+          _git_subcommand_has_option "$frag" "reset" "--hard" && _GUARD_GIT_RESET_HARD=1
+        # `git clean -f` and combined forms (-fd, -df, -fdx, etc.) — deletes
+        # untracked files. Dry-run (-n/--dry-run) is never matched.
+        if [ "$_GUARD_GIT_CLEAN_FORCE" -eq 0 ] && _git_subcommand_is "$frag" "clean"; then
+          words=()
+          while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$frag")
+          i=$(_git_subcommand_index "$frag" "clean") || i=${#words[@]}
+          i=$((i + 1))
+          while [ "$i" -lt "${#words[@]}" ]; do
+            word=$(_clean_command_word "${words[$i]}")
+            case "$word" in
+              --) break ;;
+              --force)
+                _GUARD_GIT_CLEAN_FORCE=1
+                break
+                ;;
+              -?*) [[ "${word#-}" == *f* ]] && {
+                _GUARD_GIT_CLEAN_FORCE=1
+                break
+              } ;;
+            esac
+            ((i++))
+          done
+        fi
+        # `git push --force` / `-f` / `--force-with-lease` — rewrites remote history.
+        if [ "$_GUARD_GIT_PUSH_FORCE" -eq 0 ] && _git_subcommand_is "$frag" "push"; then
+          words=()
+          while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$frag")
+          i=$(_git_subcommand_index "$frag" "push") || i=${#words[@]}
+          i=$((i + 1))
+          while [ "$i" -lt "${#words[@]}" ]; do
+            word=$(_clean_command_word "${words[$i]}")
+            case "$word" in
+              --) break ;;
+              --force | --force-with-lease | --force-with-lease=*)
+                _GUARD_GIT_PUSH_FORCE=1
+                break
+                ;;
+              -?*) [[ "${word#-}" == *f* ]] && {
+                _GUARD_GIT_PUSH_FORCE=1
+                break
+              } ;;
+            esac
+            ((i++))
+          done
+        fi
+        # Detect git commit for the sley readiness gate and public-repo reminder.
+        [ "$_GUARD_GIT_COMMIT" -eq 0 ] &&
+          _git_subcommand_is "$frag" "commit" && _GUARD_GIT_COMMIT=1
+        ;;
+
+      # Standalone git-absorb binary (same policy as `git absorb` subcommand).
+      git-absorb | */git-absorb)
+        _GUARD_GIT_ABSORB=1
+        ;;
+
+      # Sapling commit detection for the sley readiness gate.
+      # Matches `sl amend` and `sl commit` but excludes metadata-only
+      # operations (sl metaedit, sl amend -m) that don't change code.
+      sl | */sl)
+        if [ "$_GUARD_SL_COMMIT" -eq 0 ]; then
+          if _command_subcommand_is "$frag" "sl" "amend" "commit"; then
+            _sl_metadata_only_fragment "$frag" || _GUARD_SL_COMMIT=1
+          fi
+        fi
+        ;;
+
+      # Block rm -rf on dangerous paths (/ ~ $HOME . ..), warn on all other rm -rf.
+      # Accumulates across fragments: "block" in any fragment overrides "warn".
+      rm | */rm)
+        if [ "$_GUARD_RM_RF" != "block" ]; then
+          local rmstate
+          rmstate=$(_rm_fragment_rf_state "$frag") || true
+          case "$rmstate" in
+            block) _GUARD_RM_RF="block" ;;
+            warn) [ -z "$_GUARD_RM_RF" ] && _GUARD_RM_RF="warn" ;;
+          esac
+        fi
+        ;;
+
+      # Broad process-kill classifier:
+      #   block — kill PID 1 (init/launchd)
+      #   warn  — kill -9 / SIGKILL (hard kill with no cleanup)
+      # Accumulates warn across fragments so a later block is never masked.
+      kill | */kill)
+        if [ "$_GUARD_KILL" != "block" ]; then
+          words=()
+          while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$frag")
+          i=$(_fragment_command_index "$frag") || continue
+          i=$((i + 1))
+          local has_sigkill=0
+          while [ "$i" -lt "${#words[@]}" ]; do
+            word=$(_clean_command_word "${words[$i]}")
+            case "$word" in
+              --) break ;;
+              -9 | -KILL | -SIGKILL) has_sigkill=1 ;;
+              -s | --signal)
+                ((i++))
+                [ "$i" -lt "${#words[@]}" ] || break
+                word=$(_clean_command_word "${words[$i]}")
+                case "$word" in KILL | SIGKILL | 9) has_sigkill=1 ;; esac
+                ;;
+              --signal=KILL | --signal=SIGKILL | --signal=9) has_sigkill=1 ;;
+              -*) ;;
+              1) _GUARD_KILL="block" ;;
+            esac
+            ((i++))
+          done
+          [ "$has_sigkill" -eq 1 ] && [ "$_GUARD_KILL" != "block" ] && _GUARD_KILL="warn"
+        fi
+        ;;
+
+      # killall/pkill affect all matching processes — always warn.
+      killall | */killall | pkill | */pkill)
+        [ "$_GUARD_KILL" != "block" ] && [ -z "$_GUARD_KILL" ] && _GUARD_KILL="warn"
+        ;;
+
+      # World-writable chmod modes:
+      #   block — 777/0777 (world read+write+execute)
+      #   warn  — 666/0666 or symbolic modes granting world write (o+w, a+w)
+      # Accumulates warn across fragments so a later block is never masked.
+      chmod | */chmod)
+        if [ "$_GUARD_CHMOD" != "block" ]; then
+          words=()
+          while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$frag")
+          i=$(_fragment_command_index "$frag") || continue
+          i=$((i + 1))
+          local found_mode=0
+          while [ "$i" -lt "${#words[@]}" ]; do
+            word=$(_clean_command_word "${words[$i]}")
+            case "$word" in
+              --) break ;;
+              -*) ;;
+              *)
+                if [ "$found_mode" -eq 0 ]; then
+                  found_mode=1
+                  case "$word" in
+                    777 | 0777) _GUARD_CHMOD="block" ;;
+                    666 | 0666) [ -z "$_GUARD_CHMOD" ] && _GUARD_CHMOD="warn" ;;
+                    *o+w* | *a+w* | *o=rw* | *a=rw*) [ -z "$_GUARD_CHMOD" ] && _GUARD_CHMOD="warn" ;;
+                  esac
+                fi
+                ;;
+            esac
+            ((i++))
+          done
+        fi
+        ;;
+
+      # Block interactive TTY commands — they will silently hang the agent turn.
+      vim | vi | nvim | view | */vim | */vi | */nvim | */view | \
+        nano | pico | joe | micro | */nano | */pico | */joe | */micro | \
+        emacs | */emacs | \
+        man | info | */man | */info | \
+        top | htop | btop | atop | */top | */htop | */btop | */atop | \
+        gdb | lldb | */gdb | */lldb | \
+        watch | */watch)
+        _GUARD_TTY_REQUIRED=1
+        ;;
+    esac
+  done <<<"$_HOOK_EXECUTABLE_FRAGMENTS_CACHE_VALUE"
+}
+
+_hook_run_guards
+
+# --- Apply guard results ---
+# Command-detection guards use the classifier's heredoc-aware full-command
+# view: prose heredoc bodies stay inert, but executable expansions in active
+# heredocs and substitutions still get inspected before the shell can run them.
+
+# Block grep -r/grep -R.
+[ "$_GUARD_GREP_RECURSIVE" -eq 1 ] &&
+  _hook_block 'use rg instead of grep -r. rg respects .ignore rules and skips large repos automatically.'
+
+# Block find.
+[ "$_GUARD_FIND_BLOCK" -eq 1 ] &&
+  _hook_block 'use fd instead of find. fd respects .ignore rules and skips large repos automatically.'
+
+# `git absorb-and-rebase` is the safe workflow: it creates the fixups
+# and immediately folds them with a non-interactive autosquash rebase. Blocking
+# raw absorb prevents agents from leaving loose fixup commits for the user to
+# clean up later.
+[ "$_GUARD_GIT_ABSORB" -eq 1 ] &&
+  _hook_block 'use git absorb-and-rebase instead of git absorb so fixups are autosquashed immediately.'
+
+# A configured protected bare repo can use a broad work tree such as $HOME.
+# Any raw untracked scan there asks Git to walk the whole tree, which is slow
+# enough to wedge agent turns. Integrations can expose safer front doors; raw
+# inspection must be scoped to a pathspec.
+if _protected_bare_git_scan_candidate "$CMD_TRIMMED"; then
+  # Keep the common path cheap: most commands never enter the scanner above.
+  _block_protected_bare_git_untracked_scans
+fi
+
+# Block rm -rf on dangerous paths, warn on all other rm -rf.
+case "$_GUARD_RM_RF" in
+  block)
+    _hook_block "rm -rf on / ~ \$HOME . or .. is never allowed"
+    ;;
+  warn)
+    _hook_warn 'rm -rf detected. Verify the target path is correct before proceeding.'
+    ;;
+esac
+
+# Short-circuit the sley commit gate: only enter when the bulk classifier
+# detected a commit command, saving ~50ms on the common non-commit path.
+if [ "$_GUARD_GIT_COMMIT" -eq 1 ] || [ "$_GUARD_SL_COMMIT" -eq 1 ]; then
+  _sley_commit_gate
+fi
+
+if [ "$_GUARD_GIT_COMMIT" -eq 1 ]; then
+  _hook_remind 'If this commit targets a public repo, verify no private or environment-specific details leak into staged code, comments, tests, generated files, docs, or the commit message.'
+fi
+
+# Block sudo — agents have no legitimate need for root privilege escalation.
+[ "$_GUARD_SUDO" -eq 1 ] &&
+  _hook_block 'sudo is not allowed. Run privileged commands manually.'
+
+# Block git reset --hard — discards uncommitted changes with no recovery path.
+[ "$_GUARD_GIT_RESET_HARD" -eq 1 ] &&
+  _hook_block 'git reset --hard discards uncommitted changes permanently. Use git stash or commit first, then reset.'
+
+# Block git clean -f — deletes untracked files permanently.
+[ "$_GUARD_GIT_CLEAN_FORCE" -eq 1 ] &&
+  _hook_block 'git clean -f deletes untracked files permanently. Review with git clean -n first, then run manually.'
+
+# Block git push --force — rewrites remote history and can destroy others' work.
+[ "$_GUARD_GIT_PUSH_FORCE" -eq 1 ] &&
+  _hook_block 'git push --force rewrites remote history. Force-pushes must be run manually.'
+
+# Block interactive TTY commands — they will silently hang the agent turn.
+[ "$_GUARD_TTY_REQUIRED" -eq 1 ] &&
+  _hook_block 'This command requires an interactive TTY and will hang. Use a non-interactive alternative (e.g. PAGER=cat, --no-pager, -batch).'
+
+# Broad process kills.
+case "$_GUARD_KILL" in
+  block)
+    _hook_block 'Killing PID 1 (init/launchd) is not allowed.'
+    ;;
+  warn)
+    _hook_warn 'This kill command affects all matching processes. Verify the target is correct before proceeding.'
+    ;;
+esac
+
+# chmod overreach.
+case "$_GUARD_CHMOD" in
+  block)
+    _hook_block 'chmod 777 grants world read+write+execute access. Use a restrictive mode (e.g. 755, 644).'
+    ;;
+  warn)
+    _hook_warn 'This chmod grants world-write access. Verify the mode and path are intentional.'
+    ;;
+esac
+
+_hook_source_extensions
+_hook_finish

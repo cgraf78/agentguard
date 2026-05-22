@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# agent-hook-prompt-submit — UserPromptSubmit handler.
+# Delegates durable-memory reminders and context freshness to `hm hook`.
+# Local `-work` variants can still add environment-specific prompt context afterward.
+
+set -u
+_HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}" # captured before sourcing so _hook_source_extensions finds agent/local variants
+_hook_script_parent() {
+  case "$1" in
+    */*) printf '%s\n' "${1%/*}" ;;
+    *) printf '.\n' ;;
+  esac
+}
+
+_hook_script_dir() {
+  local path="$1" dir target
+  while [[ -L "$path" ]]; do
+    dir=$(cd -P -- "$(_hook_script_parent "$path")" && pwd) || return 1
+    target=$(readlink "$path") || return 1
+    [[ "$target" == /* ]] || target="$dir/$target"
+    path="$target"
+  done
+  cd -P -- "$(_hook_script_parent "$path")" && pwd
+}
+
+_HOOK_BIN_DIR=$(_hook_script_dir "${BASH_SOURCE[0]}") || {
+  echo "${0##*/}: cannot resolve executable path" >&2
+  exit 2
+}
+source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
+
+_hook_hm_prompt_submit
+_hook_source_extensions
+_hook_finish

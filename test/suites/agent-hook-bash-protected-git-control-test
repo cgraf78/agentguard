@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# agent-hook-bash-protected-git-control-test — protected bare-Git guard control forms.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+_mock_protected_bare_git_home
+
+echo ""
+echo "=== pre-bash: protected bare-Git control-form guards ==="
+
+_ansi_quote="'"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c $'echo ok\ngit status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "multiline git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c $'echo ok; git status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "semicolon git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'case x in x) git status -uall;; esac' '{"tool_input":{"command":$c}}')"
+_assert_eq "case arm git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'case x in y) echo no;; x) git status -uall;; esac' '{"tool_input":{"command":$c}}')"
+_assert_eq "later case arm git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'f(){ git status -uall; }; f' '{"tool_input":{"command":$c}}')"
+_assert_eq "called function body git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'f () { git status -uall; }; f' '{"tool_input":{"command":$c}}')"
+_assert_eq "spaced function body git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'function f { git status -uall; }; f' '{"tool_input":{"command":$c}}')"
+_assert_eq "function keyword body git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'function f() { git status -uall; }; f' '{"tool_input":{"command":$c}}')"
+_assert_eq "function keyword parens body git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'f(){ repo=$HOME/.protected-bare-git; }; git --git-dir=$repo --work-tree=$HOME status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "function assignment does not leak to parent git: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'f(){ repo=$HOME/.protected-bare-git; }; f; git --git-dir=$repo --work-tree=$HOME status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "called function assignment leaks to parent git: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'f(){ GIT_DIR=$HOME/.protected-bare-git; GIT_WORK_TREE=$HOME; }; f; git status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "called function GIT_DIR assignment leaks to parent git: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'f(){ export repo=$HOME/.protected-bare-git; }; f; bash -lc '\''git --git-dir=$repo --work-tree=$HOME status -uall'\''' '{"tool_input":{"command":$c}}')"
+_assert_eq "called function exported assignment visible to nested bash: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'case x in y) repo=$HOME/.protected-bare-git;; esac; git --git-dir=$repo --work-tree=$HOME status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "case arm assignment does not leak to parent git: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'case x in x) repo=$HOME/.protected-bare-git;; esac; git --git-dir=$repo --work-tree=$HOME status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "selected case arm assignment leaks to parent git: blocked" "2" "$HOOK_EXIT"
+
+_ansi_heredoc_then_git_cmd="cat <<\$${_ansi_quote}EOF${_ansi_quote}"$'\nliteral\nEOF\ngit status -uall'
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_ansi_heredoc_then_git_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "ANSI-C quoted heredoc delimiter then git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_test_summary

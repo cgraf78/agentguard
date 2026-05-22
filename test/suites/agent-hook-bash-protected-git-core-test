@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# agent-hook-bash-protected-git-core-test — protected bare-Git guard core forms.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+_mock_protected_bare_git_home
+
+# ---------------------------------------------------------------------------
+# Tests: agent-hook-pre-bash — protected bare-Git untracked scan guard
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-bash: protected bare-Git untracked scan guard ==="
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status -uall"}}'
+_assert_eq "git status -uall: blocked" "2" "$HOOK_EXIT"
+_assert_contains "git status -uall: explains protected bare-Git status" \
+  "protected bare-Git status" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"\"git\" status -uall"}}'
+_assert_eq "quoted git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"'\''git'\'' status -uall"}}'
+_assert_eq "single-quoted git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"g\\it status -uall"}}'
+_assert_eq "escaped git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"\"git\" status -uall"}}'
+_assert_eq "quoted git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"g\\it status -uall"}}'
+_assert_eq "escaped git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "g'i't sta'tus' -uall" '{"tool_input":{"command":$c}}')"
+_assert_eq "internally quoted git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "g'i't sta'tus' -uall" '{"tool_input":{"command":$c}}')"
+_assert_eq "internally quoted git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked-files=all"}}'
+_assert_eq "git status --untracked-files=all: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$HOME/.local/bin/git status --untracked-files=all" '{"tool_input":{"command":$c}}')"
+_assert_eq "absolute local git launcher status untracked: blocked" "2" "$HOOK_EXIT"
+
+_dot_git_symlink="$TEST_TMPDIR/git"
+ln -sf "$HOME/.local/bin/git" "$_dot_git_symlink"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_dot_git_symlink status --untracked-files=all" '{"tool_input":{"command":$c}}')"
+_assert_eq "symlinked local git launcher status untracked: blocked" "2" "$HOOK_EXIT"
+
+# shellcheck disable=SC2088 # literal tilde is the behavior under test.
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "~/.local/bin/git status --untracked-files=all" '{"tool_input":{"command":$c}}')"
+_assert_eq "tilde local git launcher status untracked: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'git status --untracked"-"files=all' '{"tool_input":{"command":$c}}')"
+_assert_eq "git quoted untracked-files option: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked-files=normal"}}'
+_assert_eq "git status --untracked-files=normal: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked=all"}}'
+_assert_eq "git status --untracked=all: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked=normal"}}'
+_assert_eq "git status --untracked=normal: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked"}}'
+_assert_eq "git status --untracked: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status -unormal"}}'
+_assert_eq "git status -unormal: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status -u normal"}}'
+_assert_eq "git status -u normal: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --ignored"}}'
+_assert_eq "git status --ignored: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --ignored=matching"}}'
+_assert_eq "git status --ignored=matching: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git -c status.showUntrackedFiles=all status"}}'
+_assert_eq "git config untracked status: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "git -c status.show'Untracked'Files=all status" '{"tool_input":{"command":$c}}')"
+_assert_eq "git quoted config untracked status: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git -c status.showUntrackedFiles=normal status"}}'
+_assert_eq "git config normal untracked status: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git -c status.showUntrackedFiles=true status"}}'
+_assert_eq "git config true untracked status: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"UNTRACKED=all git --config-env=status.showUntrackedFiles=UNTRACKED status"}}'
+_assert_eq "git config-env untracked status: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git ls-files --others --exclude-standard"}}'
+_assert_eq "git ls-files --others: blocked without pathspec" "2" "$HOOK_EXIT"
+_assert_contains "git ls-files --others: suggests pathspec" "-- <path>" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'git ls"-"files --others --exclude-standard' '{"tool_input":{"command":$c}}')"
+_assert_eq "git quoted ls-files --others: blocked without pathspec" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git ls-files --othe --exclude-standard"}}'
+_assert_eq "git ls-files --othe: blocked without pathspec" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git ls-files --other --exclude-standard"}}'
+_assert_eq "git ls-files --other: blocked without pathspec" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git ls-files --o --exclude-standard"}}'
+_assert_eq "git ls-files --o: blocked without pathspec" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git ls-files -o --exclude-standard"}}'
+_assert_eq "git ls-files -o: blocked without pathspec" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git ls-files -co --exclude-standard"}}'
+_assert_eq "git ls-files -co: blocked without pathspec" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git ls-files -oc --exclude-standard"}}'
+_assert_eq "git ls-files -oc: blocked without pathspec" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "git --git-dir=$HOME/.protected-bare-git --work-tree=$HOME status -uall" '{"tool_input":{"command":$c}}')"
+_assert_eq "raw git --git-dir protected bare-Git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "/opt/homebrew/bin/git --git-dir=$HOME/.protected-bare-git --work-tree=$HOME status -uall" '{"tool_input":{"command":$c}}')"
+_assert_eq "absolute real git with protected bare-Git git-dir status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook_without_user "$PRE_BASH" "$(jq -nc --arg c "git --git-dir=$HOME/.protected-bare-git --work-tree=$HOME status -uall" '{"tool_input":{"command":$c}}')"
+_assert_eq "raw git-dir with unset USER: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'git --git"-"dir=$HOME/.protected-bare-git --work-tree=$HOME status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "raw git quoted git-dir protected bare-Git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git --git-dir ~/.protected-bare-git status -uall"}}'
+_assert_eq "raw git --git-dir literal tilde status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "git --git-dir=$HOME/.protected-bare-git/. --work-tree=$HOME status -uall" '{"tool_input":{"command":$c}}')"
+_assert_eq "raw git --git-dir protected bare-Git trailing marker path: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "git --git-dir=$HOME/.protected-bare-git/../.protected-bare-git --work-tree=$HOME status -uall" '{"tool_input":{"command":$c}}')"
+_assert_eq "raw git --git-dir protected bare-Git parent-segment path: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "git --git-dir=\"$HOME/.protected-bare-git\" status --untracked-files=normal" '{"tool_input":{"command":$c}}')"
+_assert_eq "raw quoted git-dir protected bare-Git status normal: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'git --git-dir=${HOME}/.protected-bare-git status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "raw braced HOME git-dir protected bare-Git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'git --git-dir="$HOME"/.protected-bare-git status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "raw split quoted HOME git-dir protected bare-Git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "GIT_DIR=$HOME/.protected-bare-git GIT_WORK_TREE=$HOME git ls-files --others --exclude-standard" '{"tool_input":{"command":$c}}')"
+_assert_eq "env GIT_DIR protected bare-Git ls-files --others: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "env GIT_DIR=$HOME/.protected-bare-git GIT_WORK_TREE=$HOME git status -uall" '{"tool_input":{"command":$c}}')"
+_assert_eq "env command GIT_DIR protected bare-Git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "sudo GIT_DIR=$HOME/.protected-bare-git GIT_WORK_TREE=$HOME git status -uall" '{"tool_input":{"command":$c}}')"
+_assert_eq "sudo GIT_DIR protected bare-Git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "doas GIT_DIR=$HOME/.protected-bare-git GIT_WORK_TREE=$HOME git status -uall" '{"tool_input":{"command":$c}}')"
+_assert_eq "doas GIT_DIR protected bare-Git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"/usr/bin/env git status --untracked-files=all"}}'
+_assert_eq "/usr/bin/env git status untracked: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"command env git status --untracked-files=all"}}'
+_assert_eq "command env git status untracked: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env -S '\''git status --untracked-files=all'\''"}}'
+_assert_eq "env split-string git status untracked: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"/usr/bin/env -S '\''git status --untracked-files=all'\''"}}'
+_assert_eq "/usr/bin/env split-string git status untracked: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env -S git status --untracked-files=all"}}'
+_assert_eq "env split-string git with trailing status args: blocked" "2" "$HOOK_EXIT"
+
+_test_summary

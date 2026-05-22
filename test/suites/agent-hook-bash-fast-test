@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# agent-hook-bash-fast-test — cheap pre-bash paths for common safe commands.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+_run_hook_trace() {
+  local hook="$1"
+  shift
+  local input="${1:-}"
+  HOOK_STDERR=""
+  HOOK_EXIT=0
+  local out_file err_file
+  out_file=$(mktemp "$TEST_TMPDIR/out.XXXXXX")
+  err_file=$(mktemp "$TEST_TMPDIR/err.XXXXXX")
+  if [ -n "$input" ]; then
+    printf '%s' "$input" |
+      AGENTGUARD_SESSION_ID="$TEST_SID" \
+        TMPDIR="$TEST_TMPDIR" \
+        AGENTGUARD_NAME="agent" \
+        CODEX_THREAD_ID="" \
+        bash -x "$hook" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
+  else
+    AGENTGUARD_SESSION_ID="$TEST_SID" \
+      TMPDIR="$TEST_TMPDIR" \
+      AGENTGUARD_NAME="agent" \
+      CODEX_THREAD_ID="" \
+      bash -x "$hook" >"$out_file" 2>"$err_file" </dev/null || HOOK_EXIT=$?
+  fi
+  HOOK_STDERR=$(cat "$err_file")
+  rm -f "$out_file" "$err_file"
+}
+
+echo ""
+echo "=== pre-bash: git fast path ==="
+
+_run_hook_trace "$PRE_BASH" '{"tool_input":{"command":"git status --short"}}'
+_assert_eq "git status --short: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains \
+  "git status --short: skips heavy classifier" \
+  "hook-command-classifier.sh" \
+  "$HOOK_STDERR"
+
+_run_hook_trace "$PRE_BASH" '{"tool_input":{"command":"git status --untracked-files=all"}}'
+_assert_eq "git status --untracked-files=all outside protected bare repo: allowed" "0" "$HOOK_EXIT"
+_assert_contains \
+  "git status --untracked-files=all: delegates to dependency hook" \
+  "agentguard/bin/agent-hook-pre-bash" \
+  "$HOOK_STDERR"
+_assert_not_contains \
+  "git status --untracked-files=all outside protected bare repo: no protected bare-Git scan block" \
+  "protected bare-Git" \
+  "$HOOK_STDERR"
+
+_test_summary

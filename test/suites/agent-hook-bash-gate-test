@@ -1,0 +1,483 @@
+#!/usr/bin/env bash
+# agent-hook-bash-gate-test — pre-bash sley ready commit gate.
+
+# shellcheck disable=SC2030,SC2031 # git config env is intentionally scoped to fixture subshells.
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+# ---------------------------------------------------------------------------
+# Tests: agent-hook-pre-bash — sley ready commit gate
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-bash: sley ready commit gate ==="
+
+# Mock sley. The mock echoes identifying markers (cwd and _REPO_TYPE) so tests
+# can assert which dispatch path the gate took without doing actual repo work.
+# MOCK_SLEY_RC and MOCK_SLEY_OUT control the return code and report text; both
+# default to a clean pass.
+gate_mockbin=$(_mock_bin)
+cat >"$gate_mockbin/sley" <<'MOCK'
+#!/usr/bin/env bash
+[ "$1" = "ready" ] || exit 0
+shift
+_rc="${MOCK_SLEY_RC:-0}"
+printf 'mock-sley=1\n'
+printf 'mock-args=%s\n' "$*"
+printf 'mock-pwd=%s\n' "$PWD"
+[ -n "${_REPO_TYPE:-}" ] && printf 'mock-repo-type=%s\n' "$_REPO_TYPE"
+[ -n "${MOCK_SLEY_OUT:-}" ] && printf '%s\n' "$MOCK_SLEY_OUT"
+# Mirror real sley: write verify marker on pass when state dir is provided.
+if [ "$_rc" = "0" ] && [ -n "${SLEY_VERIFY_STATE_DIR:-}" ]; then
+  mkdir -p "$SLEY_VERIFY_STATE_DIR" 2>/dev/null
+  : >"$SLEY_VERIFY_STATE_DIR/last-verify-pass" 2>/dev/null
+fi
+exit "$_rc"
+MOCK
+chmod +x "$gate_mockbin/sley"
+
+# All gate tests share this PATH so the hook resolves the mock binaries.
+_gate_path="$gate_mockbin:$PATH"
+
+# rc=0 — gate runs but stays silent on pass.
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=0 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git commit -m \"Update docs\""}}'
+_assert_eq "gate rc=0: exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "gate rc=0: silent (no BLOCKED)" "BLOCKED" "$HOOK_STDERR"
+_assert_not_contains "gate rc=0: silent (no WARNING)" "WARNING" "$HOOK_STDERR"
+_assert_contains "gate rc=0: public leak reminder still fires" \
+  "private or environment-specific details" "$HOOK_STDERR"
+
+# rc=1 — gate blocks and surfaces the report so the agent can see why.
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 MOCK_SLEY_OUT="check: 1 (blocking) — lint failures" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git commit -m \"Update docs\""}}'
+_assert_eq "gate rc=1: blocks" "2" "$HOOK_EXIT"
+_assert_contains "gate rc=1: BLOCKED prefix" "BLOCKED" "$HOOK_STDERR"
+_assert_contains "gate rc=1: includes report body" "lint failures" "$HOOK_STDERR"
+_assert_contains "gate rc=1: uses mutating commit scope" "mock-args=--fix --quiet --commit" "$HOOK_STDERR"
+
+# rc=2 + "unsupported repo" — gate falls through silently for untyped checkouts
+# and fresh temp dirs.
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=2 MOCK_SLEY_OUT="sley: unsupported repo" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git commit -m \"Update docs\""}}'
+_assert_eq "gate rc=2 unsupported: exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "gate rc=2 unsupported: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+_assert_not_contains "gate rc=2 unsupported: no WARNING" "WARNING" "$HOOK_STDERR"
+
+# rc=2 with other output — visible warning, but still not blocking.
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=2 MOCK_SLEY_OUT="sley verify: tool not installed" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git commit -m \"Update docs\""}}'
+_assert_eq "gate rc=2 other: exits 0 (warns, not blocks)" "0" "$HOOK_EXIT"
+_assert_contains "gate rc=2 other: emits WARNING" "WARNING" "$HOOK_STDERR"
+_assert_contains "gate rc=2 other: includes output" "tool not installed" "$HOOK_STDERR"
+
+# `git commit` runs plain sley from HOME so the local launcher can set up
+# the bare HOME repo context.
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 MOCK_SLEY_OUT="from-home-launcher" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git commit -m \"Bare repo\""}}'
+_assert_eq "git commit: gate blocks via sley launcher" "2" "$HOOK_EXIT"
+_assert_contains "git commit: runs sley from HOME" "mock-pwd=$HOME" "$HOOK_STDERR"
+_assert_contains "git commit: uses mutating commit scope" "mock-args=--fix --quiet --commit" "$HOOK_STDERR"
+_assert_contains "git commit: uses plain sley" "mock-sley=1" "$HOOK_STDERR"
+
+# `git -C <path> commit` cds into <path> before invoking sley so phases
+# evaluate against the targeted repo, not the agent's cwd.
+gate_repo=$(_tmpdir)
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 MOCK_SLEY_OUT="probing cwd" \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c "git -C $gate_repo commit -m foo" '{"tool_input":{"command":$c}}')"
+_assert_eq "git -C commit: gate blocks" "2" "$HOOK_EXIT"
+_assert_contains "git -C commit: sley runs in target repo" "mock-pwd=$gate_repo" "$HOOK_STDERR"
+
+# `git -C <path>` paths come in three shapes that all need to resolve:
+# absolute, double-quoted (e.g., contains a space), and tilde-prefixed.
+# Without expansion the literal token fails the directory check and the
+# gate silently falls back to $PWD — checking the wrong repo.
+gate_repo_quoted=$(_tmpdir)
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c "git -C \"$gate_repo_quoted\" commit -m foo" '{"tool_input":{"command":$c}}')"
+_assert_contains "git -C \"path\" commit: strips quotes" "mock-pwd=$gate_repo_quoted" "$HOOK_STDERR"
+
+gate_repo_spaces=$(_tmpdir)/repo\ with\ spaces
+mkdir -p "$gate_repo_spaces"
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c "git -C \"$gate_repo_spaces\" commit -m foo" '{"tool_input":{"command":$c}}')"
+_assert_contains "git -C \"path with spaces\" commit: preserves shell word" \
+  "mock-pwd=$gate_repo_spaces" "$HOOK_STDERR"
+
+# Tilde expansion: the candidate dir must exist under $HOME for the test to
+# verify the dispatch path. mktemp under $HOME is portable enough for a unit
+# test; clean it up explicitly afterward.
+gate_tilde_dir=$(mktemp -d "$HOME/sley-gate-test.XXXXXX")
+# Literal tilde is intentional — the hook receives the command BEFORE shell
+# expansion, so we must send the literal `~/...` token the agent would emit.
+# shellcheck disable=SC2088
+gate_tilde_short="~/${gate_tilde_dir#"$HOME"/}"
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c "git -C $gate_tilde_short commit -m foo" '{"tool_input":{"command":$c}}')"
+_assert_contains "git -C ~/path commit: expands tilde" "mock-pwd=$gate_tilde_dir" "$HOOK_STDERR"
+rm -rf "$gate_tilde_dir"
+
+# `sl amend|commit` exports `_REPO_TYPE=sl` so dual-managed repos (Sapling
+# clones with a `.git` dir) classify correctly instead of falling back to
+# git auto-detection. The override is gated on the target dir actually
+# containing a Sapling working copy (`.sl/`); without that guard, running
+# `sl amend` in a pure git checkout would force Sapling-specific local
+# extensions through a non-Sapling tree and error out.
+_fake_sl_repo=$(_tmpdir)
+mkdir "$_fake_sl_repo/.sl"
+gate_saved_pwd=$PWD
+
+cd "$_fake_sl_repo" || exit 1
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 MOCK_SLEY_OUT="probing repo type" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl amend"}}'
+_assert_eq "sl amend in .sl repo: gate blocks" "2" "$HOOK_EXIT"
+_assert_contains "sl amend in .sl repo: forces _REPO_TYPE=sl" "mock-repo-type=sl" "$HOOK_STDERR"
+_assert_contains "sl amend in .sl repo: uses mutating commit scope" "mock-args=--fix --quiet --commit" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl commit -m foo"}}'
+_assert_contains "sl commit in .sl repo: forces _REPO_TYPE=sl" "mock-repo-type=sl" "$HOOK_STDERR"
+
+# In a non-sapling cwd, the gate must NOT force `_REPO_TYPE=sl`. Otherwise
+# Sapling-specific local `sley_hook_*` functions target a git tree and produce
+# confusing tool errors that the gate would surface as a block.
+_non_sl_dir=$(_tmpdir)
+cd "$_non_sl_dir" || exit 1
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl amend"}}'
+_assert_not_contains "sl amend in non-sapling cwd: no _REPO_TYPE override" \
+  "mock-repo-type=" "$HOOK_STDERR"
+
+cd "$gate_saved_pwd" || exit 1
+
+# Plain `git commit` does not force _REPO_TYPE, so sley auto-detects from cwd.
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git commit -m foo"}}'
+_assert_not_contains "git commit: no _REPO_TYPE override" "mock-repo-type=" "$HOOK_STDERR"
+_assert_contains "git commit: plain sley" "mock-sley=1" "$HOOK_STDERR"
+
+# Metadata-only updates skip the gate. `sl amend -m` and `sl metaedit`
+# are always message-only. `git commit --amend` skips only when there
+# is no new staged content (the index is clean relative to HEAD).
+# We assert only on whether the gate ran, not on the overall hook rc,
+# since local extension commit-message validators run independently
+# of the gate and could legitimately block on message format issues.
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl amend -m \"new title\""}}'
+_assert_not_contains "sl amend -m: gate did not run" "mock-sley=1" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl metaedit"}}'
+_assert_not_contains "sl metaedit: gate did not run" "mock-sley=1" "$HOOK_STDERR"
+
+# git commit --amend: the gate checks `git diff --cached --quiet` to
+# distinguish message-only amends from amends that fold in new code.
+# Both tests need a real git repo so the diff check works.
+_amend_repo=$(_tmpdir)
+(
+  cd "$_amend_repo" || exit 1
+  export GIT_CONFIG_GLOBAL="$_amend_repo/.gitconfig-test"
+  : >"$GIT_CONFIG_GLOBAL"
+  git init -q
+  git config user.email test@test.local
+  git config user.name "Test User"
+  echo "x = 1" >file.py
+  git add file.py
+  git commit -q -m "seed"
+)
+_amend_saved_pwd=$PWD
+
+# No staged changes → message-only amend → gate skips.
+cd "$_amend_repo" || exit 1
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git commit --amend --no-edit"}}'
+_assert_not_contains "git commit --amend (no staged): gate skipped" "mock-sley=1" "$HOOK_STDERR"
+
+# Staged changes → code amend → gate runs.
+echo "x = 2" >"$_amend_repo/file.py"
+(cd "$_amend_repo" && git add file.py)
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git commit --amend --no-edit"}}'
+_assert_contains "git commit --amend (staged changes): gate runs" "mock-sley=1" "$HOOK_STDERR"
+
+cd "$_amend_saved_pwd" || exit 1
+
+# Kill switch — `SLEY_AGENT_GATE=0` disables the gate entirely. Useful for
+# CI environments that have already validated readiness, or for unblocking a
+# WIP commit during iteration.
+_reset_state
+PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git commit -m foo"}}'
+_assert_eq "kill switch: not blocked" "0" "$HOOK_EXIT"
+_assert_not_contains "kill switch: gate did not run" "should not appear" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"echo git commit -m foo"}}'
+_assert_eq "echo git commit: not a commit command" "0" "$HOOK_EXIT"
+_assert_not_contains "echo git commit: no design-review nudge" \
+  "Consider running /review or /simplify" "$HOOK_STDERR"
+_assert_not_contains "echo git commit: no public-leak reminder" \
+  "private or environment-specific details" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"printf '\''git commit -m foo'\''"}}'
+_assert_eq "printf git commit: not a commit command" "0" "$HOOK_EXIT"
+_assert_not_contains "printf git commit: no design-review nudge" \
+  "Consider running /review or /simplify" "$HOOK_STDERR"
+_assert_not_contains "printf git commit: no public-leak reminder" \
+  "private or environment-specific details" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"echo sl commit -m foo"}}'
+_assert_eq "echo sl commit: not a commit command" "0" "$HOOK_EXIT"
+_assert_not_contains "echo sl commit: no design-review nudge" \
+  "Consider running /review or /simplify" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"if git commit -m foo; then echo done; fi"}}'
+_assert_eq "if git commit: not blocked with kill switch" "0" "$HOOK_EXIT"
+_assert_contains "if git commit: design-review nudge" \
+  "Consider running /review or /simplify" "$HOOK_STDERR"
+_assert_contains "if git commit: public-leak reminder" \
+  "private or environment-specific details" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c 'echo $(git commit -m foo)' '{"tool_input":{"command":$c}}')"
+_assert_eq "command substitution git commit: not blocked with kill switch" "0" "$HOOK_EXIT"
+_assert_contains "command substitution git commit: design-review nudge" \
+  "Consider running /review or /simplify" "$HOOK_STDERR"
+_assert_contains "command substitution git commit: public-leak reminder" \
+  "private or environment-specific details" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c 'cat <(git commit -m foo)' '{"tool_input":{"command":$c}}')"
+_assert_eq "process substitution git commit: not blocked with kill switch" "0" "$HOOK_EXIT"
+_assert_contains "process substitution git commit: design-review nudge" \
+  "Consider running /review or /simplify" "$HOOK_STDERR"
+_assert_contains "process substitution git commit: public-leak reminder" \
+  "private or environment-specific details" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c 'echo "$(git commit -m foo)"' '{"tool_input":{"command":$c}}')"
+_assert_eq "quoted command substitution git commit: not blocked with kill switch" "0" "$HOOK_EXIT"
+_assert_contains "quoted command substitution git commit: design-review nudge" \
+  "Consider running /review or /simplify" "$HOOK_STDERR"
+_assert_contains "quoted command substitution git commit: public-leak reminder" \
+  "private or environment-specific details" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c "echo \"'\$(git commit -m foo)'\"" '{"tool_input":{"command":$c}}')"
+_assert_eq "double-quoted command substitution with single quotes git commit: not blocked with kill switch" "0" "$HOOK_EXIT"
+_assert_contains "double-quoted command substitution with single quotes git commit: design-review nudge" \
+  "Consider running /review or /simplify" "$HOOK_STDERR"
+_assert_contains "double-quoted command substitution with single quotes git commit: public-leak reminder" \
+  "private or environment-specific details" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c 'echo '\''$(git commit -m foo)'\''' '{"tool_input":{"command":$c}}')"
+_assert_eq "single-quoted command substitution git commit: not a commit command" "0" "$HOOK_EXIT"
+_assert_not_contains "single-quoted command substitution git commit: no design-review nudge" \
+  "Consider running /review or /simplify" "$HOOK_STDERR"
+_assert_not_contains "single-quoted command substitution git commit: no public-leak reminder" \
+  "private or environment-specific details" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c $'cat <<EOF\n$(git commit -m foo)\nEOF' '{"tool_input":{"command":$c}}')"
+_assert_eq "active heredoc command substitution git commit: not blocked with kill switch" "0" "$HOOK_EXIT"
+_assert_contains "active heredoc command substitution git commit: design-review nudge" \
+  "Consider running /review or /simplify" "$HOOK_STDERR"
+_assert_contains "active heredoc command substitution git commit: public-leak reminder" \
+  "private or environment-specific details" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c $'cat <<\'EOF\'\n$(git commit -m foo)\nEOF' '{"tool_input":{"command":$c}}')"
+_assert_eq "quoted heredoc command substitution git commit: not a commit command" "0" "$HOOK_EXIT"
+_assert_not_contains "quoted heredoc command substitution git commit: no design-review nudge" \
+  "Consider running /review or /simplify" "$HOOK_STDERR"
+_assert_not_contains "quoted heredoc command substitution git commit: no public-leak reminder" \
+  "private or environment-specific details" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sudo git commit -m foo"}}'
+_assert_eq "sudo git commit: blocked by sudo guard" "2" "$HOOK_EXIT"
+_assert_contains "sudo git commit: BLOCKED msg" "sudo is not allowed" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl amend -mfoo"}}'
+_assert_eq "sl amend -mfoo: metadata only" "0" "$HOOK_EXIT"
+_assert_not_contains "sl amend -mfoo: no design-review nudge" \
+  "Consider running /review or /simplify" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl amend --message=foo"}}'
+_assert_eq "sl amend --message=foo: metadata only" "0" "$HOOK_EXIT"
+_assert_not_contains "sl amend --message=foo: no design-review nudge" \
+  "Consider running /review or /simplify" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl --config ui.color=never commit -m foo"}}'
+_assert_eq "sl global option commit: not blocked with kill switch" "0" "$HOOK_EXIT"
+_assert_contains "sl global option commit: design-review nudge" \
+  "Consider running /review or /simplify" "$HOOK_STDERR"
+
+# Public-leak reminder still fires on every commit-class command.
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=0 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git -C /tmp/anywhere commit -m foo"}}'
+_assert_eq "git -C commit: exits 0" "0" "$HOOK_EXIT"
+_assert_contains "git -C commit: public leak reminder" \
+  "private or environment-specific details" "$HOOK_STDERR"
+
+# `sl amend|commit` is not a git command, so the public-leak reminder
+# (scoped to git/git/git -C) does NOT fire there.
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=0 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl commit -m foo"}}'
+_assert_eq "sl commit: exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "sl commit: no public-leak reminder" \
+  "private or environment-specific details" "$HOOK_STDERR"
+
+# `sley` is a hard dependency for commit-class hooks. If it is unavailable
+# even after the hook prepends ~/.local/bin, fail loudly instead of letting a
+# commit bypass the readiness gate.
+_reset_state
+gate_min_home=$(_tmpdir)
+agent_root="$AGENTGUARD_ROOT"
+mkdir -p "$gate_min_home/.local/bin" "$gate_min_home/.local/lib/agentguard"
+cp "$agent_root/bin/agent-hook-pre-bash" "$gate_min_home/.local/bin/agent-hook-pre-bash"
+cp "$agent_root/lib/agentguard/"*.sh "$gate_min_home/.local/lib/agentguard/"
+HOME="$gate_min_home" PATH="/usr/bin:/bin" \
+  _run_hook "$gate_min_home/.local/bin/agent-hook-pre-bash" \
+  '{"tool_input":{"command":"git commit -m foo"}}'
+_assert_eq "no sley installed: blocks commit" "2" "$HOOK_EXIT"
+_assert_contains "no sley installed: reports missing command" \
+  "sley command missing" "$HOOK_STDERR"
+
+# Agent launchers may invoke hooks by absolute path with a minimal PATH. The
+# hook helper must still expose ~/.local/bin so the plain `sley` command used
+# by the commit gate resolves to the protected-bare-aware launcher.
+cat >"$gate_min_home/.local/bin/sley" <<'MOCK'
+#!/usr/bin/env bash
+[ "$1" = "ready" ] || exit 0
+shift
+printf 'mock-sley=1\n'
+printf 'mock-args=%s\n' "$*"
+exit 1
+MOCK
+chmod +x "$gate_min_home/.local/bin/sley"
+HOME="$gate_min_home" PATH="/usr/bin:/bin" \
+  _run_hook "$gate_min_home/.local/bin/agent-hook-pre-bash" \
+  '{"tool_input":{"command":"git commit -m foo"}}'
+_assert_eq "minimal PATH: gate finds ~/.local/bin/sley" "2" "$HOOK_EXIT"
+_assert_contains "minimal PATH: uses plain sley launcher" \
+  "mock-sley=1" "$HOOK_STDERR"
+
+# verify marker: `sley ready` writes `last-verify-pass` to the
+# directory specified by `SLEY_VERIFY_STATE_DIR` when its verify phase did real
+# work. The gate passes `$_HOOK_STATE_DIR` as the state dir, so the
+# marker lands where extension hooks (like a local "did the
+# agent run tests?" warning) can find it. Fine-grained verify-observed vs
+# verify-skipped tests live in sley-test; here we just verify the integration
+# plumbing works end-to-end.
+_marker_path="$TEST_TMPDIR/hook-state/$TEST_SID/last-verify-pass"
+
+# On pass, the gate passes SLEY_VERIFY_STATE_DIR to sley. The mock writes
+# the marker unconditionally on rc=0 (real sley is more selective — it
+# checks whether verify actually ran, tested in sley-test).
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=0 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git commit -m foo"}}'
+_assert_file_exists "gate pass: verify marker written via SLEY_VERIFY_STATE_DIR" "$_marker_path"
+
+old_state="$TEST_TMPDIR/old-state"
+rm -rf "$old_state"
+_old_state_env="SLEY_C""I_STATE_DIR"
+PATH="$_gate_path" env "$_old_state_env=$old_state" sley ready >/dev/null 2>&1
+_assert_file_missing "mock sley: old verify state env is ignored" "$old_state/last-c""i-pass"
+
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 MOCK_SLEY_OUT="check: 1 (blocking)" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git commit -m foo"}}'
+_assert_file_missing "gate blocked: verify marker not written" "$_marker_path"
+
+# Design-review nudge fires alongside the gate. The gate enforces
+# mechanical readiness (lint/secrets/verify); design review is a separate
+# decision the agent has to make. The reminder fires on every commit-class
+# command that touches code, but is suppressed for metadata-only updates.
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=0 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git commit -m foo"}}'
+_assert_contains "design-review nudge: fires on git commit" \
+  "/review or /simplify" "$HOOK_STDERR"
+_assert_contains "design-review nudge: reaches hook context" \
+  "/review or /simplify" "$HOOK_STDOUT"
+
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=0 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl amend"}}'
+_assert_contains "design-review nudge: fires on sl amend" \
+  "/review or /simplify" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=0 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl amend -m \"new title\""}}'
+_assert_not_contains "design-review nudge: skips metadata-only sl amend -m" \
+  "/review or /simplify" "$HOOK_STDERR"
+
+# Needs a clean git repo so `git diff --cached --quiet` confirms no staged
+# content and the hook recognizes this as a message-only amend.
+_nudge_amend_repo=$(_tmpdir)
+(
+  cd "$_nudge_amend_repo" || exit 1
+  export GIT_CONFIG_GLOBAL="$_nudge_amend_repo/.gitconfig-test"
+  : >"$GIT_CONFIG_GLOBAL"
+  git init -q
+  git config user.email test@test.local
+  git config user.name "Test User"
+  echo "x = 1" >file.py
+  git add file.py
+  git commit -q -m "seed"
+)
+_nudge_saved_pwd=$PWD
+cd "$_nudge_amend_repo" || exit 1
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=0 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git commit --amend --no-edit"}}'
+_assert_not_contains "design-review nudge: skips metadata-only git commit --amend" \
+  "/review or /simplify" "$HOOK_STDERR"
+cd "$_nudge_saved_pwd" || exit 1
+
+_test_summary

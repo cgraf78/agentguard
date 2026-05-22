@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# agent-hook-pre-mcp — PreToolUse guard for MCP tools.
+# Circuit breaker for failing servers, warns on expensive operations.
+
+set -u
+_HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}" # captured before sourcing so _hook_source_extensions finds agent/local variants
+_hook_script_parent() {
+  case "$1" in
+    */*) printf '%s\n' "${1%/*}" ;;
+    *) printf '.\n' ;;
+  esac
+}
+
+_hook_script_dir() {
+  local path="$1" dir target
+  while [[ -L "$path" ]]; do
+    dir=$(cd -P -- "$(_hook_script_parent "$path")" && pwd) || return 1
+    target=$(readlink "$path") || return 1
+    [[ "$target" == /* ]] || target="$dir/$target"
+    path="$target"
+  done
+  cd -P -- "$(_hook_script_parent "$path")" && pwd
+}
+
+_HOOK_BIN_DIR=$(_hook_script_dir "${BASH_SOURCE[0]}") || {
+  echo "${0##*/}: cannot resolve executable path" >&2
+  exit 2
+}
+source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
+
+_hook_parse_mcp
+
+# --- Consecutive failure circuit breaker ---
+if [ -f "$_HOOK_MCP_FAIL_FILE" ]; then
+  count=$(cat "$_HOOK_MCP_FAIL_FILE" 2>/dev/null)
+  count="${count:-0}"
+  case "$count" in '' | *[!0-9]*) count=0 ;; esac
+  if [ "$count" -ge 3 ]; then
+    _hook_block "MCP server '$_HOOK_MCP_SERVER' has failed $count consecutive times this session. The server appears to be down — continuing to call it will produce errors. Try a different approach or ask the user to check the MCP server."
+  fi
+fi
+
+# --- Expensive operation guards ---
+
+if printf '%s' "$_HOOK_MCP_TOOL" | grep -qF 'search_files'; then
+  has_path=$(printf '%s' "$_HOOK_INPUT" | jq -r '
+    .tool_input
+    | (.target_directories // .path // .directory // .paths // empty)
+    | if type == "array" then if length > 0 then "ok" else empty end
+      else . end
+  ' 2>/dev/null)
+  if [ -z "$has_path" ]; then
+    _hook_warn 'search_files called without a path filter. In large monorepos this can be very slow. Consider scoping to a subdirectory.'
+  fi
+fi
+
+if printf '%s' "$_HOOK_MCP_TOOL" | grep -qF 'knowledge_load'; then
+  kl_flag="$_HOOK_STATE_DIR/knowledge-load-warned"
+  if [ ! -f "$kl_flag" ]; then
+    mkdir -p "$_HOOK_STATE_DIR" 2>/dev/null || true
+    _hook_warn 'knowledge_load can consume significant context window on large documents. Prefer knowledge_filtered_search for targeted lookups.'
+    touch "$kl_flag" 2>/dev/null || true
+  fi
+fi
+
+_hook_source_extensions
+_hook_finish

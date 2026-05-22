@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# agent-hook-cmdline-test — CMD_LINE1 heredoc false-positive guards.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+# ---------------------------------------------------------------------------
+# Tests: CMD_LINE1 — heredoc false-positive prevention (shared helpers)
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== CMD_LINE1: base hook heredoc false-positives ==="
+
+# Helper: build a multi-line commit command with body content on line 2+.
+# The actual command (git commit/amend) is on line 1; body is on subsequent
+# lines — exactly the structure that CMD_LINE1 must filter.
+_heredoc_cmd() {
+  local subcmd="$1" body="$2"
+  printf '%s\n%s\n%s' "$subcmd -m \"\$(cat <<'EOF'" "$body" 'EOF)"'
+}
+
+# Repo tests run without adjacent local extensions, so use the base
+# hook path directly while keeping this shard focused on base guard parsing.
+HEREDOC_BASH="$PRE_BASH"
+
+_run_isolated() {
+  _run_hook "$HEREDOC_BASH" "$@"
+}
+
+# "rm -rf" in commit message body should NOT trigger rm guard
+_run_isolated "$(jq -nc --arg c "$(_heredoc_cmd "echo test" "Warn before running rm -rf on temp directories")" '{"tool_input":{"command":$c}}')"
+_assert_not_contains "heredoc rm -rf: no WARNING" "WARNING" "$HOOK_STDERR"
+
+# "find ./src" in commit message body should NOT trigger find block
+_run_isolated "$(jq -nc --arg c "$(_heredoc_cmd "echo test" "Use find ./src to locate config files")" '{"tool_input":{"command":$c}}')"
+_assert_not_contains "heredoc find: no find BLOCKED" "use fd" "$HOOK_STDERR"
+
+# "grep -r pattern src/" in commit message body should NOT trigger grep block
+_run_isolated "$(jq -nc --arg c "$(_heredoc_cmd "echo test" "Replace grep -r pattern src/ with rg")" '{"tool_input":{"command":$c}}')"
+_assert_not_contains "heredoc grep -r: no grep BLOCKED" "use rg" "$HOOK_STDERR"
+
+# Real commands on line 1 still trigger correctly
+_run_isolated '{"tool_input":{"command":"find . -name foo"}}'
+_assert_eq "real find still blocked" "2" "$HOOK_EXIT"
+
+_run_isolated '{"tool_input":{"command":"grep -r pattern src/"}}'
+_assert_eq "real grep -r still blocked" "2" "$HOOK_EXIT"
+
+_run_isolated '{"tool_input":{"command":"rm -rf /some/path"}}'
+_assert_contains "real rm -rf still warns" "WARNING" "$HOOK_STDERR"
+
+_test_summary

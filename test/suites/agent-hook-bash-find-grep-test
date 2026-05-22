@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# agent-hook-bash-find-grep-test — pre-bash find/grep and absorb guards.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+# ---------------------------------------------------------------------------
+# Tests: agent-hook-pre-bash — find/grep guards
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-bash: find/grep guards ==="
+
+# Real find invocations → blocked
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"find . -name foo"}}'
+_assert_eq "find .: blocked" "2" "$HOOK_EXIT"
+_assert_contains "find .: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"find /usr -type f"}}'
+_assert_eq "find /usr: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"find ~/git -name foo"}}'
+_assert_eq "find ~/: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"find -name foo"}}'
+_assert_eq "find -name: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"/usr/bin/find . -name foo"}}'
+_assert_eq "/usr/bin/find .: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"sudo /usr/bin/find . -name foo"}}'
+_assert_eq "sudo /usr/bin/find .: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env -S '\''find . -name foo'\''"}}'
+_assert_eq "env -S find .: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"sh -c '\''find . -name foo'\''"}}'
+_assert_eq "nested sh find .: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"sh -ec '\''find . -name foo'\''"}}'
+_assert_eq "nested sh -ec find .: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"cmd":"find /home/alex -maxdepth 1 -type f"}}'
+_assert_eq "find cmd fallback: blocked" "2" "$HOOK_EXIT"
+
+# Prose "find next/prev" in a heredoc commit message body → NOT blocked
+_find_prose_json=$(jq -n --arg cmd \
+  "$(printf '%s\n' "cat > /tmp/msg.txt << 'EOF'" \
+    "Bind C-g / C-S-g to find next/prev in nvim" \
+    "EOF")" \
+  '{"tool_input":{"command":$cmd}}')
+_run_hook "$PRE_BASH" "$_find_prose_json"
+_assert_eq "find prose in heredoc: not blocked" "0" "$HOOK_EXIT"
+_assert_not_contains "find prose in heredoc: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# Regression: the exact commit command that originally false-triggered
+_commit_find_json=$(jq -n --arg cmd \
+  "$(printf '%s\n' "cat > /tmp/commit.txt << 'EOF'" \
+    "Bind Ctrl-G / Ctrl-Shift-G to find next/prev in nvim" \
+    "EOF" \
+    "cd ~ && git commit -F /tmp/commit.txt")" \
+  '{"tool_input":{"command":$cmd}}')
+_run_hook "$PRE_BASH" "$_commit_find_json"
+_assert_not_contains "commit with find prose: no find block" "use fd instead" "$HOOK_STDERR"
+
+# Real grep -r invocations → blocked
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"grep -r pattern src/"}}'
+_assert_eq "grep -r: blocked" "2" "$HOOK_EXIT"
+_assert_contains "grep -r: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"grep -rn foo ."}}'
+_assert_eq "grep -rn: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"grep -R pattern dir/"}}'
+_assert_eq "grep -R: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"/bin/grep -r pattern ."}}'
+_assert_eq "/bin/grep -r: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"sudo /bin/grep -r pattern ."}}'
+_assert_eq "sudo /bin/grep -r: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env -S '\''grep -r pattern .'\''"}}'
+_assert_eq "env -S grep -r: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"bash -lc '\''grep -r pattern .'\''"}}'
+_assert_eq "nested bash grep -r: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"zsh -fc '\''grep -r pattern .'\''"}}'
+_assert_eq "nested zsh -fc grep -r: blocked" "2" "$HOOK_EXIT"
+
+# grep -r at end of sentence (no following token) → NOT blocked
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"use rg instead of grep -r"}}'
+_assert_eq "grep -r end of sentence: not blocked" "0" "$HOOK_EXIT"
+_assert_not_contains "grep -r end of sentence: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# `git absorb` creates fixup commits but leaves the caller to remember the
+# follow-up autosquash rebase. Agents should use the wrapper that performs the
+# whole workflow atomically so local branches do not accumulate loose fixups.
+_reset_state
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git absorb"}}'
+_assert_eq "git absorb: blocked" "2" "$HOOK_EXIT"
+_assert_contains "git absorb: recommends absorb-and-rebase" \
+  "git absorb-and-rebase" "$HOOK_STDERR"
+
+_reset_state
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git -C /tmp/repo absorb --base main"}}'
+_assert_eq "git -C absorb: blocked" "2" "$HOOK_EXIT"
+
+_reset_state
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git-absorb --base main"}}'
+_assert_eq "git-absorb executable: blocked" "2" "$HOOK_EXIT"
+
+_reset_state
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"sudo git absorb"}}'
+_assert_eq "sudo git absorb: blocked" "2" "$HOOK_EXIT"
+
+_reset_state
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'echo $(git absorb)' '{"tool_input":{"command":$c}}')"
+_assert_eq "command substitution git absorb: blocked" "2" "$HOOK_EXIT"
+
+_reset_state
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git absorb-and-rebase --base main"}}'
+_assert_eq "git absorb-and-rebase: allowed" "0" "$HOOK_EXIT"
+
+_reset_state
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git-absorb-and-rebase --base main"}}'
+_assert_eq "git-absorb-and-rebase executable: allowed" "0" "$HOOK_EXIT"
+
+_reset_state
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"echo git absorb"}}'
+_assert_eq "echo git absorb: not blocked" "0" "$HOOK_EXIT"
+
+_test_summary

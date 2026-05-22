@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# agent-hook-session-end-claude — Claude-specific SessionEnd extension.
+# Sourced by agent-hook-session-end via _hook_source_agent.
+# Auto-names untitled sessions using claude-session-name.
+
+_agentguard_claude_session_end() {
+  # The base hook exports these before sourcing agent extensions; keep local
+  # fallbacks so this file also lint-checks and no-ops when run directly.
+  local transcript_path="${tp:-}" session_id="${sid:-}"
+  [ -z "$transcript_path" ] && return 0
+
+  # Already titled — skip
+  grep -q '"custom-title"' "$transcript_path" 2>/dev/null && return 0
+
+  # Fire-and-forget: nohup so naming survives hook exit, timeout as a safeguard
+  # shellcheck disable=SC2016
+  nohup timeout 60 bash -c '
+  NAME=$(claude-session-name "$1")
+  [ -z "$NAME" ] && exit 0
+  grep -q "\"custom-title\"" "$1" 2>/dev/null && exit 0
+  jq -nc --arg t "$NAME" --arg s "$2" \
+    "{\"type\":\"custom-title\",\"customTitle\":\$t,\"sessionId\":\$s}" >> "$1"
+' _ "$transcript_path" "$session_id" >/dev/null 2>&1 &
+  disown
+}
+
+_agentguard_claude_session_end "$@"

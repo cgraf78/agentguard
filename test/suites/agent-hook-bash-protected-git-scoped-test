@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# agent-hook-bash-protected-git-scoped-test — protected bare-Git scoped Git guards.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+_mock_protected_bare_git_home
+
+echo ""
+echo "=== pre-bash: protected bare-Git scoped guards ==="
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"project status"}}'
+_assert_eq "non-git status command: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "non-git status command: no protected bare-Git scan block" \
+  "protected bare-Git repo" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git diff -- status --untracked=all"}}'
+_assert_eq "git diff path named status: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git grep ls-files -- -o"}}'
+_assert_eq "git grep text named ls-files: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status -uno"}}'
+_assert_eq "git status -uno: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env -S '\''git status -uno'\''"}}'
+_assert_eq "env split-string git status -uno: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked-files=all --ignored=no"}}'
+_assert_eq "git status untracked all plus ignored no: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --ignored --untracked-files=no"}}'
+_assert_eq "git status ignored plus untracked no: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked-files=no"}}'
+_assert_eq "git status --untracked-files=no: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked=no"}}'
+_assert_eq "git status --untracked=no: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked no"}}'
+_assert_eq "git status --untracked no: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --ignored=no"}}'
+_assert_eq "git status --ignored=no: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git -c status.showUntrackedFiles=no status"}}'
+_assert_eq "git config no untracked status: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git -c status.showUntrackedFiles=false status"}}'
+_assert_eq "git config false untracked status: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git ls-files --others --exclude-standard -- .config/nvim"}}'
+_assert_eq "git ls-files --others -- path: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git ls-files --others --exclude-standard -- .config/nvim && git ls-files --others --exclude-standard"}}'
+_assert_eq "scoped then unscoped ls-files chain: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git ls-files --others --exclude-standard -- .config/nvim; git ls-files --others --exclude-standard"}}'
+_assert_eq "scoped then unscoped ls-files semicolon: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git ls-files --others --exclude-standard -- ."}}'
+_assert_eq "git ls-files --others -- .: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git ls-files --others --exclude-standard -- :/"}}'
+_assert_eq "git ls-files --others -- :/: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git ls-files --others --exclude-standard -- :(top)"}}'
+_assert_eq "git ls-files --others -- :(top): blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'git ls-files --others --exclude-standard -- "*"' '{"tool_input":{"command":$c}}')"
+_assert_eq "git ls-files --others -- glob: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'git ls-files --others --exclude-standard -- ./*' '{"tool_input":{"command":$c}}')"
+_assert_eq "git ls-files --others -- ./*: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git ls-files --others --exclude-standard -- .config/nvim :/"}}'
+_assert_eq "git ls-files --others -- path plus :/: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'git ls-files --others --exclude-standard -- .config/nvim "*"' '{"tool_input":{"command":$c}}')"
+_assert_eq "git ls-files --others -- path plus glob: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git ls-files --others --exclude-standard -- ./config/nvim"}}'
+_assert_eq "git ls-files --others -- ./path: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git ls-files --others --exclude-standard -- .config/nvim .local/bin"}}'
+_assert_eq "git ls-files --others -- two paths: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git clean -n -d"}}'
+_assert_eq "git clean dry-run unscoped: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git clean -h"}}'
+_assert_eq "git clean short help: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git clean --help"}}'
+_assert_eq "git clean long help: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git clean -n -d -x"}}'
+_assert_eq "git clean ignored dry-run unscoped: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git clean -n -d -- .config/nvim"}}'
+_assert_eq "git clean dry-run scoped path: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git clean -n -d -- ."}}'
+_assert_eq "git clean dry-run root path: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git -C /tmp/repo status -uall"}}'
+_assert_eq "non-protected git status -uall: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git -C ~/.normal-git-repo status -uall"}}'
+_assert_eq "overlay protected bare-Git repo status -uall: allowed" "0" "$HOOK_EXIT"
+
+_test_summary

@@ -1,0 +1,1125 @@
+#!/usr/bin/env bash
+# agent-hook-helpers-test — shared helper behavior.
+
+# shellcheck disable=SC2016,SC2030,SC2031,SC2154 # child snippets, subshell fixtures, shared fixture vars.
+# shellcheck disable=SC1090 # tests intentionally source hook helpers through a fixture variable.
+# shellcheck disable=SC1091 # protected bare-Git test helper lives under HOME.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+unset AGENTGUARD_SESSION_ID
+
+# ---------------------------------------------------------------------------
+# Tests: agentguard.sh — public API wrappers
+# ---------------------------------------------------------------------------
+
+echo "=== agentguard: public API ==="
+
+AGENTGUARD_API="$AGENTGUARD_ROOT/lib/agentguard/agentguard.sh"
+
+api_agent_name=$(
+  AGENTGUARD_NAME=codex bash -c '
+    source "$1"
+    agentguard_agent_name
+  ' _ "$AGENTGUARD_API"
+)
+_assert_eq "public api: agent name wrapper delegates detection" \
+  "codex" "$api_agent_name"
+
+AGENTGUARD_NAME=codex bash -c '
+  source "$1"
+  agentguard_is_session
+' _ "$AGENTGUARD_API"
+_assert_exit "public api: agent session wrapper detects env" 0 "$?"
+
+# ---------------------------------------------------------------------------
+# Tests: hook-helpers.sh — shared helper functions
+# ---------------------------------------------------------------------------
+
+echo "=== hook-helpers: block/warn/context ==="
+
+HELPERS="$AGENTGUARD_ROOT/lib/agentguard/hook-helpers.sh"
+
+# _hook_block sets flag and prints to stderr
+(
+  source "$HELPERS"
+  _hook_block "test reason"
+  [ "$_HOOK_BLOCKED" = 1 ] && echo "PASS" || echo "FAIL"
+) 2>/dev/null | grep -q PASS
+_assert_eq "hook_block: sets flag" "0" "$?"
+
+(
+  source "$HELPERS"
+  _hook_block "test reason" 2>&1
+) | grep -q 'BLOCKED: test reason'
+_assert_eq "hook_block: prints BLOCKED to stderr" "0" "$?"
+
+# _hook_warn prints WARNING to stderr, does not block
+(
+  source "$HELPERS"
+  _hook_warn "be careful"
+  [ -z "$_HOOK_BLOCKED" ] && echo "PASS" || echo "FAIL"
+) 2>/dev/null | grep -q PASS
+_assert_eq "hook_warn: does not set block flag" "0" "$?"
+
+(
+  source "$HELPERS"
+  _hook_warn "be careful" 2>&1
+) | grep -q 'WARNING: be careful'
+_assert_eq "hook_warn: prints WARNING to stderr" "0" "$?"
+
+warn_ctx=$(
+  source "$HELPERS"
+  _hook_warn "be careful" 2>/dev/null
+  printf '%s' "$_HOOK_CTX"
+)
+_assert_eq "hook_warn: adds hook context" "be careful" "$warn_ctx"
+
+# _hook_remind prints REMINDER to stderr, does not block
+(
+  source "$HELPERS"
+  _hook_remind "check something"
+  [ -z "$_HOOK_BLOCKED" ] && echo "PASS" || echo "FAIL"
+) 2>/dev/null | grep -q PASS
+_assert_eq "hook_remind: does not set block flag" "0" "$?"
+
+(
+  source "$HELPERS"
+  _hook_remind "check something" 2>&1
+) | grep -q 'REMINDER: check something'
+_assert_eq "hook_remind: prints REMINDER to stderr" "0" "$?"
+
+remind_ctx=$(
+  source "$HELPERS"
+  _hook_remind "check something" 2>/dev/null
+  printf '%s' "$_HOOK_CTX"
+)
+_assert_eq "hook_remind: adds hook context" "check something" "$remind_ctx"
+
+# _hook_context accumulates lines with newline separation
+ctx_out=$(
+  source "$HELPERS"
+  _hook_context "line one"
+  _hook_context "line two"
+  printf '%s' "$_HOOK_CTX"
+)
+_assert_contains "hook_context: has first line" "line one" "$ctx_out"
+_assert_contains "hook_context: has second line" "line two" "$ctx_out"
+line_count=$(printf '%s\n' "$ctx_out" | wc -l)
+_assert_eq "hook_context: two lines" "2" "$(echo "$line_count" | tr -d ' ')"
+
+path_home=$(_tmpdir)
+mkdir -p "$path_home/.local/bin"
+cat >"$path_home/.local/bin/sley" <<'MOCK'
+#!/usr/bin/env bash
+:
+MOCK
+chmod +x "$path_home/.local/bin/sley"
+test_bash=$(command -v bash)
+path_probe=$(
+  # shellcheck disable=SC2016 # inner bash intentionally expands probe vars.
+  HOME="$path_home" PATH='' "$test_bash" -c '
+    source "$1"
+    case "$PATH" in
+      "" | :* | *::* | *:) printf "path_has_empty=yes\n" ;;
+      *) printf "path_has_empty=no\n" ;;
+    esac
+    printf "sley=%s\n" "$(command -v sley 2>/dev/null || true)"
+    printf "dirname=%s\n" "$(command -v dirname 2>/dev/null || true)"
+  ' _ "$HELPERS"
+)
+_assert_contains "hook PATH fallback: empty PATH has no cwd component" \
+  "path_has_empty=no" "$path_probe"
+_assert_contains "hook PATH fallback: empty PATH exposes local bin" \
+  "sley=$path_home/.local/bin/sley" "$path_probe"
+_assert_contains "hook PATH fallback: empty PATH keeps system tools" \
+  "dirname=/usr/bin/dirname" "$path_probe"
+
+# _HOOK_STATE_DIR computed at source time from neutral agent session id.
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  AGENTGUARD_SESSION_ID="neutral-session"
+  CODEX_THREAD_ID="codex-thread-123"
+  CLAUDE_CODE_CURRENT_SESSION_ID="test123"
+  TMPDIR="/tmp/test"
+  source "$HELPERS"
+  if [ "$_HOOK_STATE_DIR" = "/tmp/test/hook-state/neutral-session" ]; then
+    echo "PASS"
+  else
+    echo "FAIL: $_HOOK_STATE_DIR"
+  fi
+) | grep -q PASS
+_assert_eq "state_dir: neutral session id wins" "0" "$?"
+
+# _HOOK_STATE_DIR computed at source time (Claude env vars)
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset CODEX_THREAD_ID 2>/dev/null
+  CLAUDE_CODE_CURRENT_SESSION_ID="test123"
+  TMPDIR="/tmp/test"
+  source "$HELPERS"
+  [ "$_HOOK_STATE_DIR" = "/tmp/test/hook-state/test123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | grep -q PASS
+_assert_eq "state_dir: claude env vars" "0" "$?"
+
+# _HOOK_STATE_DIR uses CODEX_THREAD_ID before Claude-compatible vars. Current
+# Codex hook environments expose this as the stable session key, and matching
+# the detector priority keeps state isolation consistent with emitted schema.
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  CODEX_THREAD_ID="codex-thread-123"
+  CLAUDE_CODE_CURRENT_SESSION_ID="test123"
+  TMPDIR="/tmp/test"
+  source "$HELPERS"
+  [ "$_HOOK_STATE_DIR" = "/tmp/test/hook-state/codex-thread-123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | grep -q PASS
+_assert_eq "state_dir: codex thread id wins over claude env" "0" "$?"
+
+# Codex hook subprocesses do not always inherit a runtime session id. Managed
+# Codex hooks use AGENTGUARD_NAME, and the helper falls back to the long-lived
+# Codex process so session-local Hive Memory state does not reset on every hook.
+(
+  env -u CODEX_THREAD_ID -u CLAUDE_CODE_CURRENT_SESSION_ID \
+    AGENTGUARD_NAME="codex" \
+    AGENTGUARD_PROCESS_DETECT=0 \
+    TMPDIR="/tmp/codex-process-test" \
+    bash -c '
+    source "$1"
+    [[ "$_HOOK_STATE_DIR" == "/tmp/codex-process-test/hook-state/codex-"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+  ' _ "$HELPERS"
+) | grep -q PASS
+_assert_eq "state_dir: codex process key fallback" "0" "$?"
+
+# If the hook runner provides a JSON session id, prefer that precise key over
+# the Codex process fallback.
+(
+  unset CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID 2>/dev/null
+  AGENTGUARD_NAME="codex"
+  TMPDIR="/tmp/codex-json-test"
+  _HOOK_INPUT='{"session_id":"codex-json-session"}'
+  source "$HELPERS"
+  [ "$_HOOK_STATE_DIR" = "/tmp/codex-json-test/hook-state/codex-json-session" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | grep -q PASS
+_assert_eq "state_dir: codex JSON session id wins over process fallback" "0" "$?"
+
+# _HOOK_STATE_DIR uses TMPDIR for the tmp root
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID 2>/dev/null
+  TMPDIR="/tmp/custom"
+  source "$HELPERS"
+  [[ "$_HOOK_STATE_DIR" == "/tmp/custom/hook-state/"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | grep -q PASS
+_assert_eq "state_dir: TMPDIR fallback" "0" "$?"
+
+# _HOOK_STATE_DIR falls back to /tmp and PID when no env vars set
+(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID TMPDIR 2>/dev/null
+  source "$HELPERS"
+  [[ "$_HOOK_STATE_DIR" == "/tmp/hook-state/"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | grep -q PASS
+_assert_eq "state_dir: falls back to /tmp and PID" "0" "$?"
+
+# _HOOK_STATE_DIR uses gemini-$PPID when GEMINI_PROJECT_DIR is set
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID 2>/dev/null
+  GEMINI_PROJECT_DIR="/tmp/project"
+  TMPDIR="/tmp/gemtest"
+  source "$HELPERS"
+  [[ "$_HOOK_STATE_DIR" == "/tmp/gemtest/hook-state/gemini-"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | grep -q PASS
+_assert_eq "state_dir: gemini uses PPID-based key" "0" "$?"
+
+# Claude session ID wins over Gemini for state dir.
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset CODEX_THREAD_ID 2>/dev/null
+  CLAUDE_CODE_CURRENT_SESSION_ID="test123"
+  TMPDIR="/tmp/test"
+  GEMINI_PROJECT_DIR="/tmp/project"
+  source "$HELPERS"
+  [ "$_HOOK_STATE_DIR" = "/tmp/test/hook-state/test123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | grep -q PASS
+_assert_eq "state_dir: claude session ID wins over gemini" "0" "$?"
+
+# _HOOK_STATE_DIR can be refreshed from hook JSON session_id when no agent env
+# vars provide a stable session key.
+(
+  unset CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID GEMINI_PROJECT_DIR 2>/dev/null
+  TMPDIR="/tmp/json-session-test"
+  source "$HELPERS"
+  _HOOK_INPUT='{"session_id":"json-session-123"}'
+  _hook_refresh_state_dir
+  [ "$_HOOK_STATE_DIR" = "/tmp/json-session-test/hook-state/json-session-123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | grep -q PASS
+_assert_eq "state_dir: refresh uses input session_id" "0" "$?"
+
+# Existing env-derived keys continue to win over JSON session_id.
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset CODEX_THREAD_ID 2>/dev/null
+  CLAUDE_CODE_CURRENT_SESSION_ID="test123"
+  TMPDIR="/tmp/test"
+  source "$HELPERS"
+  _HOOK_INPUT='{"session_id":"json-session-123"}'
+  _hook_refresh_state_dir
+  [ "$_HOOK_STATE_DIR" = "/tmp/test/hook-state/test123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | grep -q PASS
+_assert_eq "state_dir: claude env wins over input session_id" "0" "$?"
+
+# Parsing command JSON refreshes state from session_id for agents without env
+# session IDs.
+(
+  unset CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID GEMINI_PROJECT_DIR 2>/dev/null
+  TMPDIR="/tmp/parse-session-test"
+  source "$HELPERS"
+  _HOOK_INPUT='{"session_id":"parse-session-123","tool_input":{"command":"echo ok"}}'
+  _hook_parse_command 2>/dev/null </dev/null
+  [ "$_HOOK_STATE_DIR" = "/tmp/parse-session-test/hook-state/parse-session-123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | grep -q PASS
+_assert_eq "state_dir: parse_command refreshes input session_id" "0" "$?"
+
+# Codex API exec_command payloads use tool_input.cmd instead of command.
+(
+  unset CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID GEMINI_PROJECT_DIR 2>/dev/null
+  source "$HELPERS"
+  _HOOK_INPUT='{"tool_input":{"cmd":"echo ok"}}'
+  _hook_parse_command 2>/dev/null </dev/null
+  [ "$CMD_TRIMMED" = "echo ok" ] && echo "PASS" || echo "FAIL: $CMD_TRIMMED"
+) | grep -q PASS
+_assert_eq "parse_command: accepts cmd fallback" "0" "$?"
+
+(
+  unset CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID GEMINI_PROJECT_DIR 2>/dev/null
+  source "$HELPERS"
+  _HOOK_INPUT="$_apply_patch_json"
+  _hook_parse_edit_files 2>/dev/null </dev/null
+  want=$(printf '%s\n' "/tmp/test/a.py" "/tmp/test/b.py" "/tmp/test/c.py")
+  if [ "$HOOK_EDIT_FILES" = "$want" ] && [ "$FP" = "/tmp/test/a.py" ]; then
+    echo "PASS"
+  else
+    printf 'FAIL: files=%s fp=%s\n' "$HOOK_EDIT_FILES" "$FP"
+  fi
+) | grep -q PASS
+_assert_eq "parse_edit_files: extracts apply_patch paths in order" "0" "$?"
+
+_apply_patch_object_json=$(jq -n --arg patch \
+  "$(printf '%s\n' \
+    "*** Begin Patch" \
+    "*** Delete File: /tmp/test/remove.py" \
+    "*** End Patch")" \
+  '{"tool_input":{"patch":$patch}}')
+(
+  unset CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID GEMINI_PROJECT_DIR 2>/dev/null
+  source "$HELPERS"
+  _HOOK_INPUT="$_apply_patch_object_json"
+  _hook_parse_edit_files 2>/dev/null </dev/null
+  [ "$HOOK_EDIT_FILES" = "/tmp/test/remove.py" ] && echo "PASS" || echo "FAIL: $HOOK_EDIT_FILES"
+) | grep -q PASS
+_assert_eq "parse_edit_files: extracts object patch paths" "0" "$?"
+
+# ---------------------------------------------------------------------------
+# Tests: hook-helpers.sh — Hive Memory integration
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== hook-helpers: Hive Memory integration ==="
+
+HM_MOCK_ROOT=$(_tmpdir)
+HM_HOME="$HM_MOCK_ROOT/home"
+HM_BIN="$HM_MOCK_ROOT/bin"
+HM_TMP="$HM_MOCK_ROOT/tmp"
+HM_LOG="$HM_MOCK_ROOT/hm.log"
+mkdir -p "$HM_HOME/.config/hive-memory" "$HM_BIN" "$HM_TMP"
+touch "$HM_HOME/.config/hive-memory/config.toml"
+cat >"$HM_BIN/hm" <<'SCRIPT'
+#!/usr/bin/env bash
+{
+  printf 'args=%s\n' "$*"
+  printf 'agent=%s\n' "${HIVE_MEMORY_AGENT_ID:-}"
+  printf 'session=%s\n' "${HIVE_MEMORY_SESSION_ID:-}"
+  printf 'project=%s\n' "${HIVE_MEMORY_PROJECT:-}"
+  printf 'project_infer=%s\n' "${HIVE_MEMORY_PROJECT_INFER:-}"
+  printf 'active=%s\n' "${HIVE_MEMORY_HOOK_ACTIVE:-}"
+} >>"$HM_LOG"
+
+case "${HM_MODE:-empty}" in
+  response)
+    printf '%s\n' '{"warnings":["low confidence"],"actions":[{"kind":"inject_context","body":"memory ctx"},{"kind":"remind","body":"write reminder"}]}'
+    ;;
+  fail)
+    printf 'backend offline\n' >&2
+    exit 42
+    ;;
+  *)
+    printf '%s\n' '{"warnings":[],"actions":[]}'
+    ;;
+esac
+SCRIPT
+chmod +x "$HM_BIN/hm"
+
+hm_prompt_err="$HM_MOCK_ROOT/prompt.err"
+hm_prompt_out=$(
+  HOME="$HM_HOME" \
+    PATH="$HM_BIN:$PATH" \
+    TMPDIR="$HM_TMP" \
+    HM_LOG="$HM_LOG" \
+    HM_MODE=response \
+    HIVE_MEMORY_HOOKS=1 \
+    AGENTGUARD_NAME=codex \
+    CODEX_THREAD_ID="hm-session" \
+    bash -c '
+      source "$1"
+      _HOOK_INPUT='\''{"prompt":"remember this","tool_input":{"file_path":"/tmp/project/src/main.rs"}}'\''
+      _hook_hm_prompt_submit
+      printf "%s" "$_HOOK_CTX"
+    ' _ "$HELPERS" 2>"$hm_prompt_err"
+)
+hm_prompt_log=$(cat "$HM_LOG")
+_assert_contains "hm hook: prompt-submit command includes project and text" \
+  "args=hook prompt-submit --project /tmp/project/src/main.rs --json --text remember this" "$hm_prompt_log"
+_assert_contains "hm hook: passes agent identity" "agent=codex" "$hm_prompt_log"
+_assert_contains "hm hook: passes session identity" "session=hm-session" "$hm_prompt_log"
+_assert_contains "hm hook: passes active project env" "project=/tmp/project/src/main.rs" "$hm_prompt_log"
+_assert_contains "hm hook: marks subprocess hook-active" "active=1" "$hm_prompt_log"
+_assert_contains "hm hook: injects context action" "memory ctx" "$hm_prompt_out"
+_assert_contains "hm hook: injects reminder action" "write reminder" "$hm_prompt_out"
+_assert_contains "hm hook: surfaces response warnings" \
+  "WARNING: Hive Memory: low confidence" "$(cat "$hm_prompt_err")"
+
+prompt_input_preserved=$(
+  printf '%s' '{"prompt":"goal work","workspace":{"current_dir":"/tmp/project"}}' |
+    HOME="$HM_HOME" \
+      PATH="$HM_BIN:$PATH" \
+      TMPDIR="$HM_TMP" \
+      HIVE_MEMORY_HOOKS=0 \
+      AGENTGUARD_NAME=codex \
+      CODEX_THREAD_ID="hm-session" \
+      bash -c '
+        source "$1"
+        _hook_hm_prompt_submit
+        printf "%s" "${_HOOK_INPUT:-}"
+      ' _ "$HELPERS"
+)
+_assert_contains "hm hook: prompt-submit preserves JSON for later extensions" \
+  '"prompt":"goal work"' "$prompt_input_preserved"
+
+: >"$HM_LOG"
+printf '%s' '{"session_id":"json-hm-session","workspace":{"current_dir":"/tmp/workspace"}}' |
+  env -u CLAUDE_CODE_CURRENT_SESSION_ID \
+    -u CODEX_THREAD_ID \
+    HOME="$HM_HOME" \
+    PATH="$HM_BIN:$PATH" \
+    TMPDIR="$HM_TMP" \
+    HM_LOG="$HM_LOG" \
+    HIVE_MEMORY_HOOKS=1 \
+    AGENTGUARD_NAME=codex \
+    bash -c '
+      source "$1"
+      _hook_hm_session_start
+    ' _ "$HELPERS" >/dev/null 2>/dev/null
+_assert_contains "hm hook: reads session id from JSON stdin" \
+  "session=json-hm-session" "$(cat "$HM_LOG")"
+_assert_contains "hm hook: uses workspace path from JSON stdin" \
+  "args=hook session-start --project /tmp/workspace --json" "$(cat "$HM_LOG")"
+
+: >"$HM_LOG"
+json_session_payload='{"session_id":"json-hm-marker-session","workspace":{"current_dir":"/tmp/workspace"}}'
+printf '%s' "$json_session_payload" |
+  env -u CLAUDE_CODE_CURRENT_SESSION_ID \
+    -u CODEX_THREAD_ID \
+    HOME="$HM_HOME" \
+    PATH="$HM_BIN:$PATH" \
+    TMPDIR="$HM_TMP" \
+    HM_LOG="$HM_LOG" \
+    HM_MODE=response \
+    HIVE_MEMORY_HOOKS=1 \
+    AGENTGUARD_NAME=codex \
+    bash -c '
+      source "$1"
+      _hook_hm_session_start
+    ' _ "$HELPERS" >/dev/null 2>/dev/null
+printf '%s' "$json_session_payload" |
+  env -u CLAUDE_CODE_CURRENT_SESSION_ID \
+    -u CODEX_THREAD_ID \
+    HOME="$HM_HOME" \
+    PATH="$HM_BIN:$PATH" \
+    TMPDIR="$HM_TMP" \
+    HM_LOG="$HM_LOG" \
+    HM_MODE=response \
+    HIVE_MEMORY_HOOKS=1 \
+    AGENTGUARD_NAME=codex \
+    bash -c '
+      source "$1"
+      _hook_hm_session_start
+    ' _ "$HELPERS" >/dev/null 2>/dev/null
+hm_json_session_start_count=$(grep -c 'args=hook session-start' "$HM_LOG" || true)
+_assert_eq "hm hook: JSON session marker prevents repeat context" "1" "$hm_json_session_start_count"
+
+: >"$HM_LOG"
+HOME="$HM_HOME" \
+  PATH="$HM_BIN:$PATH" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_NAME=claude \
+  CODEX_THREAD_ID="" \
+  CLAUDE_CODE_CURRENT_SESSION_ID="hm-session" \
+  bash -c '
+    source "$1"
+    _HOOK_INPUT='\''{"tool_result":{"status":"failed"},"tool_input":{"cwd":"/tmp/project"}}'\''
+    _hook_hm_tool_complete
+  ' _ "$HELPERS" >/dev/null 2>/dev/null
+_assert_contains "hm hook: tool-complete maps failed status to nonzero" \
+  "args=hook tool-complete --json --status 1" "$(cat "$HM_LOG")"
+_assert_not_contains "hm hook: tool-complete skips project argument" \
+  "--project" "$(cat "$HM_LOG")"
+_assert_contains "hm hook: tool-complete disables launcher project inference" \
+  "project_infer=0" "$(cat "$HM_LOG")"
+_assert_eq "hm hook: tool-complete leaves project env unset" \
+  "project=" "$(grep '^project=' "$HM_LOG")"
+
+: >"$HM_LOG"
+HOME="$HM_HOME" \
+  PATH="$HM_BIN:$PATH" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_NAME=claude \
+  CODEX_THREAD_ID="" \
+  CLAUDE_CODE_CURRENT_SESSION_ID="hm-session" \
+  bash -c '
+    source "$1"
+    _HOOK_INPUT='\''{"tool_result_is_error":true,"tool_input":{"path":"/tmp/project/mcp.txt"}}'\''
+    _hook_hm_tool_complete
+  ' _ "$HELPERS" >/dev/null 2>/dev/null
+_assert_contains "hm hook: tool-complete maps MCP error boolean to nonzero" \
+  "args=hook tool-complete --json --status 1" "$(cat "$HM_LOG")"
+_assert_not_contains "hm hook: MCP tool-complete skips project argument" \
+  "--project" "$(cat "$HM_LOG")"
+
+: >"$HM_LOG"
+HOME="$HM_HOME" \
+  PATH="$HM_BIN:$PATH" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_NAME=claude \
+  CODEX_THREAD_ID="" \
+  CLAUDE_CODE_CURRENT_SESSION_ID="hm-session" \
+  bash -c '
+    source "$1"
+    _hook_hm_stop
+  ' _ "$HELPERS" >/dev/null 2>/dev/null
+_assert_contains "hm hook: stop omits unsupported project option" \
+  "args=hook stop --json" "$(cat "$HM_LOG")"
+_assert_not_contains "hm hook: stop does not pass --project" \
+  "--project" "$(cat "$HM_LOG")"
+
+: >"$HM_LOG"
+HOME="$HM_HOME" \
+  PATH="$HM_BIN:$PATH" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  HIVE_MEMORY_HOOKS=0 \
+  AGENTGUARD_NAME=claude \
+  CODEX_THREAD_ID="" \
+  CLAUDE_CODE_CURRENT_SESSION_ID="hm-session" \
+  bash -c '
+    source "$1"
+    _hook_hm_session_start
+  ' _ "$HELPERS" >/dev/null 2>/dev/null
+_assert_eq "hm hook: HIVE_MEMORY_HOOKS=0 disables integration" "" "$(cat "$HM_LOG")"
+
+: >"$HM_LOG"
+HOME="$HM_HOME" \
+  PATH="$HM_BIN:$PATH" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  HIVE_MEMORY_HOOKS=1 \
+  HIVE_MEMORY_HOOK_ACTIVE=1 \
+  AGENTGUARD_NAME=claude \
+  CODEX_THREAD_ID="" \
+  CLAUDE_CODE_CURRENT_SESSION_ID="hm-session" \
+  bash -c '
+    source "$1"
+    _hook_hm_session_start
+  ' _ "$HELPERS" >/dev/null 2>/dev/null
+_assert_eq "hm hook: skips recursive hook-active calls" "" "$(cat "$HM_LOG")"
+
+: >"$HM_LOG"
+HOME="$HM_HOME" \
+  PATH="$HM_BIN:$PATH" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  HM_MODE=response \
+  HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_NAME=codex \
+  CODEX_THREAD_ID="" \
+  CLAUDE_CODE_CURRENT_SESSION_ID="" \
+  bash -c '
+    source "$1"
+    _hook_hm_session_start
+    _hook_hm_session_start
+  ' _ "$HELPERS" >/dev/null 2>/dev/null
+hm_session_start_count=$(grep -c 'args=hook session-start' "$HM_LOG" || true)
+_assert_eq "hm hook: session-start context emitted once per session" "1" "$hm_session_start_count"
+
+hm_fail_err="$HM_MOCK_ROOT/fail.err"
+HOME="$HM_HOME" \
+  PATH="$HM_BIN:$PATH" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  HM_MODE=fail \
+  HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_NAME=claude \
+  CODEX_THREAD_ID="" \
+  CLAUDE_CODE_CURRENT_SESSION_ID="hm-fail-session" \
+  bash -c '
+    source "$1"
+    _hook_hm_session_start
+    _hook_hm_session_start
+  ' _ "$HELPERS" >/dev/null 2>"$hm_fail_err"
+hm_fail_count=$(grep -c 'Hive Memory hook failed' "$hm_fail_err" || true)
+_assert_eq "hm hook: repeated failures warn once per session" "1" "$hm_fail_count"
+
+# _hook_agent_name returns "codex" when CODEX_INTERNAL_ORIGINATOR_OVERRIDE is set
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE="codex"
+  CLAUDE_CODE_CURRENT_SESSION_ID="test123"
+  source "$HELPERS"
+  [ "$(_hook_agent_name)" = "codex" ] && echo "PASS" || echo "FAIL"
+) | grep -q PASS
+_assert_eq "agent_name: codex override wins over claude env" "0" "$?"
+
+# _hook_agent_name returns "codex" when CODEX_THREAD_ID is set. Codex
+# hook schemas are stricter than Claude's, so misdetecting this signal
+# makes hooks emit a top-level context field that Codex rejects.
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  CODEX_THREAD_ID="thread123"
+  CLAUDE_CODE_CURRENT_SESSION_ID="test123"
+  source "$HELPERS"
+  [ "$(_hook_agent_name)" = "codex" ] && echo "PASS" || echo "FAIL"
+) | grep -q PASS
+_assert_eq "agent_name: codex thread id wins over claude env" "0" "$?"
+
+# _hook_agent_name falls back to the process tree for Codex. This covers
+# already-running Codex sessions whose hook subprocesses do not inherit a
+# Codex-specific env var; regenerated config still sets AGENTGUARD_NAME directly.
+MOCK_PS_DIR=$(_tmpdir)
+cat >"$MOCK_PS_DIR/ps" <<'SCRIPT'
+#!/usr/bin/env bash
+field=""
+pid=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o)
+      field="${2:-}"
+      shift 2
+      ;;
+    -p)
+      pid="${2:-}"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+case "$field:$pid" in
+  comm=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash" ;;
+  args=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash -c hook" ;;
+  ppid=:"${MOCK_CHILD_PID:-}") printf '%s\n' "4242" ;;
+  comm=:4242) printf '%s\n' "codex" ;;
+  args=:4242) printf '%s\n' "/usr/local/bin/codex --profile test" ;;
+  ppid=:4242) printf '%s\n' "1" ;;
+  comm=:1) printf '%s\n' "init" ;;
+  args=:1) printf '%s\n' "init" ;;
+  ppid=:1) printf '%s\n' "0" ;;
+  *) exit 1 ;;
+esac
+SCRIPT
+chmod +x "$MOCK_PS_DIR/ps"
+(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID GEMINI_PROJECT_DIR 2>/dev/null
+  AGENTGUARD_PROCESS_DETECT=1
+  export AGENTGUARD_PROCESS_DETECT
+  bash -c '
+    export MOCK_CHILD_PID="$$"
+    PATH="$1:$PATH"
+    source "$2"
+    [ "$(_hook_agent_name)" = "codex" ] && echo "PASS" || echo "FAIL"
+  ' _ "$MOCK_PS_DIR" "$HELPERS"
+) | grep -q PASS
+_assert_eq "agent_name: codex process fallback" "0" "$?"
+
+# _hook_agent_name returns "claude" when only CLAUDE env is set
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID 2>/dev/null
+  CLAUDE_CODE_CURRENT_SESSION_ID="test123"
+  source "$HELPERS"
+  [ "$(_hook_agent_name)" = "claude" ] && echo "PASS" || echo "FAIL"
+) | grep -q PASS
+_assert_eq "agent_name: claude when no codex override" "0" "$?"
+
+# _hook_agent_name returns "agent" when no agent env vars set
+(
+  unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID 2>/dev/null
+  source "$HELPERS"
+  [ "$(_hook_agent_name)" = "agent" ] && echo "PASS" || echo "FAIL"
+) | grep -q PASS
+_assert_eq "agent_name: fallback to agent" "0" "$?"
+
+# _hook_agent_name returns generic "agent" when only the neutral session id is
+# set. Launchers should still set AGENTGUARD_NAME when they know the real agent.
+(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID GEMINI_PROJECT_DIR 2>/dev/null
+  export AGENTGUARD_SESSION_ID="neutral-session"
+  source "$HELPERS"
+  [ "$(_hook_agent_name)" = "agent" ] && echo "PASS" || echo "FAIL"
+) | grep -q PASS
+_assert_eq "agent_name: neutral session id implies generic agent" "0" "$?"
+
+# _hook_agent_name ignores non-"codex" values of the override var
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE="other"
+  unset CODEX_THREAD_ID 2>/dev/null
+  CLAUDE_CODE_CURRENT_SESSION_ID="test123"
+  source "$HELPERS"
+  [ "$(_hook_agent_name)" = "claude" ] && echo "PASS" || echo "FAIL"
+) | grep -q PASS
+_assert_eq "agent_name: non-codex override falls through to claude" "0" "$?"
+
+# _hook_agent_name returns "gemini" when GEMINI_PROJECT_DIR is set
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID 2>/dev/null
+  GEMINI_PROJECT_DIR="/tmp/project"
+  source "$HELPERS"
+  [ "$(_hook_agent_name)" = "gemini" ] && echo "PASS" || echo "FAIL"
+) | grep -q PASS
+_assert_eq "agent_name: gemini when GEMINI_PROJECT_DIR set" "0" "$?"
+
+# _hook_agent_name prefers codex over gemini when both env vars present
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE="codex"
+  unset CODEX_THREAD_ID 2>/dev/null
+  GEMINI_PROJECT_DIR="/tmp/project"
+  source "$HELPERS"
+  [ "$(_hook_agent_name)" = "codex" ] && echo "PASS" || echo "FAIL"
+) | grep -q PASS
+_assert_eq "agent_name: codex wins over gemini" "0" "$?"
+
+# _hook_agent_name prefers gemini over claude when both env vars present
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID 2>/dev/null
+  GEMINI_PROJECT_DIR="/tmp/project"
+  CLAUDE_CODE_CURRENT_SESSION_ID="test123"
+  source "$HELPERS"
+  [ "$(_hook_agent_name)" = "gemini" ] && echo "PASS" || echo "FAIL"
+) | grep -q PASS
+_assert_eq "agent_name: gemini wins over claude" "0" "$?"
+
+# _hook_agent_name returns AGENTGUARD_NAME before built-in agent env detection.
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  AGENTGUARD_NAME="example-agent"
+  CODEX_THREAD_ID="thread123"
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE="codex"
+  GEMINI_PROJECT_DIR="/tmp/project"
+  CLAUDE_CODE_CURRENT_SESSION_ID="test123"
+  source "$HELPERS"
+  [ "$(_hook_agent_name)" = "example-agent" ] && echo "PASS" || echo "FAIL"
+) | grep -q PASS
+_assert_eq "agent_name: AGENTGUARD_NAME wins" "0" "$?"
+
+# _hook_agent_name treats empty GEMINI_PROJECT_DIR as unset
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID 2>/dev/null
+  GEMINI_PROJECT_DIR=""
+  CLAUDE_CODE_CURRENT_SESSION_ID="test123"
+  source "$HELPERS"
+  [ "$(_hook_agent_name)" = "claude" ] && echo "PASS" || echo "FAIL"
+) | grep -q PASS
+_assert_eq "agent_name: empty GEMINI_PROJECT_DIR falls through to claude" "0" "$?"
+
+# _hook_source_agent sources a -codex file when Codex is detected
+MOCK_AGENT_DIR=$(_tmpdir)
+cat >"$MOCK_AGENT_DIR/hook-codex" <<'SCRIPT'
+_AGENT_EXTENSION_SOURCED="codex"
+SCRIPT
+(
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE="codex"
+  unset CODEX_THREAD_ID 2>/dev/null
+  source "$HELPERS"
+  _HOOK_SELF="$MOCK_AGENT_DIR/hook"
+  _hook_source_agent
+  [ "${_AGENT_EXTENSION_SOURCED:-}" = "codex" ] && echo "PASS" || echo "FAIL"
+) | grep -q PASS
+_assert_eq "source_agent: sources -codex file when codex detected" "0" "$?"
+
+# _hook_source_agent sources a -claude file when Claude is detected
+cat >"$MOCK_AGENT_DIR/hook-claude" <<'SCRIPT'
+_AGENT_EXTENSION_SOURCED="claude"
+SCRIPT
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID 2>/dev/null
+  CLAUDE_CODE_CURRENT_SESSION_ID="test123"
+  source "$HELPERS"
+  _HOOK_SELF="$MOCK_AGENT_DIR/hook"
+  _hook_source_agent
+  [ "${_AGENT_EXTENSION_SOURCED:-}" = "claude" ] && echo "PASS" || echo "FAIL"
+) | grep -q PASS
+_assert_eq "source_agent: sources -claude file when claude detected" "0" "$?"
+
+# _hook_source_agent sources a -gemini file when Gemini is detected
+cat >"$MOCK_AGENT_DIR/hook-gemini" <<'SCRIPT'
+_AGENT_EXTENSION_SOURCED="gemini"
+SCRIPT
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID 2>/dev/null
+  GEMINI_PROJECT_DIR="/tmp/project"
+  source "$HELPERS"
+  _HOOK_SELF="$MOCK_AGENT_DIR/hook"
+  _hook_source_agent
+  [ "${_AGENT_EXTENSION_SOURCED:-}" = "gemini" ] && echo "PASS" || echo "FAIL"
+) | grep -q PASS
+_assert_eq "source_agent: sources -gemini file when gemini detected" "0" "$?"
+
+# _hook_source_agent skips cleanly when no extension file exists
+MOCK_NOEXT_DIR=$(_tmpdir)
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE="codex"
+  source "$HELPERS"
+  _HOOK_SELF="$MOCK_NOEXT_DIR/hook"
+  _hook_source_agent
+  echo "PASS"
+) | grep -q PASS
+_assert_eq "source_agent: skips when no -codex file exists" "0" "$?"
+
+# _hook_finish emits context JSON when present
+ctx_json=$(
+  AGENTGUARD_NAME="claude"
+  export AGENTGUARD_NAME
+  source "$HELPERS"
+  _hook_context "hello world"
+  _hook_finish 2>/dev/null
+)
+echo "$ctx_json" | jq -e '.context == "hello world"' >/dev/null 2>&1
+_assert_eq "hook_finish: emits context JSON" "0" "$?"
+
+# _hook_finish also emits Gemini-compatible additionalContext
+echo "$ctx_json" | jq -e '.hookSpecificOutput.additionalContext == "hello world"' >/dev/null 2>&1
+_assert_eq "hook_finish: emits Gemini additionalContext" "0" "$?"
+
+# _hook_finish emits strict Codex UserPromptSubmit JSON when running under Codex
+codex_ctx_json=$(
+  AGENTGUARD_NAME="codex"
+  export AGENTGUARD_NAME
+  _HOOK_SELF="$BIN_DIR/agent-hook-prompt-submit"
+  source "$HELPERS"
+  _hook_context "hello world"
+  _hook_finish 2>/dev/null
+)
+echo "$codex_ctx_json" | jq -e 'has("context") | not' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex output omits legacy context field" "0" "$?"
+echo "$codex_ctx_json" | jq -e '.suppressOutput == true' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex output suppresses success status" "0" "$?"
+echo "$codex_ctx_json" | jq -e '.hookSpecificOutput.hookEventName == "UserPromptSubmit"' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex output includes hookEventName" "0" "$?"
+echo "$codex_ctx_json" | jq -e '.hookSpecificOutput.additionalContext == "hello world"' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex output includes additionalContext" "0" "$?"
+
+# Codex rejects suppressOutput on PreToolUse hook responses, but still accepts
+# additionalContext there.
+codex_pretool_json=$(
+  AGENTGUARD_NAME="codex"
+  export AGENTGUARD_NAME
+  _HOOK_SELF="$BIN_DIR/agent-hook-pre-edit"
+  source "$HELPERS"
+  _hook_context "hello world"
+  _hook_finish 2>/dev/null
+)
+echo "$codex_pretool_json" | jq -e 'has("suppressOutput") | not' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex PreToolUse omits unsupported suppressOutput" "0" "$?"
+echo "$codex_pretool_json" | jq -e '.hookSpecificOutput.hookEventName == "PreToolUse"' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex PreToolUse includes hookEventName" "0" "$?"
+echo "$codex_pretool_json" | jq -e '.hookSpecificOutput.additionalContext == "hello world"' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex PreToolUse includes additionalContext" "0" "$?"
+
+# Codex rejects suppressOutput on PostToolUse hook responses as well. Keep
+# post-tool context visible instead of failing the hook schema validation.
+codex_posttool_json=$(
+  AGENTGUARD_NAME="codex"
+  export AGENTGUARD_NAME
+  _HOOK_SELF="$BIN_DIR/agent-hook-post-edit"
+  source "$HELPERS"
+  _hook_context "hello world"
+  _hook_finish 2>/dev/null
+)
+echo "$codex_posttool_json" | jq -e 'has("suppressOutput") | not' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex PostToolUse omits unsupported suppressOutput" "0" "$?"
+echo "$codex_posttool_json" | jq -e '.hookSpecificOutput.hookEventName == "PostToolUse"' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex PostToolUse includes hookEventName" "0" "$?"
+echo "$codex_posttool_json" | jq -e '.hookSpecificOutput.additionalContext == "hello world"' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex PostToolUse includes additionalContext" "0" "$?"
+
+# _hook_finish derives Codex hookEventName from the active hook script
+codex_session_json=$(
+  AGENTGUARD_NAME="codex"
+  export AGENTGUARD_NAME
+  _HOOK_SELF="$BIN_DIR/agent-hook-session-start"
+  source "$HELPERS"
+  _hook_context "hello world"
+  _hook_finish 2>/dev/null
+)
+echo "$codex_session_json" | jq -e '.hookSpecificOutput.hookEventName == "SessionStart"' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex SessionStart output includes hookEventName" "0" "$?"
+
+# Codex Stop uses a different schema from context-injection hooks: no
+# hookSpecificOutput envelope is accepted, so context becomes a continuation
+# prompt that blocks Stop once.
+codex_stop_json=$(
+  AGENTGUARD_NAME="codex"
+  export AGENTGUARD_NAME
+  _HOOK_SELF="$BIN_DIR/agent-hook-stop"
+  source "$HELPERS"
+  _hook_context "remember the summary"
+  _hook_finish 2>/dev/null
+)
+echo "$codex_stop_json" | jq -e 'has("hookSpecificOutput") | not' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex Stop omits hookSpecificOutput" "0" "$?"
+echo "$codex_stop_json" | jq -e '.decision == "block"' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex Stop blocks to continue" "0" "$?"
+echo "$codex_stop_json" | jq -e '.reason == "remember the summary"' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex Stop reason carries context" "0" "$?"
+
+# _hook_finish also emits Codex-strict JSON when Codex is identified by
+# CODEX_THREAD_ID alone, which is the signal current Codex sessions export
+# to hooks.
+codex_thread_json=$(
+  CODEX_THREAD_ID="thread123"
+  export CODEX_THREAD_ID
+  _HOOK_SELF="$BIN_DIR/agent-hook-prompt-submit"
+  source "$HELPERS"
+  _hook_context "hello world"
+  _hook_finish 2>/dev/null
+)
+echo "$codex_thread_json" | jq -e 'has("context") | not' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex thread output omits legacy context field" "0" "$?"
+echo "$codex_thread_json" | jq -e '.suppressOutput == true' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex thread output suppresses success status" "0" "$?"
+echo "$codex_thread_json" | jq -e '.hookSpecificOutput.hookEventName == "UserPromptSubmit"' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex thread output includes hookEventName" "0" "$?"
+echo "$codex_thread_json" | jq -e '.hookSpecificOutput.additionalContext == "hello world"' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex thread output includes additionalContext" "0" "$?"
+
+# _hook_finish still emits valid JSON when no context and no block
+empty_out=$(
+  source "$HELPERS"
+  _hook_finish 2>/dev/null
+)
+echo "$empty_out" | jq -e '. == {}' >/dev/null 2>&1
+_assert_eq "hook_finish: emits empty JSON when no context" "0" "$?"
+
+# _hook_finish emits context JSON AND exits 2 when both blocked and has context
+blocked_ctx_json=$(
+  AGENTGUARD_NAME="claude"
+  export AGENTGUARD_NAME
+  source "$HELPERS"
+  _hook_context "some context"
+  _hook_block "reason" 2>/dev/null
+  _hook_finish 2>/dev/null
+)
+blocked_ctx_exit=$?
+echo "$blocked_ctx_json" | jq -e '.context == "some context"' >/dev/null 2>&1
+_assert_eq "hook_finish: emits context when blocked" "0" "$?"
+echo "$blocked_ctx_json" | jq -e '.hookSpecificOutput.additionalContext == "some context"' >/dev/null 2>&1
+_assert_eq "hook_finish: blocked context includes Gemini format" "0" "$?"
+_assert_eq "hook_finish: exits 2 when blocked with context" "2" "$blocked_ctx_exit"
+
+# Blocked Codex hooks must stay visible even though successful context-injection
+# hooks are quiet.
+blocked_codex_json=$(
+  AGENTGUARD_NAME="codex"
+  export AGENTGUARD_NAME
+  _HOOK_SELF="$BIN_DIR/agent-hook-prompt-submit"
+  source "$HELPERS"
+  _hook_context "some context"
+  _hook_block "reason" 2>/dev/null
+  _hook_finish 2>/dev/null
+)
+blocked_codex_exit=$?
+echo "$blocked_codex_json" | jq -e 'has("suppressOutput") | not' >/dev/null 2>&1
+_assert_eq "hook_finish: blocked Codex output is not suppressed" "0" "$?"
+_assert_eq "hook_finish: blocked Codex exits 2" "2" "$blocked_codex_exit"
+
+# _hook_finish preserves newlines in multi-line context
+multiline_json=$(
+  AGENTGUARD_NAME="claude"
+  export AGENTGUARD_NAME
+  source "$HELPERS"
+  _hook_context "line one"
+  _hook_context "line two"
+  _hook_finish 2>/dev/null
+)
+echo "$multiline_json" | jq -e '.context | test("line one\nline two")' >/dev/null 2>&1
+_assert_eq "hook_finish: multi-line context preserved" "0" "$?"
+echo "$multiline_json" | jq -e '.hookSpecificOutput.additionalContext | test("line one\nline two")' >/dev/null 2>&1
+_assert_eq "hook_finish: multi-line Gemini additionalContext preserved" "0" "$?"
+
+# _hook_finish exits 2 when blocked
+(
+  source "$HELPERS"
+  _hook_block "reason" 2>/dev/null
+  _hook_finish >/dev/null 2>/dev/null
+)
+_assert_eq "hook_finish: exits 2 when blocked" "2" "$?"
+
+# _hook_finish exits 0 when not blocked
+(
+  source "$HELPERS"
+  _hook_finish >/dev/null 2>/dev/null
+)
+_assert_eq "hook_finish: exits 0 when not blocked" "0" "$?"
+
+# ---------------------------------------------------------------------------
+# Tests: hook-helpers.sh — _hook_parse_command / CMD_LINE1
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== hook-helpers: _hook_parse_command ==="
+
+# _hook_parse_command uses _HOOK_INPUT=$(cat) on first call.  Set
+# _HOOK_INPUT directly to avoid running the function in a pipe subshell
+# (which would discard the exported vars).
+
+# Single-line command: CMD_LINE1 equals CMD_TRIMMED
+(
+  source "$HELPERS"
+  _HOOK_INPUT='{"tool_input":{"command":"ls -la /tmp"}}'
+  _hook_parse_command 2>/dev/null </dev/null
+  [ "$CMD_LINE1" = "$CMD_TRIMMED" ] && echo "PASS" || echo "FAIL: CMD_LINE1='$CMD_LINE1' CMD_TRIMMED='$CMD_TRIMMED'"
+) | grep -q PASS
+_assert_eq "parse_command: single-line CMD_LINE1 == CMD_TRIMMED" "0" "$?"
+
+# Multi-line command: CMD_LINE1 is only the first line
+# shellcheck disable=SC2016
+multiline_json=$(jq -nc --arg c "$(printf '%s\n%s\n%s' 'git commit -m "$(cat <<'\''EOF'\''' 'Fix git push handling' 'EOF)"')" '{"tool_input":{"command":$c}}')
+(
+  source "$HELPERS"
+  _HOOK_INPUT="$multiline_json"
+  _hook_parse_command 2>/dev/null </dev/null
+  line_count=$(printf '%s\n' "$CMD_LINE1" | wc -l | tr -d ' ')
+  [ "$line_count" = "1" ] && echo "PASS" || echo "FAIL: $line_count lines"
+) | grep -q PASS
+_assert_eq "parse_command: multi-line CMD_LINE1 is one line" "0" "$?"
+
+# Multi-line: CMD_LINE1 contains the command, not the body
+(
+  source "$HELPERS"
+  _HOOK_INPUT="$multiline_json"
+  _hook_parse_command 2>/dev/null </dev/null
+  echo "$CMD_LINE1" | grep -q 'git commit' && echo "PASS" || echo "FAIL: $CMD_LINE1"
+) | grep -q PASS
+_assert_eq "parse_command: CMD_LINE1 has the command" "0" "$?"
+
+# Multi-line: CMD_LINE1 does NOT contain heredoc body content
+(
+  source "$HELPERS"
+  _HOOK_INPUT="$multiline_json"
+  _hook_parse_command 2>/dev/null </dev/null
+  echo "$CMD_LINE1" | grep -q 'git push' && echo "FAIL" || echo "PASS"
+) | grep -q PASS
+_assert_eq "parse_command: CMD_LINE1 excludes heredoc body" "0" "$?"
+
+# Multi-line: CMD_TRIMMED still has the full content
+(
+  source "$HELPERS"
+  _HOOK_INPUT="$multiline_json"
+  _hook_parse_command 2>/dev/null </dev/null
+  trimmed_lines=$(printf '%s\n' "$CMD_TRIMMED" | wc -l | tr -d ' ')
+  [ "$trimmed_lines" -gt 1 ] && echo "PASS" || echo "FAIL: $trimmed_lines lines"
+) | grep -q PASS
+_assert_eq "parse_command: CMD_TRIMMED retains all lines" "0" "$?"
+
+# Leading whitespace stripped from CMD_LINE1
+(
+  source "$HELPERS"
+  _HOOK_INPUT='{"tool_input":{"command":"  ls -la"}}'
+  _hook_parse_command 2>/dev/null </dev/null
+  [ "$CMD_LINE1" = "ls -la" ] && echo "PASS" || echo "FAIL: '$CMD_LINE1'"
+) | grep -q PASS
+_assert_eq "parse_command: CMD_LINE1 strips leading whitespace" "0" "$?"
+
+# ---------------------------------------------------------------------------
+# Tests: hook-helpers.sh — _hook_cd_to_target
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== hook-helpers: _hook_cd_to_target ==="
+
+# cd command changes to target dir
+MOCK_CD_DIR=$(_tmpdir)
+(
+  source "$HELPERS"
+  CMD_TRIMMED="cd $MOCK_CD_DIR && ls"
+  CMD_LINE1="$CMD_TRIMMED"
+  _hook_cd_to_target
+  [ "$PWD" = "$MOCK_CD_DIR" ] && echo "PASS" || echo "FAIL: $PWD"
+) | grep -q PASS
+_assert_eq "cd_to_target: changes to target dir" "0" "$?"
+
+# Non-cd command stays in current dir
+(
+  source "$HELPERS"
+  original_pwd="$PWD"
+  CMD_TRIMMED="ls -la /tmp"
+  CMD_LINE1="$CMD_TRIMMED"
+  _hook_cd_to_target
+  [ "$PWD" = "$original_pwd" ] && echo "PASS" || echo "FAIL: $PWD"
+) | grep -q PASS
+_assert_eq "cd_to_target: non-cd stays put" "0" "$?"
+
+# cd to nonexistent dir stays in current dir
+(
+  source "$HELPERS"
+  original_pwd="$PWD"
+  CMD_TRIMMED="cd /nonexistent_dir_xyz_999"
+  CMD_LINE1="$CMD_TRIMMED"
+  _hook_cd_to_target
+  [ "$PWD" = "$original_pwd" ] && echo "PASS" || echo "FAIL: $PWD"
+) | grep -q PASS
+_assert_eq "cd_to_target: nonexistent dir stays put" "0" "$?"
+
+# cd with tilde expands to HOME
+MOCK_CD_HOME_DIR=$(mktemp -d "$HOME/.agent-hook-test-tilde.XXXXXX")
+MOCK_CD_RELATIVE="${MOCK_CD_HOME_DIR#"$HOME"}"
+(
+  source "$HELPERS"
+  # shellcheck disable=SC2034
+  CMD_TRIMMED="cd ~${MOCK_CD_RELATIVE}"
+  CMD_LINE1="$CMD_TRIMMED"
+  _hook_cd_to_target
+  [ "$PWD" = "$MOCK_CD_HOME_DIR" ] && echo "PASS" || echo "FAIL: $PWD"
+) | grep -q PASS
+_assert_eq "cd_to_target: tilde expansion" "0" "$?"
+rm -rf "$MOCK_CD_HOME_DIR"
+
+_test_summary

@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# agent-hook-bash-protected-git-nested-test — protected bare-Git guard expansions.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+_mock_protected_bare_git_home
+
+echo ""
+echo "=== pre-bash: protected bare-Git expansion guards ==="
+
+_ansi_quote="'"
+
+_ansi_git_cmd="printf %s \$${_ansi_quote}\\${_ansi_quote}\$(git status -uall)${_ansi_quote}"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_ansi_git_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "ANSI-C quoted command substitution git status -uall text: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'echo $(repo=$HOME/.protected-bare-git true); git --git-dir=$repo --work-tree=$HOME status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "command substitution assignment does not leak to parent: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c $'cat <<EOF\n$(git status -uall)\nEOF' '{"tool_input":{"command":$c}}')"
+_assert_eq "active heredoc command substitution git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c $'cat <<EOF\n$(git \\\nstatus -uall)\nEOF' '{"tool_input":{"command":$c}}')"
+_assert_eq "active heredoc multiline command substitution git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c $'cat <<EOF\n$(git status -uall)' '{"tool_input":{"command":$c}}')"
+_assert_eq "unterminated active heredoc command substitution git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c $'repo=$HOME/.protected-bare-git cat <<EOF\n$(git --git-dir=$repo --work-tree=$HOME status -uall)\nEOF' '{"tool_input":{"command":$c}}')"
+_assert_eq "active heredoc sees preceding shell-local repo alias: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c $'cat <<EOF\n$(git --git-dir=$repo --work-tree=$HOME status -uall)\nEOF\nrepo=$HOME/.protected-bare-git' '{"tool_input":{"command":$c}}')"
+_assert_eq "active heredoc ignores later shell-local repo alias: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c $'cat <<\'EOF\'\n$(git status -uall)\nEOF' '{"tool_input":{"command":$c}}')"
+_assert_eq "quoted heredoc command substitution git status -uall: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c $'repo=$HOME/.protected-bare-git cat <<\'SAFE\' <<RUN\nliteral\nSAFE\n$(git --git-dir=$repo --work-tree=$HOME status -uall)\nRUN' '{"tool_input":{"command":$c}}')"
+_assert_eq "second active heredoc sees preceding shell-local repo alias: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c $'repo=$HOME/.protected-bare-git cat <<RUN <<\'SAFE\'\n$(git --git-dir=$repo --work-tree=$HOME status -uall)\nRUN\n$(git --git-dir=$repo --work-tree=$HOME status -uall)\nSAFE' '{"tool_input":{"command":$c}}')"
+_assert_eq "quoted second heredoc ignores command substitution git status -uall: blocked once by first" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c $'repo=$HOME/.protected-bare-git cat <<RUN <<\'SAFE\'\nliteral\nRUN\n$(git --git-dir=$repo --work-tree=$HOME status -uall)\nSAFE' '{"tool_input":{"command":$c}}')"
+_assert_eq "quoted second heredoc command substitution git status -uall: allowed" "0" "$HOOK_EXIT"
+
+_nested_cmd="bash -lc 'echo ok' 'git status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "nested bash safe command with dangerous argv0: allowed" "0" "$HOOK_EXIT"
+
+_nested_cmd="bash -lc 'echo ok' argv0 'git status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "nested bash safe command with dangerous argv1: allowed" "0" "$HOOK_EXIT"
+
+_nested_cmd="bash -c 'echo ok' 'git status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "nested sh safe command with dangerous argv0: allowed" "0" "$HOOK_EXIT"
+
+_nested_cmd="bash -lc 'repo=\$HOME/.protected-bare-git'; git --git-dir=\$repo --work-tree=\$HOME status -uall"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "nested bash assignment does not leak to parent: allowed" "0" "$HOOK_EXIT"
+
+_nested_cmd="export repo=\$HOME/.protected-bare-git; bash -lc 'git --git-dir=\$repo --work-tree=\$HOME status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "exported repo visible to nested bash: blocked" "2" "$HOOK_EXIT"
+
+_nested_cmd="export repo=\$HOME/.protected-bare-git; export -n repo; bash -lc 'git --git-dir=\$repo --work-tree=\$HOME status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "unexported repo hidden from nested bash: allowed" "0" "$HOOK_EXIT"
+
+_nested_cmd="export repo=\$HOME/.protected-bare-git; unset repo; bash -lc 'git --git-dir=\$repo --work-tree=\$HOME status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "unset repo hidden from nested bash: allowed" "0" "$HOOK_EXIT"
+
+_nested_cmd="export repo=\$HOME/.protected-bare-git; unset -f repo; bash -lc 'git --git-dir=\$repo --work-tree=\$HOME status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "unset -f repo remains visible to nested bash: blocked" "2" "$HOOK_EXIT"
+
+_nested_cmd="repo=\$HOME/.protected-bare-git; bash -lc 'git --git-dir=\$repo --work-tree=\$HOME status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "non-exported repo hidden from nested bash: allowed" "0" "$HOOK_EXIT"
+
+_nested_cmd="export GIT_DIR=\$HOME/.protected-bare-git GIT_WORK_TREE=\$HOME; bash -lc 'git status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "exported GIT_DIR visible to nested bash: blocked" "2" "$HOOK_EXIT"
+
+_run_hook_with_git_env "$PRE_BASH" '{"tool_input":{"command":"git status -uall"}}'
+_assert_eq "inherited GIT_DIR git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook_with_git_env "$PRE_BASH" '{"tool_input":{"command":"git ls-files --others --exclude-standard"}}'
+_assert_eq "inherited GIT_DIR git ls-files --others: blocked" "2" "$HOOK_EXIT"
+
+_run_hook_with_git_env "$PRE_BASH" '{"tool_input":{"command":"bash -lc '\''git status -uall'\''"}}'
+_assert_eq "inherited GIT_DIR nested git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_nested_cmd="echo 'git status -uall'"
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "$_nested_cmd" '{"tool_input":{"command":$c}}')"
+_assert_eq "quoted git status in echo: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "command git --git-dir=$HOME/.protected-bare-git --work-tree=$HOME status -uall" '{"tool_input":{"command":$c}}')"
+_assert_eq "command git protected bare-Git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"command git status -uall"}}'
+_assert_eq "command git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"( git status -uall )"}}'
+_assert_eq "subshell git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"if true; then git status -uall; fi"}}'
+_assert_eq "if body git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c $'git \\\n  status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "continued git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c $'cat <<EOF\ngit status -uall\nEOF' '{"tool_input":{"command":$c}}')"
+_assert_eq "heredoc git status -uall body: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c $'cat <<EOF\ngit status -uno\nEOF\ngit status -uall' '{"tool_input":{"command":$c}}')"
+_assert_eq "after heredoc git status -uall: blocked" "2" "$HOOK_EXIT"
+
+_test_summary

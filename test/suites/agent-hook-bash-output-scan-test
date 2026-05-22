@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# agent-hook-bash-output-scan-test — post-bash stdout credential scanner.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+POST_BASH="$BIN_DIR/agent-hook-post-bash"
+
+# Helper: build a PostToolUse payload with a given stdout string.
+_post_bash_payload() {
+  local stdout="$1"
+  jq -nc --arg cmd "cat secrets.env" --arg out "$stdout" \
+    '{"tool_input":{"command":$cmd},"tool_response":{"stdout":$out,"stderr":"","exit_code":0}}'
+}
+
+_post_bash_payload_with_stdout_field() {
+  local field="$1" stdout="$2"
+  jq -nc --arg cmd "cat secrets.env" --arg field "$field" --arg out "$stdout" '
+    {"tool_input":{"command":$cmd}} |
+    if $field == "tool_response.stdout" then .tool_response.stdout = $out
+    elif $field == "tool_result.stdout" then .tool_result.stdout = $out
+    elif $field == "tool_output.stdout" then .tool_output.stdout = $out
+    elif $field == "response.stdout" then .response.stdout = $out
+    elif $field == "result.stdout" then .result.stdout = $out
+    elif $field == "stdout" then .stdout = $out
+    else . end
+  '
+}
+
+echo ""
+echo "=== post-bash: credential scanner ==="
+
+# PEM private key header
+_run_hook "$POST_BASH" "$(_post_bash_payload '-----BEGIN RSA PRIVATE KEY----- # gitleaks:allow
+MIIEowIBAAKCAQEA...
+-----END RSA PRIVATE KEY-----')"
+_assert_eq "PEM private key: warns" "0" "$HOOK_EXIT"
+_assert_contains "PEM private key: WARNING msg" "WARNING" "$HOOK_STDERR"
+_assert_contains "PEM private key: names type" "PEM private key" "$HOOK_STDERR"
+_assert_contains "PEM private key: warning reaches hook context" "Command output may contain credentials" "$HOOK_STDOUT"
+
+# OPENSSH private key header
+_run_hook "$POST_BASH" "$(_post_bash_payload '-----BEGIN OPENSSH PRIVATE KEY----- # gitleaks:allow
+b3BlbnNzaC1rZXktdjEAAAAA...
+-----END OPENSSH PRIVATE KEY-----')"
+_assert_eq "OPENSSH private key: warns" "0" "$HOOK_EXIT"
+_assert_contains "OPENSSH private key: WARNING" "WARNING" "$HOOK_STDERR"
+
+# PEM certificate (not a key — should warn too since the pattern covers CERTIFICATE)
+_run_hook "$POST_BASH" "$(_post_bash_payload '-----BEGIN CERTIFICATE----- # gitleaks:allow
+MIIDXTCCAkWgAwIBAgIJ...
+-----END CERTIFICATE-----')"
+_assert_eq "PEM certificate: warns" "0" "$HOOK_EXIT"
+_assert_contains "PEM certificate: WARNING" "WARNING" "$HOOK_STDERR"
+
+# AWS Access Key ID — split across concatenation so the scanner detects the
+# pattern in the constructed payload string, not in the test source itself.
+_aws_key="AKIA""IOSFODNN7EXAMPLE" # gitleaks:allow
+_run_hook "$POST_BASH" "$(_post_bash_payload "AWS_ACCESS_KEY_ID=$_aws_key")"
+_assert_eq "AWS access key: warns" "0" "$HOOK_EXIT"
+_assert_contains "AWS access key: WARNING" "WARNING" "$HOOK_STDERR"
+_assert_contains "AWS access key: names type" "AWS access key" "$HOOK_STDERR"
+
+# AWS key embedded in prose
+_run_hook "$POST_BASH" "$(_post_bash_payload "key: $_aws_key rest")"
+_assert_eq "AWS key in prose: warns" "0" "$HOOK_EXIT"
+_assert_contains "AWS key in prose: WARNING" "WARNING" "$HOOK_STDERR"
+
+# Non-AKIA string of same length — should not warn
+_bkia_key="BKIA""IOSFODNN7EXAMPLE"
+_run_hook "$POST_BASH" "$(_post_bash_payload "$_bkia_key")"
+_assert_eq "non-AKIA prefix: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "non-AKIA prefix: no WARNING" "WARNING" "$HOOK_STDERR"
+
+# GitHub token (ghp_ prefix)
+_run_hook "$POST_BASH" "$(_post_bash_payload "ghp_$(python3 -c 'print("A"*36)')")"
+_assert_eq "GitHub ghp_ token: warns" "0" "$HOOK_EXIT"
+_assert_contains "GitHub ghp_ token: WARNING" "WARNING" "$HOOK_STDERR"
+_assert_contains "GitHub ghp_ token: names type" "GitHub token" "$HOOK_STDERR"
+
+# GitHub token (ghs_ prefix)
+_run_hook "$POST_BASH" "$(_post_bash_payload "ghs_$(python3 -c 'print("B"*36)')")"
+_assert_eq "GitHub ghs_ token: warns" "0" "$HOOK_EXIT"
+_assert_contains "GitHub ghs_ token: WARNING" "WARNING" "$HOOK_STDERR"
+
+# Anthropic API key
+_run_hook "$POST_BASH" "$(_post_bash_payload "ANTHROPIC_API_KEY=sk-ant-api03-$(python3 -c 'print("X"*40)')")"
+_assert_eq "Anthropic key: warns" "0" "$HOOK_EXIT"
+_assert_contains "Anthropic key: WARNING" "WARNING" "$HOOK_STDERR"
+_assert_contains "Anthropic key: names type" "Anthropic API key" "$HOOK_STDERR"
+
+# Generic sk- API key (32+ chars)
+_run_hook "$POST_BASH" "$(_post_bash_payload "OPENAI_API_KEY=sk-$(python3 -c 'print("a"*48)')")"
+_assert_eq "sk- API key: warns" "0" "$HOOK_EXIT"
+_assert_contains "sk- API key: WARNING" "WARNING" "$HOOK_STDERR"
+_assert_contains "sk- API key: names type" "sk- prefix" "$HOOK_STDERR"
+
+# Short sk- token (under 32 chars) — should not warn (too short to be an API key)
+_run_hook "$POST_BASH" "$(_post_bash_payload "sk-short")"
+_assert_eq "short sk- token: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "short sk- token: no WARNING" "WARNING" "$HOOK_STDERR"
+
+# Multiple credential types in one output — warn mentions both
+_run_hook "$POST_BASH" "$(_post_bash_payload "$_aws_key
+-----BEGIN RSA PRIVATE KEY----- # gitleaks:allow
+data
+-----END RSA PRIVATE KEY-----")"
+_assert_eq "multiple creds: warns" "0" "$HOOK_EXIT"
+_assert_contains "multiple creds: WARNING" "WARNING" "$HOOK_STDERR"
+_assert_contains "multiple creds: AWS type" "AWS access key" "$HOOK_STDERR"
+_assert_contains "multiple creds: PEM type" "PEM private key" "$HOOK_STDERR"
+
+# Clean output — no warning
+_run_hook "$POST_BASH" "$(_post_bash_payload 'total 48
+drwxr-xr-x  12 alex staff  384 May 16 10:00 .
+drwxr-xr-x   5 alex staff  160 May 15 09:00 ..')"
+_assert_eq "clean output: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "clean output: no WARNING" "WARNING" "$HOOK_STDERR"
+_assert_not_contains "clean output: no warning context" "Command output may contain credentials" "$HOOK_STDOUT"
+
+# Empty stdout — no warning
+_run_hook "$POST_BASH" "$(_post_bash_payload '')"
+_assert_eq "empty output: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "empty output: no WARNING" "WARNING" "$HOOK_STDERR"
+
+# Non-Claude stdout field aliases — should still scan command output.
+for _stdout_field in tool_result.stdout tool_output.stdout response.stdout result.stdout stdout; do
+  _run_hook "$POST_BASH" "$(_post_bash_payload_with_stdout_field "$_stdout_field" "OPENAI_API_KEY=sk-$(python3 -c 'print("b"*48)')")"
+  _assert_eq "$_stdout_field: warns" "0" "$HOOK_EXIT"
+  _assert_contains "$_stdout_field: WARNING" "WARNING" "$HOOK_STDERR"
+done
+
+# No tool_response field at all (pre-bash-style payload) — no crash
+_run_hook "$POST_BASH" '{"tool_input":{"command":"ls"}}'
+_assert_eq "no tool_response: exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "no tool_response: no WARNING" "WARNING" "$HOOK_STDERR"
+
+_test_summary

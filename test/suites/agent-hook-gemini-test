@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# agent-hook-gemini-test — Gemini hook behavior and settings.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+# ---------------------------------------------------------------------------
+# Tests: hooks under Gemini env (end-to-end)
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== gemini env: end-to-end hooks ==="
+
+# pre-bash blocks rm -rf / under Gemini env
+_run_hook_gemini "$PRE_BASH" '{"tool_input":{"command":"rm -rf /"}}'
+_assert_eq "gemini: rm -rf / blocked" "2" "$HOOK_EXIT"
+_assert_contains "gemini: rm -rf / BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+# pre-bash allows safe commands under Gemini env
+_run_hook_gemini "$PRE_BASH" '{"tool_input":{"command":"ls -la"}}'
+_assert_eq "gemini: ls passes" "0" "$HOOK_EXIT"
+_assert_not_contains "gemini: ls no warning" "WARNING" "$HOOK_STDERR"
+
+# session-start emits both output formats under Gemini env
+MOCK_GEM_GIT=$(_tmpdir)
+_install_hook_fixture "$MOCK_GEM_GIT" agent-hook-session-start
+git init "$MOCK_GEM_GIT/repo" >/dev/null 2>&1
+touch "$MOCK_GEM_GIT/repo/newfile"
+gem_ss_out=$(
+  cd "$MOCK_GEM_GIT/repo" &&
+    GEMINI_PROJECT_DIR="$MOCK_GEM_GIT/repo" \
+      AGENTGUARD_NAME="gemini" \
+      TMPDIR="$TEST_TMPDIR" \
+      "$MOCK_GEM_GIT/bin/agent-hook-session-start" </dev/null 2>/dev/null
+)
+echo "$gem_ss_out" | jq -e '.context' >/dev/null 2>&1
+_assert_eq "gemini: session-start emits context" "0" "$?"
+echo "$gem_ss_out" | jq -e '.hookSpecificOutput.additionalContext' >/dev/null 2>&1
+_assert_eq "gemini: session-start emits Gemini additionalContext" "0" "$?"
+
+# MCP circuit breaker works under Gemini env (PPID-based state dir)
+# Clean any leftover Gemini state from prior tests. The PPID inside the
+# hook child is the test runner's PID ($$), so the state dir is
+# $TEST_TMPDIR/hook-state/gemini-$$. Clean it before the test.
+rm -rf "$TEST_TMPDIR/hook-state/gemini-$$"
+
+# Accumulate 3 failures via post-mcp under Gemini env
+_run_hook_gemini "$POST_MCP" '{"tool_name":"mcp__gsrv__tool","tool_result_is_error":true}'
+_run_hook_gemini "$POST_MCP" '{"tool_name":"mcp__gsrv__tool","tool_result_is_error":true}'
+_run_hook_gemini "$POST_MCP" '{"tool_name":"mcp__gsrv__tool","tool_result_is_error":true}'
+
+# pre-mcp should now block under Gemini env
+_run_hook_gemini "$PRE_MCP" '{"tool_name":"mcp__gsrv__tool","tool_input":{}}'
+_assert_eq "gemini: circuit breaker blocks after 3 failures" "2" "$HOOK_EXIT"
+
+# Success resets under Gemini env
+_run_hook_gemini "$POST_MCP" '{"tool_name":"mcp__gsrv__tool","tool_result_is_error":false}'
+_run_hook_gemini "$PRE_MCP" '{"tool_name":"mcp__gsrv__tool","tool_input":{}}'
+_assert_eq "gemini: circuit breaker resets after success" "0" "$HOOK_EXIT"
+
+# knowledge_load warn-once works under Gemini env
+rm -rf "$TEST_TMPDIR/hook-state/gemini-$$"
+_run_hook_gemini "$PRE_MCP" '{"tool_name":"mcp__gsrv__knowledge_load","tool_input":{"url":"https://example.com"}}'
+_assert_contains "gemini: knowledge_load first call warns" "WARNING" "$HOOK_STDERR"
+_run_hook_gemini "$PRE_MCP" '{"tool_name":"mcp__gsrv__knowledge_load","tool_input":{"url":"https://other.com"}}'
+_assert_not_contains "gemini: knowledge_load second call silent" "WARNING" "$HOOK_STDERR"
+
+_test_summary

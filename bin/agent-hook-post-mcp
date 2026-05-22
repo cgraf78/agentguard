@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# agent-hook-post-mcp — PostToolUse tracker for MCP tools.
+# Tracks consecutive failures per MCP server. Resets on success.
+
+set -u
+_HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}" # captured before sourcing so _hook_source_extensions finds agent/local variants
+_hook_script_parent() {
+  case "$1" in
+    */*) printf '%s\n' "${1%/*}" ;;
+    *) printf '.\n' ;;
+  esac
+}
+
+_hook_script_dir() {
+  local path="$1" dir target
+  while [[ -L "$path" ]]; do
+    dir=$(cd -P -- "$(_hook_script_parent "$path")" && pwd) || return 1
+    target=$(readlink "$path") || return 1
+    [[ "$target" == /* ]] || target="$dir/$target"
+    path="$target"
+  done
+  cd -P -- "$(_hook_script_parent "$path")" && pwd
+}
+
+_HOOK_BIN_DIR=$(_hook_script_dir "${BASH_SOURCE[0]}") || {
+  echo "${0##*/}: cannot resolve executable path" >&2
+  exit 2
+}
+source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
+
+_hook_parse_mcp
+
+# Track consecutive failures per server so the pre-mcp circuit breaker
+# can block calls to a down server. Reset on any success.
+is_error=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_result_is_error // false')
+
+if [ "$is_error" = "true" ]; then
+  mkdir -p "$_HOOK_STATE_DIR"
+  count=$(cat "$_HOOK_MCP_FAIL_FILE" 2>/dev/null || echo 0)
+  case "$count" in '' | *[!0-9]*) count=0 ;; esac
+  echo $((count + 1)) >"$_HOOK_MCP_FAIL_FILE"
+else
+  rm -f "$_HOOK_MCP_FAIL_FILE" 2>/dev/null
+fi
+
+# MCP success/failure is another tool boundary; `hm` owns any memory refresh.
+_hook_hm_tool_complete
+_hook_source_extensions
+_hook_finish

@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# agent-hook-post-bash — PostToolUse handler for Bash commands.
+
+set -u
+_HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}" # captured before sourcing so _hook_source_extensions finds agent/local variants
+_hook_script_parent() {
+  case "$1" in
+    */*) printf '%s\n' "${1%/*}" ;;
+    *) printf '.\n' ;;
+  esac
+}
+
+_hook_script_dir() {
+  local path="$1" dir target
+  while [[ -L "$path" ]]; do
+    dir=$(cd -P -- "$(_hook_script_parent "$path")" && pwd) || return 1
+    target=$(readlink "$path") || return 1
+    [[ "$target" == /* ]] || target="$dir/$target"
+    path="$target"
+  done
+  cd -P -- "$(_hook_script_parent "$path")" && pwd
+}
+
+_HOOK_BIN_DIR=$(_hook_script_dir "${BASH_SOURCE[0]}") || {
+  echo "${0##*/}: cannot resolve executable path" >&2
+  exit 2
+}
+source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
+
+_hook_parse_command # reads stdin → $_HOOK_INPUT, sets $CMD_TRIMMED
+
+# Scan stdout for credential-like patterns. Detection is advisory only —
+# the command has already run. Low-false-positive patterns only; omit
+# generic high-entropy heuristics to avoid noise.
+_stdout=$(_hook_tool_stdout)
+
+if [ -n "$_stdout" ]; then
+  _cred_types=''
+
+  _add_cred_type() {
+    if [ -n "$_cred_types" ]; then
+      _cred_types="$_cred_types, $1"
+    else
+      _cred_types="$1"
+    fi
+  }
+
+  # PEM private key or certificate block headers — unambiguous format.
+  # Use -e to avoid grep treating the leading dashes as option flags.
+  if printf '%s' "$_stdout" | grep -qE -e '-----BEGIN [A-Z ]*(PRIVATE KEY|CERTIFICATE)[[:space:]]*-----'; then
+    _add_cred_type 'PEM private key/certificate'
+  fi
+
+  # AWS Access Key ID — AKIA + exactly 16 uppercase alphanumeric chars
+  if printf '%s' "$_stdout" | grep -qE '(^|[^A-Z0-9])AKIA[0-9A-Z]{16}([^A-Z0-9]|$)'; then
+    _add_cred_type 'AWS access key ID'
+  fi
+
+  # GitHub tokens — modern prefixed formats
+  if printf '%s' "$_stdout" | grep -qE '(ghp|ghs|ghr|gho|ghu)_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82}'; then
+    _add_cred_type 'GitHub token'
+  fi
+
+  # Anthropic API key
+  if printf '%s' "$_stdout" | grep -qE 'sk-ant-[A-Za-z0-9_-]{20,}'; then
+    _add_cred_type 'Anthropic API key'
+  fi
+
+  # OpenAI / generic sk- API key (broad but high-signal prefix)
+  if printf '%s' "$_stdout" | grep -qE '(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9]{32,}'; then
+    _add_cred_type 'API key (sk- prefix)'
+  fi
+
+  if [ -n "$_cred_types" ]; then
+    _hook_warn "Command output may contain credentials (${_cred_types}). Avoid using this output in logs, commits, or prompts."
+  fi
+fi
+
+# Let `hm` decide whether this completed tool event changes memory context.
+# The bash hook only passes the observed status/path facts.
+_hook_hm_tool_complete
+_hook_source_extensions
+_hook_finish

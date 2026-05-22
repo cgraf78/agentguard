@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# agent-hook-bash-safety-test — pre-bash rm safety guards.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+# ---------------------------------------------------------------------------
+# Tests: agent-hook-pre-bash — rm -rf guards
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-bash: rm -rf guards ==="
+
+# rm -rf / → blocked
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf /"}}'
+_assert_eq "rm -rf /: exit 2" "2" "$HOOK_EXIT"
+_assert_contains "rm -rf /: BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# rm -rf ~ → blocked
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf ~"}}'
+_assert_eq "rm -rf ~: exit 2" "2" "$HOOK_EXIT"
+
+# rm -rf $HOME → blocked (literal string, not expanded)
+# shellcheck disable=SC2016
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf $HOME"}}'
+_assert_eq "rm -rf \$HOME: exit 2" "2" "$HOOK_EXIT"
+
+# rm -rf . → blocked (current directory)
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf ."}}'
+_assert_eq "rm -rf .: exit 2" "2" "$HOOK_EXIT"
+
+# rm -rf .. → blocked
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf .."}}'
+_assert_eq "rm -rf ..: exit 2" "2" "$HOOK_EXIT"
+
+# rm -rf / ; echo done → blocked (semicolon after dangerous path)
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf / ; echo done"}}'
+_assert_eq "rm -rf / ;: exit 2" "2" "$HOOK_EXIT"
+_assert_contains "rm -rf / ;: BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# rm -rf ~ | tee log → blocked (pipe after dangerous path)
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf ~ | tee log"}}'
+_assert_eq "rm -rf ~ |: exit 2" "2" "$HOOK_EXIT"
+
+# rm -rf / && ls → blocked (double-amp after dangerous path)
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf / && ls"}}'
+_assert_eq "rm -rf / &&: exit 2" "2" "$HOOK_EXIT"
+
+# rm -rf /some/path → warns but allows
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf /some/path"}}'
+_assert_eq "rm -rf /some/path: exit 0" "0" "$HOOK_EXIT"
+_assert_contains "rm -rf /some/path: warns" "WARNING" "$HOOK_STDERR"
+
+# rm -r -f / → blocked
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -r -f /"}}'
+_assert_eq "rm -r -f /: exit 2" "2" "$HOOK_EXIT"
+
+# rm --recursive --force / → blocked
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm --recursive --force /"}}'
+_assert_eq "rm --recursive --force /: exit 2" "2" "$HOOK_EXIT"
+
+# r\m -rf / → blocked; Bash executes the escaped command word as `rm`.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"r\\m -rf /"}}'
+_assert_eq "escaped rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# rm through privilege wrappers or shell control forms should still block.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"sudo rm -rf /"}}'
+_assert_eq "sudo rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"sudo -Eu root rm -rf /"}}'
+_assert_eq "sudo -Eu root rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"sudo -uroot rm -rf /"}}'
+_assert_eq "sudo -uroot rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"doas rm -rf /"}}'
+_assert_eq "doas rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"if rm -rf /; then echo done; fi"}}'
+_assert_eq "if rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"! rm -rf /"}}'
+_assert_eq "! rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"coproc rm -rf /"}}'
+_assert_eq "coproc rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"while rm -rf /; do break; done"}}'
+_assert_eq "while rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"case x in x) rm -rf /;; esac"}}'
+_assert_eq "case arm rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"case x in y) echo no;; x) rm -rf /;; esac"}}'
+_assert_eq "later case arm rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"f(){ rm -rf /; }; f"}}'
+_assert_eq "called function body rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"f () { rm -rf /; }; f"}}'
+_assert_eq "spaced function body rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"function f { rm -rf /; }; f"}}'
+_assert_eq "function keyword body rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"function f() { rm -rf /; }; f"}}'
+_assert_eq "function keyword parens body rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env -S '\''rm -rf /'\''"}}'
+_assert_eq "env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"bash -lc '\''rm -rf /'\''"}}'
+_assert_eq "nested bash rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"bash -ec '\''rm -rf /'\''"}}'
+_assert_eq "nested bash -ec rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"bash -elc '\''rm -rf /'\''"}}'
+_assert_eq "nested bash -elc rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"eval '\''rm -rf /'\''"}}'
+_assert_eq "eval rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"eval -- '\''rm -rf /'\''"}}'
+_assert_eq "eval -- rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_cmd_sub_json=$(jq -nc --arg c 'echo $(rm -rf /)' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_cmd_sub_json"
+_assert_eq "command substitution rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_quoted_cmd_sub_json=$(jq -nc --arg c 'echo "$(rm -rf /)"' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_quoted_cmd_sub_json"
+_assert_eq "quoted command substitution rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_double_quoted_single_cmd_sub_json=$(jq -nc --arg c "echo \"'\$(rm -rf /)'\"" '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_double_quoted_single_cmd_sub_json"
+_assert_eq "double-quoted command substitution with single quotes rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_backtick_json=$(jq -nc --arg c 'echo `rm -rf /`' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_backtick_json"
+_assert_eq "backtick rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_quoted_backtick_json=$(jq -nc --arg c 'echo "`rm -rf /`"' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_quoted_backtick_json"
+_assert_eq "quoted backtick rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_process_sub_json=$(jq -nc --arg c 'cat <(rm -rf /)' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_process_sub_json"
+_assert_eq "process substitution rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_output_process_sub_json=$(jq -nc --arg c 'cat >(rm -rf /)' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_output_process_sub_json"
+_assert_eq "output process substitution rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_heredoc_cmd_sub_json=$(jq -nc --arg c $'cat <<EOF\n$(rm -rf /)\nEOF' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_heredoc_cmd_sub_json"
+_assert_eq "active heredoc command substitution rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_heredoc_multiline_cmd_sub_json=$(jq -nc --arg c $'cat <<EOF\n$(rm -rf \\\n/)\nEOF' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_heredoc_multiline_cmd_sub_json"
+_assert_eq "active heredoc multiline command substitution rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_unterminated_heredoc_cmd_sub_json=$(jq -nc --arg c $'cat <<EOF\n$(rm -rf /)' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_unterminated_heredoc_cmd_sub_json"
+_assert_eq "unterminated active heredoc command substitution rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_single_quoted_cmd_sub_json=$(jq -nc --arg c 'echo '\''$(rm -rf /)'\''' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_single_quoted_cmd_sub_json"
+_assert_eq "single-quoted command substitution rm -rf /: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "single-quoted command substitution rm -rf /: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+_assert_not_contains "single-quoted command substitution rm -rf /: no WARNING" "WARNING" "$HOOK_STDERR"
+
+_single_quoted_process_sub_json=$(jq -nc --arg c 'echo '\''<(rm -rf /)'\''' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_single_quoted_process_sub_json"
+_assert_eq "single-quoted process substitution rm -rf /: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "single-quoted process substitution rm -rf /: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+_assert_not_contains "single-quoted process substitution rm -rf /: no WARNING" "WARNING" "$HOOK_STDERR"
+
+_ansi_quote="'"
+_ansi_rm_cmd="printf %s \$${_ansi_quote}\\${_ansi_quote}\$(rm -rf /)${_ansi_quote}"
+_ansi_rm_json=$(jq -nc --arg c "$_ansi_rm_cmd" '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_ansi_rm_json"
+_assert_eq "ANSI-C quoted command substitution rm -rf / text: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "ANSI-C quoted command substitution rm -rf / text: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+_assert_not_contains "ANSI-C quoted command substitution rm -rf / text: no WARNING" "WARNING" "$HOOK_STDERR"
+
+_quoted_heredoc_cmd_sub_json=$(jq -nc --arg c $'cat <<\'EOF\'\n$(rm -rf /)\nEOF' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_quoted_heredoc_cmd_sub_json"
+_assert_eq "quoted heredoc command substitution rm -rf /: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "quoted heredoc command substitution rm -rf /: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+_assert_not_contains "quoted heredoc command substitution rm -rf /: no WARNING" "WARNING" "$HOOK_STDERR"
+
+_mixed_quoted_heredoc_json=$(jq -nc --arg c $'cat <<E"O"F\n$(rm -rf /)\nEOF' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_mixed_quoted_heredoc_json"
+_assert_eq "mixed-quoted heredoc command substitution rm -rf /: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "mixed-quoted heredoc command substitution rm -rf /: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_ansi_heredoc_then_rm_cmd="cat <<\$${_ansi_quote}EOF${_ansi_quote}"$'\nliteral\nEOF\nrm -rf /'
+_ansi_heredoc_then_rm_json=$(jq -nc --arg c "$_ansi_heredoc_then_rm_cmd" '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_ansi_heredoc_then_rm_json"
+_assert_eq "ANSI-C quoted heredoc delimiter then rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_multi_heredoc_cmd_sub_json=$(jq -nc --arg c $'cat <<\'SAFE\' <<RUN\nliteral\nSAFE\n$(rm -rf /)\nRUN' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_multi_heredoc_cmd_sub_json"
+_assert_eq "second active heredoc command substitution rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_arithmetic_expansion_json=$(jq -nc --arg c 'echo $((rm -rf /))' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_arithmetic_expansion_json"
+_assert_eq "arithmetic expansion text rm -rf /: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "arithmetic expansion text rm -rf /: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_arithmetic_nested_cmd_sub_json=$(jq -nc --arg c 'echo $(( $(rm -rf /) + 1 ))' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_arithmetic_nested_cmd_sub_json"
+_assert_eq "arithmetic nested command substitution rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_multiline_single_quote_json=$(jq -nc --arg c $'echo \'\nrm -rf /\n\'' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_multiline_single_quote_json"
+_assert_eq "multiline single-quoted rm -rf / text: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "multiline single-quoted rm -rf / text: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+_assert_not_contains "multiline single-quoted rm -rf / text: no WARNING" "WARNING" "$HOOK_STDERR"
+
+_cmd_sub_heredoc_prose_json=$(jq -nc --arg c $'echo "$(cat <<EOF\nrm -rf /\nEOF\n)"' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_cmd_sub_heredoc_prose_json"
+_assert_eq "command substitution heredoc prose rm -rf /: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "command substitution heredoc prose rm -rf /: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_cmd_sub_active_heredoc_json=$(jq -nc --arg c $'echo "$(cat <<EOF\n$(rm -rf /)\nEOF\n)"' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_cmd_sub_active_heredoc_json"
+_assert_eq "command substitution active heredoc rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# Prose or strings containing rm -rf should not trigger the rm guard.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"echo rm -rf /"}}'
+_assert_eq "echo rm -rf /: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "echo rm -rf /: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+_assert_not_contains "echo rm -rf /: no WARNING" "WARNING" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"printf '\''rm -rf /'\''"}}'
+_assert_eq "printf rm -rf /: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "printf rm -rf /: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+_assert_not_contains "printf rm -rf /: no WARNING" "WARNING" "$HOOK_STDERR"
+
+# Non-rm command → passes clean
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"true"}}'
+_assert_eq "true: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "true: no warning" "WARNING" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"ls -la"}}'
+_assert_eq "ls: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "ls: no warning" "WARNING" "$HOOK_STDERR"
+
+# Empty command → passes
+_run_hook "$PRE_BASH" '{"tool_input":{"command":""}}'
+_assert_eq "empty cmd: exit 0" "0" "$HOOK_EXIT"
+
+_test_summary

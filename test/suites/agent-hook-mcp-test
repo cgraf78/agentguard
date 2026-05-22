@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+# agent-hook-mcp-test — MCP hook behavior.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+# ---------------------------------------------------------------------------
+# Tests: agent-hook-pre-mcp — circuit breaker
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-mcp: circuit breaker ==="
+
+# No fail file → passes
+_reset_state
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__tool","tool_input":{}}'
+_assert_eq "no failures: exit 0" "0" "$HOOK_EXIT"
+_assert_eq "no failures: no stderr" "" "$HOOK_STDERR"
+
+# 2 failures → still passes
+_reset_state
+mkdir -p "$TEST_TMPDIR/hook-state/$TEST_SID"
+echo 2 >"$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv"
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__tool","tool_input":{}}'
+_assert_eq "2 failures: exit 0" "0" "$HOOK_EXIT"
+
+# 3 failures → blocks
+echo 3 >"$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv"
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__tool","tool_input":{}}'
+_assert_eq "3 failures: exit 2" "2" "$HOOK_EXIT"
+_assert_contains "3 failures: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+# 5 failures → still blocks
+echo 5 >"$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv"
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__tool","tool_input":{}}'
+_assert_eq "5 failures: exit 2" "2" "$HOOK_EXIT"
+
+# Empty fail file → does not crash (treated as 0)
+: >"$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv"
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__tool","tool_input":{}}'
+_assert_eq "empty file: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "empty file: no error" "integer expression" "$HOOK_STDERR"
+
+# Non-numeric fail file → does not crash
+echo "garbage" >"$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv"
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__tool","tool_input":{}}'
+_assert_eq "garbage file: exit 0" "0" "$HOOK_EXIT"
+
+# ---------------------------------------------------------------------------
+# Tests: agent-hook-pre-mcp — server name extraction
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-mcp: server name extraction ==="
+
+# Multi-segment server name (plugin_mux_alpha)
+_reset_state
+mkdir -p "$TEST_TMPDIR/hook-state/$TEST_SID"
+echo 3 >"$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-plugin_mux_alpha"
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__plugin_mux_alpha__search_files","tool_input":{}}'
+_assert_eq "multi-segment server: blocked" "2" "$HOOK_EXIT"
+
+# Single-segment server name
+_reset_state
+mkdir -p "$TEST_TMPDIR/hook-state/$TEST_SID"
+echo 3 >"$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-github"
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__github__create_issue","tool_input":{}}'
+_assert_eq "single-segment server: blocked" "2" "$HOOK_EXIT"
+
+# Non-MCP tool name → exits early (no server extracted)
+_run_hook "$PRE_MCP" '{"tool_name":"Bash","tool_input":{}}'
+_assert_eq "non-mcp tool: exit 0" "0" "$HOOK_EXIT"
+
+# Empty tool name → exits early
+_run_hook "$PRE_MCP" '{"tool_name":"","tool_input":{}}'
+_assert_eq "empty tool: exit 0" "0" "$HOOK_EXIT"
+
+# ---------------------------------------------------------------------------
+# Tests: agent-hook-pre-mcp — search_files warning
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-mcp: search_files warning ==="
+
+_reset_state
+
+# No path filter → warns
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__search_files","tool_input":{"query":"test"}}'
+_assert_eq "no path: exit 0" "0" "$HOOK_EXIT"
+_assert_contains "no path: warns" "WARNING" "$HOOK_STDERR"
+_assert_contains "no path: warning reaches hook context" "search_files called without a path filter" "$HOOK_STDOUT"
+
+# target_directories present → no warning
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__search_files","tool_input":{"target_directories":["src/"],"query":"test"}}'
+_assert_eq "with target_dirs: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "with target_dirs: no warning" "WARNING" "$HOOK_STDERR"
+
+# Empty target_directories array → warns
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__search_files","tool_input":{"target_directories":[],"query":"test"}}'
+_assert_contains "empty array: warns" "WARNING" "$HOOK_STDERR"
+
+# Fallback field "path" → no warning
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__search_files","tool_input":{"path":"src/","query":"test"}}'
+_assert_not_contains "with path: no warning" "WARNING" "$HOOK_STDERR"
+
+# Non-search_files tool → no warning
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__knowledge_filtered_search","tool_input":{"query":"test"}}'
+_assert_not_contains "non-search tool: no search warning" "search_files" "$HOOK_STDERR"
+
+# ---------------------------------------------------------------------------
+# Tests: agent-hook-pre-mcp — knowledge_load warn-once
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-mcp: knowledge_load warn-once ==="
+
+_reset_state
+
+# First call → warns
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__knowledge_load","tool_input":{"url":"https://example.com"}}'
+_assert_contains "first call: warns" "WARNING" "$HOOK_STDERR"
+_assert_contains "first call: mentions knowledge_load" "knowledge_load" "$HOOK_STDERR"
+_assert_contains "first call: warning reaches hook context" "knowledge_load can consume" "$HOOK_STDOUT"
+
+# Second call → silent
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__knowledge_load","tool_input":{"url":"https://other.com"}}'
+_assert_not_contains "second call: no warning" "WARNING" "$HOOK_STDERR"
+
+# Flag file exists
+if [ -f "$TEST_TMPDIR/hook-state/$TEST_SID/knowledge-load-warned" ]; then
+  _pass "warn-once: flag file created"
+else
+  _fail "warn-once: flag file created"
+fi
+
+# ---------------------------------------------------------------------------
+# Tests: agent-hook-pre-mcp — local `-work` variant delegation
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-mcp: local variant delegation ==="
+
+_reset_state
+
+# _hook_source_work looks for ${_HOOK_SELF}-work next to the running hook.
+# Use a shdeps-style symlink so the hook resolves libraries from the dependency
+# repo while still discovering adjacent local extensions next to the symlink.
+MOCK_DIR=$(_tmpdir)
+mkdir -p "$MOCK_DIR/bin"
+ln -s "$PRE_MCP" "$MOCK_DIR/bin/agent-hook-pre-mcp"
+
+# Local `-work` variant that blocks: exit code propagated.
+cat >"$MOCK_DIR/bin/agent-hook-pre-mcp-work" <<'SCRIPT'
+# Sourced by base hook — calls helpers directly
+_hook_block "local variant says no"
+SCRIPT
+
+HOOK_EXIT=0
+out_file=$(mktemp "$TEST_TMPDIR/out.XXXXXX")
+err_file=$(mktemp "$TEST_TMPDIR/err.XXXXXX")
+printf '%s' '{"tool_name":"mcp__srv__tool","tool_input":{}}' |
+  AGENTGUARD_SESSION_ID="$TEST_SID" \
+    AGENTGUARD_NAME="agent" \
+    TMPDIR="$TEST_TMPDIR" \
+    "$MOCK_DIR/bin/agent-hook-pre-mcp" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
+HOOK_STDERR=$(cat "$err_file")
+rm -f "$out_file" "$err_file"
+
+_assert_eq "local variant block: exit 2" "2" "$HOOK_EXIT"
+_assert_contains "local variant block: stderr" "local variant says no" "$HOOK_STDERR"
+
+# Local `-work` variant that passes: exit 0 propagated.
+cat >"$MOCK_DIR/bin/agent-hook-pre-mcp-work" <<'SCRIPT'
+# Sourced — no-op
+true
+SCRIPT
+
+HOOK_EXIT=0
+out_file=$(mktemp "$TEST_TMPDIR/out.XXXXXX")
+err_file=$(mktemp "$TEST_TMPDIR/err.XXXXXX")
+printf '%s' '{"tool_name":"mcp__srv__tool","tool_input":{}}' |
+  AGENTGUARD_SESSION_ID="$TEST_SID" \
+    AGENTGUARD_NAME="agent" \
+    TMPDIR="$TEST_TMPDIR" \
+    "$MOCK_DIR/bin/agent-hook-pre-mcp" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
+rm -f "$out_file" "$err_file"
+
+_assert_eq "local variant pass: exit 0" "0" "$HOOK_EXIT"
+
+# No local variant: exit 0 when the symlink has no adjacent `-work` file.
+MOCK_NO_WORK=$(_tmpdir)
+mkdir -p "$MOCK_NO_WORK/bin"
+ln -s "$PRE_MCP" "$MOCK_NO_WORK/bin/agent-hook-pre-mcp"
+
+HOOK_EXIT=0
+out_file=$(mktemp "$TEST_TMPDIR/out.XXXXXX")
+err_file=$(mktemp "$TEST_TMPDIR/err.XXXXXX")
+printf '%s' '{"tool_name":"mcp__srv__tool","tool_input":{}}' |
+  AGENTGUARD_SESSION_ID="$TEST_SID" \
+    AGENTGUARD_NAME="agent" \
+    TMPDIR="$TEST_TMPDIR" \
+    "$MOCK_NO_WORK/bin/agent-hook-pre-mcp" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
+rm -f "$out_file" "$err_file"
+
+_assert_eq "no local variant: exit 0" "0" "$HOOK_EXIT"
+
+# ---------------------------------------------------------------------------
+# Tests: agent-hook-post-mcp — failure tracking
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== post-mcp: failure tracking ==="
+
+_reset_state
+
+# Successful call → no fail file
+_run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":false}'
+if [ ! -f "$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv" ]; then
+  _pass "success: no fail file"
+else
+  _fail "success: no fail file"
+fi
+
+# Failed call → fail file with count 1
+_run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":true}'
+if [ -f "$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv" ]; then
+  count=$(cat "$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv")
+  _assert_eq "first failure: count 1" "1" "$count"
+else
+  _fail "first failure: fail file created"
+fi
+
+# Second failure → count 2
+_run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":true}'
+count=$(cat "$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv")
+_assert_eq "second failure: count 2" "2" "$count"
+
+# Success after failures → resets counter
+_run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":false}'
+if [ ! -f "$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv" ]; then
+  _pass "success resets: fail file removed"
+else
+  _fail "success resets: fail file removed"
+fi
+
+# Independent servers tracked independently
+_run_hook "$POST_MCP" '{"tool_name":"mcp__alpha__tool","tool_result_is_error":true}'
+_run_hook "$POST_MCP" '{"tool_name":"mcp__beta__tool","tool_result_is_error":true}'
+_run_hook "$POST_MCP" '{"tool_name":"mcp__alpha__tool","tool_result_is_error":true}'
+count_a=$(cat "$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-alpha")
+count_b=$(cat "$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-beta")
+_assert_eq "independent servers: alpha=2" "2" "$count_a"
+_assert_eq "independent servers: beta=1" "1" "$count_b"
+
+# ---------------------------------------------------------------------------
+# Tests: agent-hook-pre-mcp + post-mcp integration
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre+post integration: circuit breaker lifecycle ==="
+
+_reset_state
+
+# Accumulate 3 failures via post-mcp
+_run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":true}'
+_run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":true}'
+_run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":true}'
+
+# pre-mcp should now block
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__tool","tool_input":{}}'
+_assert_eq "after 3 failures: blocked" "2" "$HOOK_EXIT"
+
+# Success via post-mcp resets
+_run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":false}'
+
+# pre-mcp should pass again
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__tool","tool_input":{}}'
+_assert_eq "after reset: passes" "0" "$HOOK_EXIT"
+
+_test_summary
