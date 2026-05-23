@@ -260,11 +260,11 @@ _hook_hm_available() {
   # Tests and emergency debugging can disable Hive Memory without changing the
   # installed hook config. Production defaults to enabled so memory context is
   # automatic once `hm` and its config are present.
-  [ "${HIVE_MEMORY_HOOKS:-1}" != "0" ] || return 1
+  [ "${AGENTGUARD_HIVE_MEMORY_HOOKS:-1}" != "0" ] || return 1
   # `hm hook` may run lower-level `hm` maintenance commands. If those commands
   # themselves trigger agent hooks, skip here so a refresh/render cycle cannot
   # recursively call back into Hive Memory.
-  [ "${HIVE_MEMORY_HOOK_ACTIVE:-0}" != "1" ] || return 1
+  [ "${AGENTGUARD_HIVE_MEMORY_HOOK_ACTIVE:-0}" != "1" ] || return 1
   command -v hm >/dev/null 2>&1 || return 1
   [ -f "$HOME/.config/hive-memory/config.toml" ] || return 1
 }
@@ -425,7 +425,7 @@ _hook_hm_event() {
         HIVE_MEMORY_AGENT_ID="$(_hook_agent_name)" \
         HIVE_MEMORY_SESSION_ID="$_HOOK_SESSION_KEY" \
         HIVE_MEMORY_PROJECT_INFER=0 \
-        HIVE_MEMORY_HOOK_ACTIVE=1 \
+        AGENTGUARD_HIVE_MEMORY_HOOK_ACTIVE=1 \
         hm "${hm_args[@]}" 2>"$err"
     )
   else
@@ -434,7 +434,7 @@ _hook_hm_event() {
       HIVE_MEMORY_SESSION_ID="$_HOOK_SESSION_KEY" \
       HIVE_MEMORY_PROJECT="$project" \
       HIVE_MEMORY_PROJECT_INFER="$project_infer" \
-      HIVE_MEMORY_HOOK_ACTIVE=1 \
+      AGENTGUARD_HIVE_MEMORY_HOOK_ACTIVE=1 \
         hm "${hm_args[@]}" 2>"$err"
     )
   fi

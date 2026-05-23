@@ -262,7 +262,7 @@ _sley_commit_gate() {
   local sley_out=""
   local rc=0
 
-  if [ "${SLEY_AGENT_GATE:-1}" != "0" ]; then
+  if [ "${AGENTGUARD_SLEY_GATE:-1}" != "0" ]; then
     _hook_require_sley || return 0
 
     run_dir="$(_git_commit_effective_dir || printf '%s' "$PWD")"

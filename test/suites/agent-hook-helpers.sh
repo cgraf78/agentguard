@@ -4,7 +4,7 @@
 # shellcheck disable=SC1090,SC1091,SC2030,SC2031,SC2034 # dynamic sources, subshell fixtures, shared fixture vars
 set -o pipefail
 export NO_COLOR=1
-export HIVE_MEMORY_HOOKS=0
+export AGENTGUARD_HIVE_MEMORY_HOOKS=0
 # The test runner may itself be launched by Codex. Most hook fixtures below set
 # explicit agent env, and the "no env" cases should stay no-env even when
 # their parent process is Codex.

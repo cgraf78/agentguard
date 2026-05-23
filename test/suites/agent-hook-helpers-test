@@ -344,7 +344,7 @@ cat >"$HM_BIN/hm" <<'SCRIPT'
   printf 'session=%s\n' "${HIVE_MEMORY_SESSION_ID:-}"
   printf 'project=%s\n' "${HIVE_MEMORY_PROJECT:-}"
   printf 'project_infer=%s\n' "${HIVE_MEMORY_PROJECT_INFER:-}"
-  printf 'active=%s\n' "${HIVE_MEMORY_HOOK_ACTIVE:-}"
+  printf 'active=%s\n' "${AGENTGUARD_HIVE_MEMORY_HOOK_ACTIVE:-}"
 } >>"$HM_LOG"
 
 case "${HM_MODE:-empty}" in
@@ -369,7 +369,7 @@ hm_prompt_out=$(
     TMPDIR="$HM_TMP" \
     HM_LOG="$HM_LOG" \
     HM_MODE=response \
-    HIVE_MEMORY_HOOKS=1 \
+    AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
     AGENTGUARD_NAME=codex \
     CODEX_THREAD_ID="hm-session" \
     bash -c '
@@ -396,7 +396,7 @@ prompt_input_preserved=$(
     HOME="$HM_HOME" \
       PATH="$HM_BIN:$PATH" \
       TMPDIR="$HM_TMP" \
-      HIVE_MEMORY_HOOKS=0 \
+      AGENTGUARD_HIVE_MEMORY_HOOKS=0 \
       AGENTGUARD_NAME=codex \
       CODEX_THREAD_ID="hm-session" \
       bash -c '
@@ -416,7 +416,7 @@ printf '%s' '{"session_id":"json-hm-session","workspace":{"current_dir":"/tmp/wo
     PATH="$HM_BIN:$PATH" \
     TMPDIR="$HM_TMP" \
     HM_LOG="$HM_LOG" \
-    HIVE_MEMORY_HOOKS=1 \
+    AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
     AGENTGUARD_NAME=codex \
     bash -c '
       source "$1"
@@ -437,7 +437,7 @@ printf '%s' "$json_session_payload" |
     TMPDIR="$HM_TMP" \
     HM_LOG="$HM_LOG" \
     HM_MODE=response \
-    HIVE_MEMORY_HOOKS=1 \
+    AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
     AGENTGUARD_NAME=codex \
     bash -c '
       source "$1"
@@ -451,7 +451,7 @@ printf '%s' "$json_session_payload" |
     TMPDIR="$HM_TMP" \
     HM_LOG="$HM_LOG" \
     HM_MODE=response \
-    HIVE_MEMORY_HOOKS=1 \
+    AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
     AGENTGUARD_NAME=codex \
     bash -c '
       source "$1"
@@ -465,7 +465,7 @@ HOME="$HM_HOME" \
   PATH="$HM_BIN:$PATH" \
   TMPDIR="$HM_TMP" \
   HM_LOG="$HM_LOG" \
-  HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
   AGENTGUARD_NAME=claude \
   CODEX_THREAD_ID="" \
   CLAUDE_CODE_CURRENT_SESSION_ID="hm-session" \
@@ -488,7 +488,7 @@ HOME="$HM_HOME" \
   PATH="$HM_BIN:$PATH" \
   TMPDIR="$HM_TMP" \
   HM_LOG="$HM_LOG" \
-  HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
   AGENTGUARD_NAME=claude \
   CODEX_THREAD_ID="" \
   CLAUDE_CODE_CURRENT_SESSION_ID="hm-session" \
@@ -507,7 +507,7 @@ HOME="$HM_HOME" \
   PATH="$HM_BIN:$PATH" \
   TMPDIR="$HM_TMP" \
   HM_LOG="$HM_LOG" \
-  HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
   AGENTGUARD_NAME=codex \
   CODEX_THREAD_ID="hm-session" \
   bash -c '
@@ -523,7 +523,7 @@ printf '%s' 'not-json' |
     PATH="$HM_BIN:$PATH" \
     TMPDIR="$HM_TMP" \
     HM_LOG="$HM_LOG" \
-    HIVE_MEMORY_HOOKS=1 \
+    AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
     AGENTGUARD_NAME=codex \
     CODEX_THREAD_ID="hm-session" \
     bash -c '
@@ -538,7 +538,7 @@ HOME="$HM_HOME" \
   PATH="$HM_BIN:$PATH" \
   TMPDIR="$HM_TMP" \
   HM_LOG="$HM_LOG" \
-  HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
   AGENTGUARD_NAME=claude \
   CODEX_THREAD_ID="" \
   CLAUDE_CODE_CURRENT_SESSION_ID="hm-session" \
@@ -556,7 +556,7 @@ HOME="$HM_HOME" \
   PATH="$HM_BIN:$PATH" \
   TMPDIR="$HM_TMP" \
   HM_LOG="$HM_LOG" \
-  HIVE_MEMORY_HOOKS=0 \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=0 \
   AGENTGUARD_NAME=claude \
   CODEX_THREAD_ID="" \
   CLAUDE_CODE_CURRENT_SESSION_ID="hm-session" \
@@ -564,15 +564,15 @@ HOME="$HM_HOME" \
     source "$1"
     _hook_hm_session_start
   ' _ "$HELPERS" >/dev/null 2>/dev/null
-_assert_eq "hm hook: HIVE_MEMORY_HOOKS=0 disables integration" "" "$(cat "$HM_LOG")"
+_assert_eq "hm hook: AGENTGUARD_HIVE_MEMORY_HOOKS=0 disables integration" "" "$(cat "$HM_LOG")"
 
 : >"$HM_LOG"
 HOME="$HM_HOME" \
   PATH="$HM_BIN:$PATH" \
   TMPDIR="$HM_TMP" \
   HM_LOG="$HM_LOG" \
-  HIVE_MEMORY_HOOKS=1 \
-  HIVE_MEMORY_HOOK_ACTIVE=1 \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_HIVE_MEMORY_HOOK_ACTIVE=1 \
   AGENTGUARD_NAME=claude \
   CODEX_THREAD_ID="" \
   CLAUDE_CODE_CURRENT_SESSION_ID="hm-session" \
@@ -588,7 +588,7 @@ HOME="$HM_HOME" \
   TMPDIR="$HM_TMP" \
   HM_LOG="$HM_LOG" \
   HM_MODE=response \
-  HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
   AGENTGUARD_NAME=codex \
   CODEX_THREAD_ID="" \
   CLAUDE_CODE_CURRENT_SESSION_ID="" \
@@ -606,7 +606,7 @@ HOME="$HM_HOME" \
   TMPDIR="$HM_TMP" \
   HM_LOG="$HM_LOG" \
   HM_MODE=fail \
-  HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
   AGENTGUARD_NAME=claude \
   CODEX_THREAD_ID="" \
   CLAUDE_CODE_CURRENT_SESSION_ID="hm-fail-session" \

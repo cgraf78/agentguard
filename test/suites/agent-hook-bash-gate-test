@@ -220,17 +220,17 @@ _assert_contains "git commit --amend (staged changes): gate runs" "mock-sley=1" 
 
 cd "$_amend_saved_pwd" || exit 1
 
-# Kill switch — `SLEY_AGENT_GATE=0` disables the gate entirely. Useful for
+# Kill switch — `AGENTGUARD_SLEY_GATE=0` disables the gate entirely. Useful for
 # CI environments that have already validated readiness, or for unblocking a
 # WIP commit during iteration.
 _reset_state
-PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+PATH="$_gate_path" AGENTGUARD_SLEY_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"git commit -m foo"}}'
 _assert_eq "kill switch: not blocked" "0" "$HOOK_EXIT"
 _assert_not_contains "kill switch: gate did not run" "should not appear" "$HOOK_STDERR"
 
 _reset_state
-PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+PATH="$_gate_path" AGENTGUARD_SLEY_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"echo git commit -m foo"}}'
 _assert_eq "echo git commit: not a commit command" "0" "$HOOK_EXIT"
 _assert_not_contains "echo git commit: no design-review nudge" \
@@ -239,7 +239,7 @@ _assert_not_contains "echo git commit: no public-leak reminder" \
   "private or environment-specific details" "$HOOK_STDERR"
 
 _reset_state
-PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+PATH="$_gate_path" AGENTGUARD_SLEY_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"printf '\''git commit -m foo'\''"}}'
 _assert_eq "printf git commit: not a commit command" "0" "$HOOK_EXIT"
 _assert_not_contains "printf git commit: no design-review nudge" \
@@ -248,14 +248,14 @@ _assert_not_contains "printf git commit: no public-leak reminder" \
   "private or environment-specific details" "$HOOK_STDERR"
 
 _reset_state
-PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+PATH="$_gate_path" AGENTGUARD_SLEY_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"echo sl commit -m foo"}}'
 _assert_eq "echo sl commit: not a commit command" "0" "$HOOK_EXIT"
 _assert_not_contains "echo sl commit: no design-review nudge" \
   "Consider running /review or /simplify" "$HOOK_STDERR"
 
 _reset_state
-PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+PATH="$_gate_path" AGENTGUARD_SLEY_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"if git commit -m foo; then echo done; fi"}}'
 _assert_eq "if git commit: not blocked with kill switch" "0" "$HOOK_EXIT"
 _assert_contains "if git commit: design-review nudge" \
@@ -264,7 +264,7 @@ _assert_contains "if git commit: public-leak reminder" \
   "private or environment-specific details" "$HOOK_STDERR"
 
 _reset_state
-PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+PATH="$_gate_path" AGENTGUARD_SLEY_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
   _run_hook "$PRE_BASH" "$(jq -nc --arg c 'echo $(git commit -m foo)' '{"tool_input":{"command":$c}}')"
 _assert_eq "command substitution git commit: not blocked with kill switch" "0" "$HOOK_EXIT"
 _assert_contains "command substitution git commit: design-review nudge" \
@@ -273,7 +273,7 @@ _assert_contains "command substitution git commit: public-leak reminder" \
   "private or environment-specific details" "$HOOK_STDERR"
 
 _reset_state
-PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+PATH="$_gate_path" AGENTGUARD_SLEY_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
   _run_hook "$PRE_BASH" "$(jq -nc --arg c 'cat <(git commit -m foo)' '{"tool_input":{"command":$c}}')"
 _assert_eq "process substitution git commit: not blocked with kill switch" "0" "$HOOK_EXIT"
 _assert_contains "process substitution git commit: design-review nudge" \
@@ -282,7 +282,7 @@ _assert_contains "process substitution git commit: public-leak reminder" \
   "private or environment-specific details" "$HOOK_STDERR"
 
 _reset_state
-PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+PATH="$_gate_path" AGENTGUARD_SLEY_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
   _run_hook "$PRE_BASH" "$(jq -nc --arg c 'echo "$(git commit -m foo)"' '{"tool_input":{"command":$c}}')"
 _assert_eq "quoted command substitution git commit: not blocked with kill switch" "0" "$HOOK_EXIT"
 _assert_contains "quoted command substitution git commit: design-review nudge" \
@@ -291,7 +291,7 @@ _assert_contains "quoted command substitution git commit: public-leak reminder" 
   "private or environment-specific details" "$HOOK_STDERR"
 
 _reset_state
-PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+PATH="$_gate_path" AGENTGUARD_SLEY_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
   _run_hook "$PRE_BASH" "$(jq -nc --arg c "echo \"'\$(git commit -m foo)'\"" '{"tool_input":{"command":$c}}')"
 _assert_eq "double-quoted command substitution with single quotes git commit: not blocked with kill switch" "0" "$HOOK_EXIT"
 _assert_contains "double-quoted command substitution with single quotes git commit: design-review nudge" \
@@ -300,7 +300,7 @@ _assert_contains "double-quoted command substitution with single quotes git comm
   "private or environment-specific details" "$HOOK_STDERR"
 
 _reset_state
-PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+PATH="$_gate_path" AGENTGUARD_SLEY_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
   _run_hook "$PRE_BASH" "$(jq -nc --arg c 'echo '\''$(git commit -m foo)'\''' '{"tool_input":{"command":$c}}')"
 _assert_eq "single-quoted command substitution git commit: not a commit command" "0" "$HOOK_EXIT"
 _assert_not_contains "single-quoted command substitution git commit: no design-review nudge" \
@@ -309,7 +309,7 @@ _assert_not_contains "single-quoted command substitution git commit: no public-l
   "private or environment-specific details" "$HOOK_STDERR"
 
 _reset_state
-PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+PATH="$_gate_path" AGENTGUARD_SLEY_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
   _run_hook "$PRE_BASH" "$(jq -nc --arg c $'cat <<EOF\n$(git commit -m foo)\nEOF' '{"tool_input":{"command":$c}}')"
 _assert_eq "active heredoc command substitution git commit: not blocked with kill switch" "0" "$HOOK_EXIT"
 _assert_contains "active heredoc command substitution git commit: design-review nudge" \
@@ -318,7 +318,7 @@ _assert_contains "active heredoc command substitution git commit: public-leak re
   "private or environment-specific details" "$HOOK_STDERR"
 
 _reset_state
-PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+PATH="$_gate_path" AGENTGUARD_SLEY_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
   _run_hook "$PRE_BASH" "$(jq -nc --arg c $'cat <<\'EOF\'\n$(git commit -m foo)\nEOF' '{"tool_input":{"command":$c}}')"
 _assert_eq "quoted heredoc command substitution git commit: not a commit command" "0" "$HOOK_EXIT"
 _assert_not_contains "quoted heredoc command substitution git commit: no design-review nudge" \
@@ -327,27 +327,27 @@ _assert_not_contains "quoted heredoc command substitution git commit: no public-
   "private or environment-specific details" "$HOOK_STDERR"
 
 _reset_state
-PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+PATH="$_gate_path" AGENTGUARD_SLEY_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"sudo git commit -m foo"}}'
 _assert_eq "sudo git commit: blocked by sudo guard" "2" "$HOOK_EXIT"
 _assert_contains "sudo git commit: BLOCKED msg" "sudo is not allowed" "$HOOK_STDERR"
 
 _reset_state
-PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+PATH="$_gate_path" AGENTGUARD_SLEY_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl amend -mfoo"}}'
 _assert_eq "sl amend -mfoo: metadata only" "0" "$HOOK_EXIT"
 _assert_not_contains "sl amend -mfoo: no design-review nudge" \
   "Consider running /review or /simplify" "$HOOK_STDERR"
 
 _reset_state
-PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+PATH="$_gate_path" AGENTGUARD_SLEY_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl amend --message=foo"}}'
 _assert_eq "sl amend --message=foo: metadata only" "0" "$HOOK_EXIT"
 _assert_not_contains "sl amend --message=foo: no design-review nudge" \
   "Consider running /review or /simplify" "$HOOK_STDERR"
 
 _reset_state
-PATH="$_gate_path" SLEY_AGENT_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
+PATH="$_gate_path" AGENTGUARD_SLEY_GATE=0 MOCK_SLEY_RC=1 MOCK_SLEY_OUT="should not appear" \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl --config ui.color=never commit -m foo"}}'
 _assert_eq "sl global option commit: not blocked with kill switch" "0" "$HOOK_EXIT"
 _assert_contains "sl global option commit: design-review nudge" \
