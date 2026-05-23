@@ -179,10 +179,10 @@ _pre_bash_needs_classifier() {
   return 1
 }
 
-if _pre_bash_needs_classifier "$CMD_TRIMMED"; then
+if _pre_bash_needs_classifier "$AGENTGUARD_CMD_TRIMMED"; then
   # shellcheck source=../lib/agentguard/hook-command-classifier.sh
   source "$_HOOK_BIN_DIR/../lib/agentguard/hook-command-classifier.sh"
-  _hook_cache_executable_fragments "$CMD_TRIMMED"
+  _hook_cache_executable_fragments "$AGENTGUARD_CMD_TRIMMED"
 else
   _hook_source_extensions
   _hook_finish
@@ -209,7 +209,7 @@ _git_commit_command() {
   local fragment
   while IFS= read -r fragment; do
     _git_subcommand_is "$fragment" "commit" && return 0
-  done < <(_hook_executable_fragments "$CMD_TRIMMED")
+  done < <(_hook_executable_fragments "$AGENTGUARD_CMD_TRIMMED")
   return 1
 }
 
@@ -217,7 +217,7 @@ _git_commit_effective_dir() {
   local fragment
   while IFS= read -r fragment; do
     _git_subcommand_effective_dir "$fragment" "commit" && return 0
-  done < <(_hook_executable_fragments "$CMD_TRIMMED")
+  done < <(_hook_executable_fragments "$AGENTGUARD_CMD_TRIMMED")
   return 1
 }
 
@@ -225,7 +225,7 @@ _git_commit_amend_command() {
   local fragment
   while IFS= read -r fragment; do
     _git_subcommand_has_option "$fragment" "commit" "--amend" && return 0
-  done < <(_hook_executable_fragments "$CMD_TRIMMED")
+  done < <(_hook_executable_fragments "$AGENTGUARD_CMD_TRIMMED")
   return 1
 }
 
@@ -243,7 +243,7 @@ _sl_commit_command() {
     _command_subcommand_is "$fragment" "sl" "amend" "commit" || continue
     _sl_metadata_only_fragment "$fragment" && continue
     return 0
-  done < <(_hook_executable_fragments "$CMD_TRIMMED")
+  done < <(_hook_executable_fragments "$AGENTGUARD_CMD_TRIMMED")
   return 1
 }
 
@@ -639,7 +639,7 @@ _hook_run_guards
 # Any raw untracked scan there asks Git to walk the whole tree, which is slow
 # enough to wedge agent turns. Integrations can expose safer front doors; raw
 # inspection must be scoped to a pathspec.
-if _protected_bare_git_scan_candidate "$CMD_TRIMMED"; then
+if _protected_bare_git_scan_candidate "$AGENTGUARD_CMD_TRIMMED"; then
   # Keep the common path cheap: most commands never enter the scanner above.
   _block_protected_bare_git_untracked_scans
 fi

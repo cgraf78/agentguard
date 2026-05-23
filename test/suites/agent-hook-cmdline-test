@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# agent-hook-cmdline-test — CMD_LINE1 heredoc false-positive guards.
+# agent-hook-cmdline-test — AGENTGUARD_CMD_LINE1 heredoc false-positive guards.
 
 # shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
 AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
 . "$AGENTGUARD_TEST_HELPERS"
 
 # ---------------------------------------------------------------------------
-# Tests: CMD_LINE1 — heredoc false-positive prevention (shared helpers)
+# Tests: AGENTGUARD_CMD_LINE1 — heredoc false-positive prevention (shared helpers)
 # ---------------------------------------------------------------------------
 
 echo ""
-echo "=== CMD_LINE1: base hook heredoc false-positives ==="
+echo "=== AGENTGUARD_CMD_LINE1: base hook heredoc false-positives ==="
 
 # Helper: build a multi-line commit command with body content on line 2+.
 # The actual command (git commit/amend) is on line 1; body is on subsequent
-# lines — exactly the structure that CMD_LINE1 must filter.
+# lines — exactly the structure that AGENTGUARD_CMD_LINE1 must filter.
 _heredoc_cmd() {
   local subcmd="$1" body="$2"
   printf '%s\n%s\n%s' "$subcmd -m \"\$(cat <<'EOF'" "$body" 'EOF)"'

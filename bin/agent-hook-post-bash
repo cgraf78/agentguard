@@ -27,7 +27,7 @@ _HOOK_BIN_DIR=$(_hook_script_dir "${BASH_SOURCE[0]}") || {
 }
 source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
 
-_hook_parse_command # reads stdin → $_HOOK_INPUT, sets $CMD_TRIMMED
+_hook_parse_command # reads stdin → $_HOOK_INPUT, sets $AGENTGUARD_CMD_TRIMMED
 
 # Scan stdout for credential-like patterns. Detection is advisory only —
 # the command has already run. Low-false-positive patterns only; omit

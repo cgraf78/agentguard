@@ -163,7 +163,7 @@ printf '%s' '{"tool_input":{"file_path":"/tmp/test/g.py"}}' |
     AGENTGUARD_NAME="agent" \
     TMPDIR="$TEST_TMPDIR" \
     CODEX_THREAD_ID="" \
-    EDIT_CHURN_WARN=3 EDIT_CHURN_BLOCK=6 \
+    AGENTGUARD_EDIT_CHURN_WARN=3 AGENTGUARD_EDIT_CHURN_BLOCK=6 \
     "$PRE_EDIT" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
 HOOK_STDERR=$(cat "$err_file")
 rm -f "$out_file" "$err_file"
@@ -182,7 +182,7 @@ printf '%s' '{"tool_input":{"file_path":"/tmp/test/g.py"}}' |
     AGENTGUARD_NAME="agent" \
     TMPDIR="$TEST_TMPDIR" \
     CODEX_THREAD_ID="" \
-    EDIT_CHURN_WARN=3 EDIT_CHURN_BLOCK=6 \
+    AGENTGUARD_EDIT_CHURN_WARN=3 AGENTGUARD_EDIT_CHURN_BLOCK=6 \
     "$PRE_EDIT" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
 HOOK_STDERR=$(cat "$err_file")
 rm -f "$out_file" "$err_file"
@@ -197,9 +197,9 @@ _reset_state
 _run_hook "$POST_EDIT" '{"tool_input":{}}'
 churn_dir="$TEST_TMPDIR/hook-state/$TEST_SID/edit-churn"
 if [ -d "$churn_dir" ] && [ -n "$(ls -A "$churn_dir" 2>/dev/null)" ]; then
-  _fail "churn empty FP: no churn files should exist"
+  _fail "churn empty AGENTGUARD_EDIT_FILE: no churn files should exist"
 else
-  _pass "churn empty FP: no churn files created"
+  _pass "churn empty AGENTGUARD_EDIT_FILE: no churn files created"
 fi
 
 echo "=== edit churn: path hashing ==="

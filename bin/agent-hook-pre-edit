@@ -28,7 +28,7 @@ _HOOK_BIN_DIR=$(_hook_script_dir "${BASH_SOURCE[0]}") || {
 source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
 
 _hook_parse_edit_files
-[ -z "$HOOK_EDIT_FILES" ] && exit 0
+[ -z "$AGENTGUARD_EDIT_FILES" ] && exit 0
 
 _pre_edit_code_file() {
   local fp="$1" base
@@ -62,7 +62,7 @@ _pre_edit_comment_reminder() {
     # stderr and model-visible hook context.
     _hook_remind "$reminder"
     return 0
-  done <<<"$HOOK_EDIT_FILES"
+  done <<<"$AGENTGUARD_EDIT_FILES"
 }
 
 _pre_edit_comment_reminder
@@ -73,13 +73,13 @@ while IFS= read -r _fp; do
   _churn_file="$_HOOK_STATE_DIR/edit-churn/$(printf '%s' "$_fp" | cksum | cut -d' ' -f1)"
   if [ -f "$_churn_file" ]; then
     _count=$(cat "$_churn_file")
-    if [ "${_count:-0}" -ge "${EDIT_CHURN_BLOCK:-10}" ]; then
+    if [ "${_count:-0}" -ge "${AGENTGUARD_EDIT_CHURN_BLOCK:-10}" ]; then
       _hook_block "'$(basename "$_fp")' has been edited $_count times this session. Step back and rethink the approach instead of continuing to patch."
-    elif [ "${_count:-0}" -ge "${EDIT_CHURN_WARN:-5}" ]; then
+    elif [ "${_count:-0}" -ge "${AGENTGUARD_EDIT_CHURN_WARN:-5}" ]; then
       _hook_warn "'$(basename "$_fp")' has been edited $_count times this session. Consider whether you're making progress or going in circles."
     fi
   fi
-done <<<"$HOOK_EDIT_FILES"
+done <<<"$AGENTGUARD_EDIT_FILES"
 
 # Block edits to secrets files — credentials, keys, and env files must not be
 # modified by an agent without explicit human review.
@@ -112,7 +112,7 @@ while IFS= read -r _fp; do
   if _secrets_file_pattern "$_fp"; then
     _hook_block "Editing '$_fp' is not allowed — secrets and credential files must be modified manually."
   fi
-done <<<"$HOOK_EDIT_FILES"
+done <<<"$AGENTGUARD_EDIT_FILES"
 
 _hook_source_extensions
 _hook_finish

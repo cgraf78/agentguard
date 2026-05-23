@@ -63,10 +63,10 @@ _post_edit_sley_file() {
 while IFS= read -r _fp; do
   [ -n "$_fp" ] || continue
   _post_edit_sley_file "$_fp" || exit $?
-done <<<"$HOOK_EDIT_FILES"
+done <<<"$AGENTGUARD_EDIT_FILES"
 
 # Track edit churn per file
-if [ -n "$HOOK_EDIT_FILES" ]; then
+if [ -n "$AGENTGUARD_EDIT_FILES" ]; then
   _churn_dir="$_HOOK_STATE_DIR/edit-churn"
   mkdir -p "$_churn_dir" 2>/dev/null
   while IFS= read -r _fp; do
@@ -74,7 +74,7 @@ if [ -n "$HOOK_EDIT_FILES" ]; then
     _churn_file="$_churn_dir/$(printf '%s' "$_fp" | cksum | cut -d' ' -f1)"
     _count=$(cat "$_churn_file" 2>/dev/null || echo 0)
     echo $((_count + 1)) >"$_churn_file"
-  done <<<"$HOOK_EDIT_FILES"
+  done <<<"$AGENTGUARD_EDIT_FILES"
 fi
 
 # Keep memory refresh policy in `hm`; this hook only supplies the edit event.

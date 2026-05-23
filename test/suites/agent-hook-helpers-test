@@ -289,7 +289,7 @@ _assert_eq "state_dir: parse_command refreshes input session_id" "0" "$?"
   source "$HELPERS"
   _HOOK_INPUT='{"tool_input":{"cmd":"echo ok"}}'
   _hook_parse_command 2>/dev/null </dev/null
-  [ "$CMD_TRIMMED" = "echo ok" ] && echo "PASS" || echo "FAIL: $CMD_TRIMMED"
+  [ "$AGENTGUARD_CMD_TRIMMED" = "echo ok" ] && echo "PASS" || echo "FAIL: $AGENTGUARD_CMD_TRIMMED"
 ) | grep -q PASS
 _assert_eq "parse_command: accepts cmd fallback" "0" "$?"
 
@@ -299,10 +299,10 @@ _assert_eq "parse_command: accepts cmd fallback" "0" "$?"
   _HOOK_INPUT="$_apply_patch_json"
   _hook_parse_edit_files 2>/dev/null </dev/null
   want=$(printf '%s\n' "/tmp/test/a.py" "/tmp/test/b.py" "/tmp/test/c.py")
-  if [ "$HOOK_EDIT_FILES" = "$want" ] && [ "$FP" = "/tmp/test/a.py" ]; then
+  if [ "$AGENTGUARD_EDIT_FILES" = "$want" ] && [ "$AGENTGUARD_EDIT_FILE" = "/tmp/test/a.py" ]; then
     echo "PASS"
   else
-    printf 'FAIL: files=%s fp=%s\n' "$HOOK_EDIT_FILES" "$FP"
+    printf 'FAIL: files=%s fp=%s\n' "$AGENTGUARD_EDIT_FILES" "$AGENTGUARD_EDIT_FILE"
   fi
 ) | grep -q PASS
 _assert_eq "parse_edit_files: extracts apply_patch paths in order" "0" "$?"
@@ -318,7 +318,7 @@ _apply_patch_object_json=$(jq -n --arg patch \
   source "$HELPERS"
   _HOOK_INPUT="$_apply_patch_object_json"
   _hook_parse_edit_files 2>/dev/null </dev/null
-  [ "$HOOK_EDIT_FILES" = "/tmp/test/remove.py" ] && echo "PASS" || echo "FAIL: $HOOK_EDIT_FILES"
+  [ "$AGENTGUARD_EDIT_FILES" = "/tmp/test/remove.py" ] && echo "PASS" || echo "FAIL: $AGENTGUARD_EDIT_FILES"
 ) | grep -q PASS
 _assert_eq "parse_edit_files: extracts object patch paths" "0" "$?"
 
@@ -1031,7 +1031,7 @@ _assert_eq "hook_finish: exits 2 when blocked" "2" "$?"
 _assert_eq "hook_finish: exits 0 when not blocked" "0" "$?"
 
 # ---------------------------------------------------------------------------
-# Tests: hook-helpers.sh — _hook_parse_command / CMD_LINE1
+# Tests: hook-helpers.sh — _hook_parse_command / AGENTGUARD_CMD_LINE1
 # ---------------------------------------------------------------------------
 
 echo ""
@@ -1041,63 +1041,63 @@ echo "=== hook-helpers: _hook_parse_command ==="
 # _HOOK_INPUT directly to avoid running the function in a pipe subshell
 # (which would discard the exported vars).
 
-# Single-line command: CMD_LINE1 equals CMD_TRIMMED
+# Single-line command: AGENTGUARD_CMD_LINE1 equals AGENTGUARD_CMD_TRIMMED
 (
   source "$HELPERS"
   _HOOK_INPUT='{"tool_input":{"command":"ls -la /tmp"}}'
   _hook_parse_command 2>/dev/null </dev/null
-  [ "$CMD_LINE1" = "$CMD_TRIMMED" ] && echo "PASS" || echo "FAIL: CMD_LINE1='$CMD_LINE1' CMD_TRIMMED='$CMD_TRIMMED'"
+  [ "$AGENTGUARD_CMD_LINE1" = "$AGENTGUARD_CMD_TRIMMED" ] && echo "PASS" || echo "FAIL: AGENTGUARD_CMD_LINE1='$AGENTGUARD_CMD_LINE1' AGENTGUARD_CMD_TRIMMED='$AGENTGUARD_CMD_TRIMMED'"
 ) | grep -q PASS
-_assert_eq "parse_command: single-line CMD_LINE1 == CMD_TRIMMED" "0" "$?"
+_assert_eq "parse_command: single-line AGENTGUARD_CMD_LINE1 == AGENTGUARD_CMD_TRIMMED" "0" "$?"
 
-# Multi-line command: CMD_LINE1 is only the first line
+# Multi-line command: AGENTGUARD_CMD_LINE1 is only the first line
 # shellcheck disable=SC2016
 multiline_json=$(jq -nc --arg c "$(printf '%s\n%s\n%s' 'git commit -m "$(cat <<'\''EOF'\''' 'Fix git push handling' 'EOF)"')" '{"tool_input":{"command":$c}}')
 (
   source "$HELPERS"
   _HOOK_INPUT="$multiline_json"
   _hook_parse_command 2>/dev/null </dev/null
-  line_count=$(printf '%s\n' "$CMD_LINE1" | wc -l | tr -d ' ')
+  line_count=$(printf '%s\n' "$AGENTGUARD_CMD_LINE1" | wc -l | tr -d ' ')
   [ "$line_count" = "1" ] && echo "PASS" || echo "FAIL: $line_count lines"
 ) | grep -q PASS
-_assert_eq "parse_command: multi-line CMD_LINE1 is one line" "0" "$?"
+_assert_eq "parse_command: multi-line AGENTGUARD_CMD_LINE1 is one line" "0" "$?"
 
-# Multi-line: CMD_LINE1 contains the command, not the body
+# Multi-line: AGENTGUARD_CMD_LINE1 contains the command, not the body
 (
   source "$HELPERS"
   _HOOK_INPUT="$multiline_json"
   _hook_parse_command 2>/dev/null </dev/null
-  echo "$CMD_LINE1" | grep -q 'git commit' && echo "PASS" || echo "FAIL: $CMD_LINE1"
+  echo "$AGENTGUARD_CMD_LINE1" | grep -q 'git commit' && echo "PASS" || echo "FAIL: $AGENTGUARD_CMD_LINE1"
 ) | grep -q PASS
-_assert_eq "parse_command: CMD_LINE1 has the command" "0" "$?"
+_assert_eq "parse_command: AGENTGUARD_CMD_LINE1 has the command" "0" "$?"
 
-# Multi-line: CMD_LINE1 does NOT contain heredoc body content
+# Multi-line: AGENTGUARD_CMD_LINE1 does NOT contain heredoc body content
 (
   source "$HELPERS"
   _HOOK_INPUT="$multiline_json"
   _hook_parse_command 2>/dev/null </dev/null
-  echo "$CMD_LINE1" | grep -q 'git push' && echo "FAIL" || echo "PASS"
+  echo "$AGENTGUARD_CMD_LINE1" | grep -q 'git push' && echo "FAIL" || echo "PASS"
 ) | grep -q PASS
-_assert_eq "parse_command: CMD_LINE1 excludes heredoc body" "0" "$?"
+_assert_eq "parse_command: AGENTGUARD_CMD_LINE1 excludes heredoc body" "0" "$?"
 
-# Multi-line: CMD_TRIMMED still has the full content
+# Multi-line: AGENTGUARD_CMD_TRIMMED still has the full content
 (
   source "$HELPERS"
   _HOOK_INPUT="$multiline_json"
   _hook_parse_command 2>/dev/null </dev/null
-  trimmed_lines=$(printf '%s\n' "$CMD_TRIMMED" | wc -l | tr -d ' ')
+  trimmed_lines=$(printf '%s\n' "$AGENTGUARD_CMD_TRIMMED" | wc -l | tr -d ' ')
   [ "$trimmed_lines" -gt 1 ] && echo "PASS" || echo "FAIL: $trimmed_lines lines"
 ) | grep -q PASS
-_assert_eq "parse_command: CMD_TRIMMED retains all lines" "0" "$?"
+_assert_eq "parse_command: AGENTGUARD_CMD_TRIMMED retains all lines" "0" "$?"
 
-# Leading whitespace stripped from CMD_LINE1
+# Leading whitespace stripped from AGENTGUARD_CMD_LINE1
 (
   source "$HELPERS"
   _HOOK_INPUT='{"tool_input":{"command":"  ls -la"}}'
   _hook_parse_command 2>/dev/null </dev/null
-  [ "$CMD_LINE1" = "ls -la" ] && echo "PASS" || echo "FAIL: '$CMD_LINE1'"
+  [ "$AGENTGUARD_CMD_LINE1" = "ls -la" ] && echo "PASS" || echo "FAIL: '$AGENTGUARD_CMD_LINE1'"
 ) | grep -q PASS
-_assert_eq "parse_command: CMD_LINE1 strips leading whitespace" "0" "$?"
+_assert_eq "parse_command: AGENTGUARD_CMD_LINE1 strips leading whitespace" "0" "$?"
 
 # ---------------------------------------------------------------------------
 # Tests: hook-helpers.sh — _hook_cd_to_target
@@ -1110,8 +1110,8 @@ echo "=== hook-helpers: _hook_cd_to_target ==="
 MOCK_CD_DIR=$(_tmpdir)
 (
   source "$HELPERS"
-  CMD_TRIMMED="cd $MOCK_CD_DIR && ls"
-  CMD_LINE1="$CMD_TRIMMED"
+  AGENTGUARD_CMD_TRIMMED="cd $MOCK_CD_DIR && ls"
+  AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
   _hook_cd_to_target
   [ "$PWD" = "$MOCK_CD_DIR" ] && echo "PASS" || echo "FAIL: $PWD"
 ) | grep -q PASS
@@ -1121,8 +1121,8 @@ _assert_eq "cd_to_target: changes to target dir" "0" "$?"
 (
   source "$HELPERS"
   original_pwd="$PWD"
-  CMD_TRIMMED="ls -la /tmp"
-  CMD_LINE1="$CMD_TRIMMED"
+  AGENTGUARD_CMD_TRIMMED="ls -la /tmp"
+  AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
   _hook_cd_to_target
   [ "$PWD" = "$original_pwd" ] && echo "PASS" || echo "FAIL: $PWD"
 ) | grep -q PASS
@@ -1132,8 +1132,8 @@ _assert_eq "cd_to_target: non-cd stays put" "0" "$?"
 (
   source "$HELPERS"
   original_pwd="$PWD"
-  CMD_TRIMMED="cd /nonexistent_dir_xyz_999"
-  CMD_LINE1="$CMD_TRIMMED"
+  AGENTGUARD_CMD_TRIMMED="cd /nonexistent_dir_xyz_999"
+  AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
   _hook_cd_to_target
   [ "$PWD" = "$original_pwd" ] && echo "PASS" || echo "FAIL: $PWD"
 ) | grep -q PASS
@@ -1145,8 +1145,8 @@ MOCK_CD_RELATIVE="${MOCK_CD_HOME_DIR#"$HOME"}"
 (
   source "$HELPERS"
   # shellcheck disable=SC2034
-  CMD_TRIMMED="cd ~${MOCK_CD_RELATIVE}"
-  CMD_LINE1="$CMD_TRIMMED"
+  AGENTGUARD_CMD_TRIMMED="cd ~${MOCK_CD_RELATIVE}"
+  AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
   _hook_cd_to_target
   [ "$PWD" = "$MOCK_CD_HOME_DIR" ] && echo "PASS" || echo "FAIL: $PWD"
 ) | grep -q PASS

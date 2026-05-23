@@ -160,8 +160,8 @@ $1"
 
 # Parses the shell command from hook JSON input. Caches the full JSON in
 # _HOOK_INPUT (same contract as _hook_parse_mcp) so agent-specific and local
-# extensions can read additional fields. Sets CMD_TRIMMED (full command,
-# exported for local `-work` variants) and CMD_LINE1 (first line only, for
+# extensions can read additional fields. Sets AGENTGUARD_CMD_TRIMMED (full command,
+# exported for local `-work` variants) and AGENTGUARD_CMD_LINE1 (first line only, for
 # command-detection guards that must ignore heredoc bodies). Exits early if no
 # command.
 _hook_parse_command() {
@@ -170,11 +170,11 @@ _hook_parse_command() {
   local cmd
   cmd=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_input.command // .tool_input.cmd // empty')
   [ -z "$cmd" ] && exit 0
-  CMD_TRIMMED=$(printf '%s' "$cmd" | sed 's/^[[:space:]]*//')
+  AGENTGUARD_CMD_TRIMMED=$(printf '%s' "$cmd" | sed 's/^[[:space:]]*//')
   # First line only — heredoc bodies (commit messages, etc.) start on
   # line 2 and must not trigger command-detection guards.
-  CMD_LINE1=$(printf '%s' "$CMD_TRIMMED" | head -1)
-  export CMD_TRIMMED CMD_LINE1
+  AGENTGUARD_CMD_LINE1=$(printf '%s' "$AGENTGUARD_CMD_TRIMMED" | head -1)
+  export AGENTGUARD_CMD_TRIMMED AGENTGUARD_CMD_LINE1
 }
 
 # Extracts shell stdout from PostToolUse-style payloads. Claude Code uses
@@ -203,7 +203,7 @@ _hook_tool_stdout() {
 _hook_parse_edit_files() {
   [ -z "${_HOOK_INPUT+x}" ] && _HOOK_INPUT=$(cat)
   _hook_refresh_state_dir
-  HOOK_EDIT_FILES=$(printf '%s' "$_HOOK_INPUT" | jq -r '
+  AGENTGUARD_EDIT_FILES=$(printf '%s' "$_HOOK_INPUT" | jq -r '
     def patch_text:
       if (.tool_input | type) == "string" then .tool_input
       elif (.tool_input | type) == "object" then
@@ -220,8 +220,8 @@ _hook_parse_edit_files() {
         sub("^\\*\\*\\* Move to: "; ""))
     ] | map(select(. != "")) | first_seen[]
   ' 2>/dev/null)
-  FP=$(printf '%s\n' "$HOOK_EDIT_FILES" | sed -n '1p')
-  export HOOK_EDIT_FILES FP
+  AGENTGUARD_EDIT_FILE=$(printf '%s\n' "$AGENTGUARD_EDIT_FILES" | sed -n '1p')
+  export AGENTGUARD_EDIT_FILES AGENTGUARD_EDIT_FILE
 }
 
 # Parses MCP tool info from hook JSON input. Sets _HOOK_INPUT (full JSON
@@ -242,13 +242,13 @@ _hook_parse_mcp() {
   _HOOK_MCP_FAIL_FILE="$_HOOK_STATE_DIR/mcp-failures-$_HOOK_MCP_SERVER"
 }
 
-# Parses a cd target from CMD_TRIMMED and changes to it. Used by
+# Parses a cd target from AGENTGUARD_CMD_TRIMMED and changes to it. Used by
 # pre-bash and post-bash local `-work` variants to resolve repo context when
 # the agent's command starts with cd. No-op if the command doesn't
 # start with cd or the directory doesn't exist.
 _hook_cd_to_target() {
   local target_dir
-  target_dir=$(printf '%s' "$CMD_LINE1" | sed -n 's/^cd[[:space:]]\{1,\}\([^[:space:];&]\{1,\}\).*/\1/p')
+  target_dir=$(printf '%s' "$AGENTGUARD_CMD_LINE1" | sed -n 's/^cd[[:space:]]\{1,\}\([^[:space:];&]\{1,\}\).*/\1/p')
   [ -z "$target_dir" ] && return
   target_dir="${target_dir/#\~/$HOME}"
   [ -d "$target_dir" ] && cd "$target_dir" || return 0

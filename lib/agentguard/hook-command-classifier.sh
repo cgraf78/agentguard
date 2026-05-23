@@ -352,7 +352,7 @@ _logical_command_incomplete() {
 # embedded newlines inside quotes or command substitutions; newline-delimited
 # streams would turn inert prose into fake executable fragments.
 _hook_command_lines() {
-  local text="${1:-$CMD_TRIMMED}"
+  local text="${1:-$AGENTGUARD_CMD_TRIMMED}"
   local line pending="" marker delim strip_tabs _active
   local -a heredoc_delims=() heredoc_strips=()
 
@@ -490,7 +490,7 @@ _split_command_fragments() {
 }
 
 _hook_command_fragments() {
-  local text="${1:-$CMD_TRIMMED}" command
+  local text="${1:-$AGENTGUARD_CMD_TRIMMED}" command
   while IFS= read -r -d '' command; do
     _split_command_fragments "${command//$'\n'/ }"
   done < <(_hook_command_lines "$text")
@@ -3175,7 +3175,7 @@ _block_protected_bare_git_line() {
 # command stream: assignments before the heredoc are visible, while assignments
 # after it cannot leak backward into the heredoc's command substitutions.
 _block_protected_bare_git_untracked_scans() {
-  local text="${1:-$CMD_TRIMMED}" depth="${2:-0}" line pending="" marker body="" payload delim strip_tabs active
+  local text="${1:-$AGENTGUARD_CMD_TRIMMED}" depth="${2:-0}" line pending="" marker body="" payload delim strip_tabs active
   local -a heredoc_delims=() heredoc_strips=() heredoc_actives=()
 
   while IFS= read -r line || [ -n "$line" ]; do

@@ -11,7 +11,13 @@ another tool that follows the same hook protocol.
   runtime.
 - `hook-helpers.sh` is the hook-runtime API for `agent-hook-*` entry points and
   sourced extensions.
+  Sourced extensions can read `AGENTGUARD_CMD_TRIMMED`,
+  `AGENTGUARD_CMD_LINE1`, `AGENTGUARD_EDIT_FILES`, and
+  `AGENTGUARD_EDIT_FILE` after the matching parser helper runs.
 - `detect.sh` is internal to those public entry points.
+- `agent-hook-pre-edit` warns after `AGENTGUARD_EDIT_CHURN_WARN` edits to a
+  file and blocks after `AGENTGUARD_EDIT_CHURN_BLOCK` edits. Defaults are `5`
+  and `10`.
 - `agent-hook-pre-bash` can guard a broad bare-Git work tree when an integration
   sets `AGENTGUARD_PROTECTED_BARE_GIT_DIR`. Optional companion settings are
   `AGENTGUARD_PROTECTED_BARE_GIT_WORK_TREE` (defaults to `$HOME`),
