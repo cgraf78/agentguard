@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# claude-session-name — generate a session name from a Claude transcript.
+# Usage: claude-session-name <transcript_path>
+# Outputs the generated name to stdout, or exits silently if naming fails.
+
+set -u
+
+tp="${1:-}"
+if [ -z "$tp" ] || [ ! -f "$tp" ]; then
+  echo "Usage: claude-session-name <transcript_path>" >&2
+  exit 1
+fi
+
+# Extract user messages, skipping system reminders and slash commands.
+msgs=$(jq -r -R '
+  try fromjson catch empty
+  | select(.type=="user")
+  | .message.content
+  | (if type=="array" then [.[] | select(.type=="text") | .text] | join(" ")
+     elif type=="string" then .
+     else empty end)
+  | select(length > 0)
+  | select(startswith("<system-reminder>") | not)
+  | select(startswith("/") | not)
+  | .[:200]
+' "$tp" 2>/dev/null | head -15)
+
+[ -z "$msgs" ] && exit 0
+
+name=$(printf "Name this coding session in 3-7 words based on the user messages below. Reply with ONLY the name, all lowercase, words separated by dashes, no spaces. No preamble, no quotes, no explanation, no punctuation. Examples: dotfiles-hook-refactor, debug-flaky-unit-tests, add-user-profile-page\n\nUser messages:\n%s" "$msgs" |
+  claude -p --no-session-persistence 2>/dev/null |
+  tail -1 |
+  sed 's/^[^a-zA-Z0-9]*//' |
+  tr -d '"' |
+  tr '[:upper:] ' '[:lower:]-' |
+  cut -c1-80)
+
+[ -z "$name" ] && exit 0
+printf '%s\n' "$name"

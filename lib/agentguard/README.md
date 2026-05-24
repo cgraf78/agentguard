@@ -9,6 +9,8 @@ another tool that follows the same hook protocol.
 
 - `agentguard.sh` is the sourceable detection API for scripts outside the hook
   runtime.
+- `claude-session-name` is a PATH-visible helper used by
+  `agent-hook-session-end-claude` to name Claude transcript sessions.
 - `hook-helpers.sh` is the hook-runtime API for `agent-hook-*` entry points and
   sourced extensions.
   Sourced extensions can read `AGENTGUARD_CMD_TRIMMED`,
@@ -160,7 +162,7 @@ stop, and run the daily `claude-templates update` refresh in the background.
 
 ## Script Notes
 
-`claude-session-name` is a standalone helper used by
+`claude-session-name` is a PATH-visible helper used by
 `agent-hook-session-end-claude`. It can also name older transcripts in batch:
 
 ```text

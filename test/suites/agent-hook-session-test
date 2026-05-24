@@ -79,4 +79,30 @@ _assert_eq "stop: notification stdout does not corrupt JSON" "0" "$?"
 _assert_not_contains "stop: notification output is suppressed" \
   "notification noise" "$stop_out"
 
+echo ""
+echo "=== claude-session-name ==="
+
+SESSION_NAME_DIR=$(_tmpdir)
+SESSION_NAME_TRANSCRIPT="$SESSION_NAME_DIR/transcript.jsonl"
+cat >"$SESSION_NAME_TRANSCRIPT" <<'JSONL'
+{"type":"user","message":{"content":"<system-reminder>keep going</system-reminder>"}}
+{"type":"user","message":{"content":"/compact"}}
+{"type":"user","message":{"content":[{"type":"text","text":"Move Claude session naming into agentguard."},{"type":"tool_use","name":"ignored"}]}}
+{"type":"assistant","message":{"content":"ignored"}}
+JSONL
+
+cat >"$SESSION_NAME_DIR/claude" <<'MOCK'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' '"AgentGuard Session Naming"'
+MOCK
+chmod +x "$SESSION_NAME_DIR/claude"
+
+result=$(
+  PATH="$SESSION_NAME_DIR:$PATH" \
+    "$BIN_DIR/claude-session-name" "$SESSION_NAME_TRANSCRIPT"
+)
+_assert_eq "claude-session-name: names transcript from user messages" \
+  "agentguard-session-naming" "$result"
+
 _test_summary

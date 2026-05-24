@@ -9,6 +9,10 @@ export AGENTGUARD_HIVE_MEMORY_HOOKS=0
 # explicit agent env, and the "no env" cases should stay no-env even when
 # their parent process is Codex.
 export AGENTGUARD_PROCESS_DETECT=0
+# Dotfiles and other consumers may tune guard thresholds globally. Test default
+# behavior against repo defaults; individual tests set custom thresholds where
+# that contract is under test.
+unset AGENTGUARD_EDIT_CHURN_WARN AGENTGUARD_EDIT_CHURN_BLOCK
 
 AGENTGUARD_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 AGENTGUARD_ROOT="$(cd -- "$AGENTGUARD_TEST_DIR/.." && pwd -P)"
