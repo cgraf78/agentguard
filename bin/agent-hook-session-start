@@ -34,7 +34,7 @@ changes=''
 if command -v sl >/dev/null 2>&1 && sl root >/dev/null 2>&1; then
   changes=$(sl status 2>/dev/null | head -20)
 elif command -v git >/dev/null 2>&1 && git rev-parse --git-dir >/dev/null 2>&1; then
-  changes=$(git status --porcelain 2>/dev/null | head -20)
+  changes=$(git status --porcelain --untracked-files=no 2>/dev/null | head -20)
 elif command -v jj >/dev/null 2>&1 && jj root >/dev/null 2>&1; then
   changes=$(jj status 2>/dev/null | head -20)
 fi

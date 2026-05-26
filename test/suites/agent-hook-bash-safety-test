@@ -125,6 +125,13 @@ _assert_eq "eval rm -rf /: exit 2" "2" "$HOOK_EXIT"
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"eval -- '\''rm -rf /'\''"}}'
 _assert_eq "eval -- rm -rf /: exit 2" "2" "$HOOK_EXIT"
 
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"exec rm -rf /"}}'
+_assert_eq "exec rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"exec rm -rf /tmp/somewhere"}}'
+_assert_eq "exec rm -rf /tmp/somewhere: exit 0" "0" "$HOOK_EXIT"
+_assert_contains "exec rm -rf /tmp/somewhere: warns" "WARNING" "$HOOK_STDERR"
+
 _cmd_sub_json=$(jq -nc --arg c 'echo $(rm -rf /)' '{"tool_input":{"command":$c}}')
 _run_hook "$PRE_BASH" "$_cmd_sub_json"
 _assert_eq "command substitution rm -rf /: exit 2" "2" "$HOOK_EXIT"

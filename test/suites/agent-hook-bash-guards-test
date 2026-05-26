@@ -63,6 +63,11 @@ _run_hook "$PRE_BASH" '{"tool_input":{"command":"echo git reset --hard"}}'
 _assert_eq "echo git reset --hard: allowed" "0" "$HOOK_EXIT"
 _assert_not_contains "echo git reset --hard: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
 
+# exec wrapper must not bypass guards
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"exec git reset --hard"}}'
+_assert_eq "exec git reset --hard: blocked" "2" "$HOOK_EXIT"
+_assert_contains "exec git reset --hard: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
 # ---------------------------------------------------------------------------
 # Tests: git clean -f guard
 # ---------------------------------------------------------------------------
@@ -101,6 +106,11 @@ _assert_not_contains "git clean --dry-run: no clean-force BLOCKED" "git clean -f
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"echo git clean -fd"}}'
 _assert_eq "echo git clean -fd: allowed" "0" "$HOOK_EXIT"
 _assert_not_contains "echo git clean -fd: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# exec wrapper must not bypass git clean guard
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"exec git clean -fd"}}'
+_assert_eq "exec git clean -fd: blocked" "2" "$HOOK_EXIT"
+_assert_contains "exec git clean -fd: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
 
 # ---------------------------------------------------------------------------
 # Tests: git push --force guard
