@@ -171,7 +171,7 @@ _pre_bash_needs_classifier() {
       rm | sudo | doas | kill | pkill | killall | chmod | \
       vim | vi | nvim | view | nano | pico | joe | micro | emacs | \
       man | info | top | htop | btop | atop | gdb | lldb | watch | \
-      bash | sh | zsh | fish | env | eval | \
+      bash | sh | zsh | fish | env | eval | exec | \
       coproc | time | command | builtin | nohup | nice | timeout | xargs)
       return 0
       ;;
