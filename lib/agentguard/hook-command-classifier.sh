@@ -1674,6 +1674,96 @@ _skip_privilege_wrapper() {
   printf '%s' "$i"
 }
 
+# `nohup`, `nice`, and `timeout` are transparent execution wrappers: they
+# modify scheduling or signal behavior but the payload command is still the
+# security-relevant part.  Without unwrapping, `nohup rm -rf /` would have
+# command word `nohup` and the rm guard would never fire.
+_word_is_execution_wrapper() {
+  local word
+  word="$(_clean_command_word "$1")"
+  case "$word" in
+    nohup | */nohup | nice | */nice | timeout | */timeout)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# Skip the execution wrapper and its own arguments to find the real command.
+# Each wrapper has different option syntax:
+#   nohup  — no options, next word IS the command
+#   nice   — optional -n ADJUSTMENT or -N shorthand before the command
+#   timeout — options, then one positional DURATION arg, then the command
+_skip_execution_wrapper() {
+  local i="$1" wrapper word
+  shift
+  local -a words=("$@")
+
+  _word_is_execution_wrapper "${words[$i]:-}" || return 1
+  wrapper="$(_clean_command_word "${words[$i]}")"
+  wrapper="${wrapper##*/}"
+  ((i++))
+
+  case "$wrapper" in
+    nohup)
+      # nohup takes no options; the very next word is the command.
+      ;;
+    nice)
+      while [ "$i" -lt "${#words[@]}" ]; do
+        word="$(_clean_command_word "${words[$i]}")"
+        case "$word" in
+          -n)
+            i=$((i + 2))
+            ;;
+          --adjustment=*)
+            ((i++))
+            ;;
+          --adjustment)
+            i=$((i + 2))
+            ;;
+          # `nice -5 cmd` — bare numeric adjustment
+          -[0-9]*)
+            ((i++))
+            ;;
+          -*)
+            ((i++))
+            ;;
+          *)
+            break
+            ;;
+        esac
+      done
+      ;;
+    timeout)
+      # Skip options first, then the mandatory DURATION positional arg.
+      while [ "$i" -lt "${#words[@]}" ]; do
+        word="$(_clean_command_word "${words[$i]}")"
+        case "$word" in
+          -k | --kill-after | -s | --signal)
+            i=$((i + 2))
+            ;;
+          --kill-after=* | --signal=*)
+            ((i++))
+            ;;
+          --foreground | --preserve-status | -v | --verbose)
+            ((i++))
+            ;;
+          -*)
+            ((i++))
+            ;;
+          *)
+            # First non-option positional is the duration; skip it.
+            ((i++))
+            break
+            ;;
+        esac
+      done
+      ;;
+  esac
+
+  printf '%s' "$i"
+}
+
 _word_is_protected_bare_git_launcher() {
   local word="$1" path dir base dir_phys launcher launcher_dir command_path
   word="$(_clean_command_word "$word")"
@@ -1834,6 +1924,10 @@ _protected_bare_git_context() {
           i="$next_i"
           continue
         fi
+        if next_i="$(_skip_execution_wrapper "$i" "${words[@]}")"; then
+          i="$next_i"
+          continue
+        fi
         ;;
     esac
 
@@ -1940,6 +2034,10 @@ _fragment_command_index() {
           continue
         fi
         if next_i="$(_skip_privilege_wrapper "$i" "${words[@]}")"; then
+          i="$next_i"
+          continue
+        fi
+        if next_i="$(_skip_execution_wrapper "$i" "${words[@]}")"; then
           i="$next_i"
           continue
         fi

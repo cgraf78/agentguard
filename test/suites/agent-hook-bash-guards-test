@@ -63,10 +63,20 @@ _run_hook "$PRE_BASH" '{"tool_input":{"command":"echo git reset --hard"}}'
 _assert_eq "echo git reset --hard: allowed" "0" "$HOOK_EXIT"
 _assert_not_contains "echo git reset --hard: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
 
-# exec wrapper must not bypass guards
+# exec/timeout/nohup/nice wrappers must not bypass guards
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"exec git reset --hard"}}'
 _assert_eq "exec git reset --hard: blocked" "2" "$HOOK_EXIT"
 _assert_contains "exec git reset --hard: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"timeout 5 git reset --hard"}}'
+_assert_eq "timeout git reset --hard: blocked" "2" "$HOOK_EXIT"
+_assert_contains "timeout git reset --hard: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nohup git reset --hard"}}'
+_assert_eq "nohup git reset --hard: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nice -n 5 git reset --hard"}}'
+_assert_eq "nice git reset --hard: blocked" "2" "$HOOK_EXIT"
 
 # ---------------------------------------------------------------------------
 # Tests: git clean -f guard
