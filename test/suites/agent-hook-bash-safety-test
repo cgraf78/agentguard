@@ -132,6 +132,24 @@ _run_hook "$PRE_BASH" '{"tool_input":{"command":"exec rm -rf /tmp/somewhere"}}'
 _assert_eq "exec rm -rf /tmp/somewhere: exit 0" "0" "$HOOK_EXIT"
 _assert_contains "exec rm -rf /tmp/somewhere: warns" "WARNING" "$HOOK_STDERR"
 
+# Execution wrappers (nohup, nice, timeout) must not hide dangerous payloads.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nohup rm -rf /"}}'
+_assert_eq "nohup rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"timeout 5 rm -rf /"}}'
+_assert_eq "timeout 5 rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nice rm -rf /"}}'
+_assert_eq "nice rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nice -n 10 rm -rf /"}}'
+_assert_eq "nice -n 10 rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# Safe payloads behind wrappers still pass.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"timeout 30 make -j8"}}'
+_assert_eq "timeout 30 make: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "timeout 30 make: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
 _cmd_sub_json=$(jq -nc --arg c 'echo $(rm -rf /)' '{"tool_input":{"command":$c}}')
 _run_hook "$PRE_BASH" "$_cmd_sub_json"
 _assert_eq "command substitution rm -rf /: exit 2" "2" "$HOOK_EXIT"
