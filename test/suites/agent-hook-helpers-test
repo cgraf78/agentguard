@@ -691,6 +691,96 @@ chmod +x "$MOCK_PS_DIR/ps"
 ) | grep -q PASS
 _assert_eq "agent_name: codex process fallback" "0" "$?"
 
+# Regression: the process-tree fallback must match the executable NAME only,
+# never the argument text. Here an ancestor (comm=bash) merely mentions "codex"
+# in its arguments — exactly the shape of `hm remember`/`git commit` carrying a
+# payload about Codex. Detection must NOT misattribute that to Codex.
+MOCK_PS_ARGS_DIR=$(_tmpdir)
+cat >"$MOCK_PS_ARGS_DIR/ps" <<'SCRIPT'
+#!/usr/bin/env bash
+field=""
+pid=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field="${2:-}"; shift 2 ;;
+    -p) pid="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+case "$field:$pid" in
+  comm=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash" ;;
+  args=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash -c hm remember --text only codex exec headless" ;;
+  ppid=:"${MOCK_CHILD_PID:-}") printf '%s\n' "4242" ;;
+  comm=:4242) printf '%s\n' "zsh" ;;
+  args=:4242) printf '%s\n' "zsh -i" ;;
+  ppid=:4242) printf '%s\n' "1" ;;
+  comm=:1) printf '%s\n' "init" ;;
+  args=:1) printf '%s\n' "init" ;;
+  ppid=:1) printf '%s\n' "0" ;;
+  *) exit 1 ;;
+esac
+SCRIPT
+chmod +x "$MOCK_PS_ARGS_DIR/ps"
+(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID GEMINI_PROJECT_DIR \
+    AGENTGUARD_SESSION_ID 2>/dev/null
+  AGENTGUARD_PROCESS_DETECT=1
+  export AGENTGUARD_PROCESS_DETECT
+  bash -c '
+    export MOCK_CHILD_PID="$$"
+    PATH="$1:$PATH"
+    source "$2"
+    [ "$(_hook_agent_name)" = "agent" ] && echo "PASS" || echo "FAIL"
+  ' _ "$MOCK_PS_ARGS_DIR" "$HELPERS"
+) | grep -q PASS
+_assert_eq "agent_name: codex in ancestor args is ignored" "0" "$?"
+
+# Companion to the above: detection still finds Codex from the executable name
+# even when the args carry no "codex" token, proving the match is comm-based.
+MOCK_PS_COMM_DIR=$(_tmpdir)
+cat >"$MOCK_PS_COMM_DIR/ps" <<'SCRIPT'
+#!/usr/bin/env bash
+field=""
+pid=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field="${2:-}"; shift 2 ;;
+    -p) pid="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+case "$field:$pid" in
+  comm=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash" ;;
+  args=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash -c hook" ;;
+  ppid=:"${MOCK_CHILD_PID:-}") printf '%s\n' "4242" ;;
+  comm=:4242) printf '%s\n' "codex" ;;
+  args=:4242) printf '%s\n' "node /opt/codexless/server.js" ;;
+  ppid=:4242) printf '%s\n' "1" ;;
+  comm=:1) printf '%s\n' "init" ;;
+  args=:1) printf '%s\n' "init" ;;
+  ppid=:1) printf '%s\n' "0" ;;
+  *) exit 1 ;;
+esac
+SCRIPT
+chmod +x "$MOCK_PS_COMM_DIR/ps"
+(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID GEMINI_PROJECT_DIR \
+    AGENTGUARD_SESSION_ID 2>/dev/null
+  AGENTGUARD_PROCESS_DETECT=1
+  export AGENTGUARD_PROCESS_DETECT
+  bash -c '
+    export MOCK_CHILD_PID="$$"
+    PATH="$1:$PATH"
+    source "$2"
+    [ "$(_hook_agent_name)" = "codex" ] && echo "PASS" || echo "FAIL"
+  ' _ "$MOCK_PS_COMM_DIR" "$HELPERS"
+) | grep -q PASS
+_assert_eq "agent_name: codex executable name still detected" "0" "$?"
+
 # _hook_agent_name returns "claude" when only CLAUDE env is set
 # shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
 (
@@ -700,6 +790,30 @@ _assert_eq "agent_name: codex process fallback" "0" "$?"
   [ "$(_hook_agent_name)" = "claude" ] && echo "PASS" || echo "FAIL"
 ) | grep -q PASS
 _assert_eq "agent_name: claude when no codex override" "0" "$?"
+
+# Regression: Claude is identified from CLAUDE_CODE_SESSION_ID alone. Claude Code
+# exports this (not the _CURRENT_ variant) into plain tool subprocesses such as a
+# direct `hm` call; before this was accepted, such calls fell through to the
+# process-tree heuristic and were misattributed.
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID GEMINI_PROJECT_DIR AGENTGUARD_SESSION_ID 2>/dev/null
+  CLAUDE_CODE_SESSION_ID="sess-xyz"
+  AGENTGUARD_PROCESS_DETECT=0
+  source "$HELPERS"
+  [ "$(_hook_agent_name)" = "claude" ] && echo "PASS" || echo "FAIL"
+) | grep -q PASS
+_assert_eq "agent_name: claude from CLAUDE_CODE_SESSION_ID alone" "0" "$?"
+
+# _is_agent_session detects a Claude tool subprocess via CLAUDE_CODE_SESSION_ID.
+# Process detection is disabled so the env signal is what is under test.
+env -u AGENTGUARD_NAME -u AGENTGUARD_SESSION_ID -u CODEX_THREAD_ID \
+  -u CODEX_INTERNAL_ORIGINATOR_OVERRIDE -u CLAUDE_CODE_CURRENT_SESSION_ID \
+  -u GEMINI_PROJECT_DIR \
+  AGENTGUARD_PROCESS_DETECT=0 CLAUDE_CODE_SESSION_ID="sess-xyz" \
+  bash -c 'source "$1"; _is_agent_session' _ "$HELPERS"
+_assert_exit "is_session: detects Claude via CLAUDE_CODE_SESSION_ID" 0 "$?"
 
 # _hook_agent_name returns "agent" when no agent env vars set
 (
