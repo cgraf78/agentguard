@@ -144,8 +144,9 @@ To add a new managed agent runtime:
 ## Base Hook Policy
 
 - `agent-hook-pre-bash` blocks destructive `rm -rf` targets, warns on other
-  `rm -rf` usage, and reminds agents to review and test before commit-class
-  commands. Metadata-only changes skip the commit reminder.
+  `rm -rf` usage, and reminds agents to run a review/simplify pass and inspect
+  the final diff before commit-class commands. Metadata-only changes skip the
+  commit reminder.
 - `agent-hook-post-bash` scans command stdout for high-confidence credential
   patterns. Stdout extraction is centralized so agent-specific payload names do
   not leak into the base hook.
