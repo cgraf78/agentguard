@@ -30,5 +30,6 @@ _HOOK_BIN_DIR=$(_hook_script_dir "${BASH_SOURCE[0]}") || {
 source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
 
 _hook_hm_prompt_submit
+_hook_prompt_cycle_reset
 _hook_source_extensions
 _hook_finish
