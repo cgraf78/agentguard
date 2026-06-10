@@ -138,6 +138,27 @@ _hook_remind() {
   _hook_context "$message"
 }
 
+_hook_prompt_cycle_reset() {
+  # UserPromptSubmit is the clean boundary between requests. Short-lived hooks
+  # can use this directory to avoid repeating broad guidance during one edit
+  # cycle while still rearming for the next human prompt.
+  rm -rf "$_HOOK_STATE_DIR/prompt-cycle" 2>/dev/null || true
+}
+
+_hook_once_per_prompt() {
+  local key="$1" dir marker
+  dir="$_HOOK_STATE_DIR/prompt-cycle"
+  marker="$dir/$key"
+
+  [ ! -e "$marker" ] || return 1
+
+  # If state cannot be written, fail open and show the reminder. Missing a
+  # de-duplication marker is less harmful than silently dropping steer.
+  mkdir -p "$dir" 2>/dev/null || return 0
+  : >"$marker" 2>/dev/null || true
+  return 0
+}
+
 _hook_require_sley() {
   if ! command -v sley >/dev/null 2>&1; then
     _hook_block "sley command missing; install cgraf78/sley with shdeps"

@@ -14,6 +14,7 @@ echo ""
 echo "=== pre-edit: base guards ==="
 
 PRE_EDIT="$BIN_DIR/agent-hook-pre-edit"
+PROMPT_SUBMIT="$BIN_DIR/agent-hook-prompt-submit"
 
 # Normal file → passes
 _run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/src/main.cpp"}}'
@@ -28,25 +29,67 @@ _assert_eq "apply_patch paths: exit 0" "0" "$HOOK_EXIT"
 
 echo "=== pre-edit: code comment reminder ==="
 
+_reset_state
 _run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/src/main.cpp"}}'
 _assert_eq "code reminder: exit 0" "0" "$HOOK_EXIT"
 _assert_contains "code reminder: points to design source rule" "AGENTS.md > Design Principles" "$HOOK_STDERR"
-_assert_contains "code reminder: points to style source rule" "Code Style" "$HOOK_STDERR"
-_assert_contains "code reminder: mentions generous why comments" "Add generous why/non-obvious context" "$HOOK_STDERR"
-_assert_contains "code reminder: avoids uncommented blocks" "large uncommented logic blocks" "$HOOK_STDERR"
+_assert_contains "code reminder: points to workflow source rule" "Engineering Workflow" "$HOOK_STDERR"
+_assert_contains "code reminder: mentions ownership" "Keep ownership clear" "$HOOK_STDERR"
+_assert_contains "code reminder: mentions small cycles" "small code/test/review/fix cycles" "$HOOK_STDERR"
+_assert_contains "code reminder: mentions why comments" "Add comments for why" "$HOOK_STDERR"
+_assert_contains "code reminder: names useful comment context" "invariants, tradeoffs, edge cases, and cross-system assumptions" "$HOOK_STDERR"
+_assert_contains "code reminder: avoids obvious comments" "avoid comments that restate obvious code" "$HOOK_STDERR"
 _assert_contains "code reminder: emits hook context" "additionalContext" "$HOOK_STDOUT"
 _assert_contains "code reminder: context includes steer" "Code edit:" "$HOOK_STDOUT"
 
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/src/other.cpp"}}'
+_assert_eq "code reminder once per prompt: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "code reminder once per prompt: no repeated stderr" "Code edit:" "$HOOK_STDERR"
+_assert_not_contains "code reminder once per prompt: no repeated context" "Code edit:" "$HOOK_STDOUT"
+
+_run_hook "$PROMPT_SUBMIT" '{"prompt":"please continue"}'
+_assert_eq "prompt submit resets code reminder: exit 0" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_EDIT" "$_apply_patch_json"
+_assert_eq "apply_patch reminder after prompt reset: exit 0" "0" "$HOOK_EXIT"
+_assert_contains "apply_patch reminder after prompt reset: code paths trigger reminder" "Code edit:" "$HOOK_STDERR"
+_assert_contains "apply_patch reminder after prompt reset: context includes steer" "Code edit:" "$HOOK_STDOUT"
+
+_reset_state
 _run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/notes/readme.txt"}}'
 _assert_eq "non-code reminder: exit 0" "0" "$HOOK_EXIT"
 _assert_not_contains "non-code reminder: no comment reminder" "Code edit:" "$HOOK_STDERR"
 _assert_not_contains "non-code reminder: no context reminder" "Code edit:" "$HOOK_STDOUT"
 
-_run_hook "$PRE_EDIT" "$_apply_patch_json"
-_assert_eq "apply_patch reminder: exit 0" "0" "$HOOK_EXIT"
-_assert_contains "apply_patch reminder: code paths trigger reminder" "Code edit:" "$HOOK_STDERR"
-_assert_contains "apply_patch reminder: context includes steer" "Code edit:" "$HOOK_STDOUT"
+_reset_state
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/secrets.yaml"}}'
+_assert_eq "blocked code reminder: exits blocked" "2" "$HOOK_EXIT"
+_assert_contains "blocked code reminder: secrets guard blocks" "BLOCKED" "$HOOK_STDERR"
+_assert_not_contains "blocked code reminder: no reminder on blocked edit" "Code edit:" "$HOOK_STDERR"
+_assert_not_contains "blocked code reminder: no context on blocked edit" "Code edit:" "$HOOK_STDOUT"
 
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/src/main.py"}}'
+_assert_eq "blocked code reminder: later allowed edit exits 0" "0" "$HOOK_EXIT"
+_assert_contains "blocked code reminder: later allowed edit still reminds" "Code edit:" "$HOOK_STDERR"
+
+local_block_home=$(_tmpdir)
+_install_hook_fixture "$local_block_home" agent-hook-pre-edit
+cat >"$local_block_home/bin/agent-hook-pre-edit-work" <<'MOCK'
+_hook_block "local readonly guard"
+MOCK
+
+_reset_state
+_run_hook "$local_block_home/bin/agent-hook-pre-edit" '{"tool_input":{"file_path":"/home/user/src/local.py"}}'
+_assert_eq "local blocked code reminder: exits blocked" "2" "$HOOK_EXIT"
+_assert_contains "local blocked code reminder: local guard blocks" "local readonly guard" "$HOOK_STDERR"
+_assert_not_contains "local blocked code reminder: no reminder on blocked edit" "Code edit:" "$HOOK_STDERR"
+_assert_not_contains "local blocked code reminder: no context on blocked edit" "Code edit:" "$HOOK_STDOUT"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/src/after-local.py"}}'
+_assert_eq "local blocked code reminder: later allowed edit exits 0" "0" "$HOOK_EXIT"
+_assert_contains "local blocked code reminder: later allowed edit still reminds" "Code edit:" "$HOOK_STDERR"
+
+_reset_state
 codex_out=$(mktemp "$TEST_TMPDIR/codex-pre-edit-out.XXXXXX")
 codex_err=$(mktemp "$TEST_TMPDIR/codex-pre-edit-err.XXXXXX")
 HOOK_EXIT=0

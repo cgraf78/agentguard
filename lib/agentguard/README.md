@@ -91,6 +91,7 @@ Each hook emits one JSON response through `_hook_finish`.
 - tool payload adapters: `_hook_tool_stdout`
 - Hive Memory adapters: `_hook_hm_session_start`, `_hook_hm_prompt_submit`,
   `_hook_hm_tool_complete`, `_hook_hm_stop`
+- prompt-cycle state: `_hook_prompt_cycle_reset`, `_hook_once_per_prompt`
 - target directory setup: `_hook_cd_to_target`
 - extension loading: `_hook_source_agent`, `_hook_source_work`
 - final JSON emission: `_hook_finish`
@@ -132,8 +133,9 @@ To add a new managed agent runtime:
 - `agent-hook-post-bash` scans command stdout for high-confidence credential
   patterns. Stdout extraction is centralized so agent-specific payload names do
   not leak into the base hook.
-- `agent-hook-pre-edit` parses the target file path and leaves base behavior
-  empty for environment-specific generated-file or readonly-file guards.
+- `agent-hook-pre-edit` parses edited paths, reminds once per user prompt on
+  code/config edits to apply AGENTS.md design/workflow guidance, and leaves
+  room for environment-specific generated-file or readonly-file guards.
 - `agent-hook-post-edit` formats changed files through
   `sley hook format-file`. Broader lint and verification policy stays in the
   commit gate.
@@ -147,7 +149,8 @@ To add a new managed agent runtime:
 - `agent-hook-session-end` parses session metadata for agent-specific naming or
   sync extensions.
 - `agent-hook-prompt-submit` lets `hm hook prompt-submit` handle memory-intent
-  reminders and context refresh decisions.
+  reminders and context refresh decisions, then resets prompt-cycle state used
+  by once-per-prompt guidance.
 - `agent-hook-stop` asks Hive Memory for any pending-memory reminder, then plays
   terminal notifications. `agent-hook-notification` only plays notifications.
 

@@ -53,19 +53,21 @@ _pre_edit_code_file() {
 
 _pre_edit_comment_reminder() {
   local fp reminder
-  reminder="Code edit: follow AGENTS.md > Design Principles and Code Style. Add generous why/non-obvious context comments when helpful; avoid large uncommented logic blocks."
+  reminder="Code edit: apply AGENTS.md > Design Principles and Engineering Workflow before editing. Keep ownership clear, scope tight, and use small code/test/review/fix cycles. Add comments for why: invariants, tradeoffs, edge cases, and cross-system assumptions; avoid comments that restate obvious code."
   while IFS= read -r fp; do
     [ -n "$fp" ] || continue
     _pre_edit_code_file "$fp" || continue
     # This is deliberately a reminder, not a lint. The durable rule text lives
-    # in the agent-agnostic AGENTS.md; _hook_remind handles both human-visible
-    # stderr and model-visible hook context.
+    # in the agent-agnostic AGENTS.md. Emit it once per user prompt so it stays
+    # near the first code edit without becoming repetitive hook noise during a
+    # multi-file refactor.
+    _hook_once_per_prompt "code-edit-reminder" || return 0
+    # _hook_remind handles both human-visible stderr and model-visible hook
+    # context, so callers do not need to duplicate those channels.
     _hook_remind "$reminder"
     return 0
   done <<<"$AGENTGUARD_EDIT_FILES"
 }
-
-_pre_edit_comment_reminder
 
 # Edit churn guard
 while IFS= read -r _fp; do
@@ -115,4 +117,7 @@ while IFS= read -r _fp; do
 done <<<"$AGENTGUARD_EDIT_FILES"
 
 _hook_source_extensions
+# Broad guidance should reinforce allowed code edits, not consume the
+# once-per-prompt marker on an edit that another guard already blocked.
+[ -z "$_HOOK_BLOCKED" ] && _pre_edit_comment_reminder
 _hook_finish
