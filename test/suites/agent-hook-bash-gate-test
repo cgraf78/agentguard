@@ -442,8 +442,12 @@ PATH="$_gate_path" MOCK_SLEY_RC=0 \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"git commit -m foo"}}'
 _assert_contains "design-review nudge: fires on git commit" \
   "/review or /simplify" "$HOOK_STDERR"
+_assert_contains "design-review nudge: calls out final diff review" \
+  "Review the final diff for correctness, scope, stale docs/tests, edge cases, and accidental unrelated changes" "$HOOK_STDERR"
 _assert_contains "design-review nudge: reaches hook context" \
   "/review or /simplify" "$HOOK_STDOUT"
+_assert_contains "design-review nudge: final diff review reaches hook context" \
+  "Review the final diff for correctness, scope, stale docs/tests, edge cases, and accidental unrelated changes" "$HOOK_STDOUT"
 
 _reset_state
 PATH="$_gate_path" MOCK_SLEY_RC=0 \

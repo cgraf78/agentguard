@@ -317,7 +317,7 @@ $sley_out"
   fi
 
   if [ "$skip" -eq 0 ]; then
-    _hook_remind 'Consider running /review or /simplify on your changes before committing.'
+    _hook_remind 'Consider running /review or /simplify on your changes before committing. Review the final diff for correctness, scope, stale docs/tests, edge cases, and accidental unrelated changes.'
   fi
 }
 
