@@ -167,15 +167,21 @@ To add a new managed agent runtime:
   sync extensions.
 - `agent-hook-prompt-submit` lets `hm hook prompt-submit` handle memory-intent
   reminders and context refresh decisions, then resets prompt-cycle state used
-  by once-per-prompt guidance.
+  by once-per-prompt guidance. The hook passes prompt text and path facts; it
+  does not decide what should be written.
 - `agent-hook-stop` asks Hive Memory for any pending-memory reminder, then plays
-  terminal notifications. `agent-hook-notification` only plays notifications.
+  terminal notifications. On Codex, only explicit reminders or blocks continue
+  the turn; ordinary warnings do not trap shutdown. `agent-hook-notification`
+  only plays notifications.
 
 Hive Memory integration is deliberately centralized behind `hm hook <event>`.
 The shell hooks pass only event facts: agent id, session id, and the best
 available active path. Store affinity, project resolution, context freshness,
 and refresh policy live in `hm`, so agent-specific or local extension files
-do not need to duplicate memory policy.
+do not need to duplicate memory policy. Normal `hm remember` and `hm note`
+commands run through the dotfiles launcher, which adds active agent/session
+environment so `hm` can write receipts and later clear pending-memory reminders
+after a successful tool event.
 
 Claude-specific extensions auto-name untitled sessions, sync Claude memory on
 stop, and run the daily `claude-templates update` refresh in the background.

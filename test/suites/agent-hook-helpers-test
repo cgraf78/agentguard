@@ -390,6 +390,8 @@ _assert_contains "hm hook: injects context action" "memory ctx" "$hm_prompt_out"
 _assert_contains "hm hook: injects reminder action" "write reminder" "$hm_prompt_out"
 _assert_contains "hm hook: surfaces response warnings" \
   "WARNING: Hive Memory: low confidence" "$(cat "$hm_prompt_err")"
+_assert_contains "hm hook: tags reminders on stderr" \
+  "REMINDER: write reminder" "$(cat "$hm_prompt_err")"
 
 prompt_input_preserved=$(
   printf '%s' '{"prompt":"goal work","workspace":{"current_dir":"/tmp/project"}}' |
@@ -1038,14 +1040,36 @@ echo "$codex_session_json" | jq -e '.hookSpecificOutput.hookEventName == "Sessio
 _assert_eq "hook_finish: Codex SessionStart output includes hookEventName" "0" "$?"
 
 # Codex Stop uses a different schema from context-injection hooks: no
-# hookSpecificOutput envelope is accepted, so context becomes a continuation
-# prompt that blocks Stop once.
-codex_stop_json=$(
+# hookSpecificOutput envelope is accepted. Only reminders and explicit blocks
+# should continue the turn; warnings/plain context must not trap shutdown.
+codex_stop_context_json=$(
   AGENTGUARD_NAME="codex"
   export AGENTGUARD_NAME
   _HOOK_SELF="$BIN_DIR/agent-hook-stop"
   source "$HELPERS"
   _hook_context "remember the summary"
+  _hook_finish 2>/dev/null
+)
+echo "$codex_stop_context_json" | jq -e '. == {}' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex Stop ignores plain context" "0" "$?"
+
+codex_stop_warn_json=$(
+  AGENTGUARD_NAME="codex"
+  export AGENTGUARD_NAME
+  _HOOK_SELF="$BIN_DIR/agent-hook-stop"
+  source "$HELPERS"
+  _hook_warn "sync temporarily unavailable" >/dev/null 2>&1
+  _hook_finish 2>/dev/null
+)
+echo "$codex_stop_warn_json" | jq -e '. == {}' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex Stop does not block on warnings" "0" "$?"
+
+codex_stop_json=$(
+  AGENTGUARD_NAME="codex"
+  export AGENTGUARD_NAME
+  _HOOK_SELF="$BIN_DIR/agent-hook-stop"
+  source "$HELPERS"
+  _hook_remind "remember the summary" >/dev/null 2>&1
   _hook_finish 2>/dev/null
 )
 echo "$codex_stop_json" | jq -e 'has("hookSpecificOutput") | not' >/dev/null 2>&1

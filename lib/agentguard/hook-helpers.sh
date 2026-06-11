@@ -15,6 +15,7 @@
 
 _HOOK_BLOCKED=''
 _HOOK_CTX=''
+_HOOK_STOP_CONTINUE=''
 
 # General non-interactive shells get env.d through BASH_ENV/.zshenv. This is a
 # hook-local fallback for launchers that invoke hook scripts by absolute path
@@ -133,6 +134,7 @@ _hook_warn() {
 _hook_remind() {
   local message="$1"
   printf 'REMINDER: %s\n' "$message" >&2
+  _HOOK_STOP_CONTINUE=1
   # Same rationale as _hook_warn: reminders should affect the next model turn,
   # not depend on whether a client happens to surface successful-hook stderr.
   _hook_context "$message"
@@ -388,8 +390,11 @@ _hook_hm_apply_response() {
     body=$(printf '%s' "$action" | jq -r '.body // empty' 2>/dev/null)
     [ -n "$body" ] || continue
     case "$kind" in
-      inject_context | remind)
+      inject_context)
         _hook_context "$body"
+        ;;
+      remind)
+        _hook_remind "$body"
         ;;
       *)
         _hook_warn "Hive Memory returned unknown hook action: $kind"
@@ -601,12 +606,17 @@ _hook_codex_supports_suppress_output() {
 _hook_finish_codex_stop() {
   # Codex Stop has its own strict schema and does not accept the
   # hookSpecificOutput/additionalContext envelope used by other context hooks.
-  # Stop-time context is a continuation prompt: block the stop once and ask the
-  # agent to handle the reminder before ending the turn.
-  printf '%s' "$_HOOK_CTX" | jq -Rsc '{
-    decision: "block",
-    reason: .
-  }'
+  # Only explicit reminders or blocks should continue the turn. Warnings are
+  # useful context on prompt/tool hooks, but a best-effort warning during Stop
+  # should not trap the agent in a shutdown loop.
+  if [ -n "$_HOOK_STOP_CONTINUE" ] || [ -n "$_HOOK_BLOCKED" ]; then
+    printf '%s' "$_HOOK_CTX" | jq -Rsc '{
+      decision: "block",
+      reason: .
+    }'
+  else
+    printf '{}\n'
+  fi
 }
 
 # Emits one JSON response and exits. Must be the last call in every hook.
