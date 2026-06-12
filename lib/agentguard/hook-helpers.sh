@@ -199,7 +199,15 @@ _hook_read_input() {
   # Some hook runners attach a non-tty stdin pipe before they have any payload
   # to send. A plain `cat` waits for EOF and can consume the runner's whole hook
   # timeout, so read at most the bytes that arrive promptly.
-  IFS= read -r -t "$stdin_timeout" -d '' input || true
+  if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] && [[ "$stdin_timeout" == *.* ]]; then
+    # Bash 3, still shipped as /bin/bash on macOS, rejects fractional timeouts.
+    # Probe readiness without consuming input; only if bytes are already ready
+    # do we use an integer timeout to finish reading the payload.
+    IFS= read -r -t 0 -d '' input || return 1
+    IFS= read -r -t 1 -d '' input || true
+  else
+    IFS= read -r -t "$stdin_timeout" -d '' input || true
+  fi
   # Non-interactive test shells and some hook launchers can present an already
   # closed stdin. Treat that as "no hook JSON" instead of caching an empty input:
   # an empty _HOOK_INPUT would make the state refresh look for a missing
