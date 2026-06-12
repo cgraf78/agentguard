@@ -28,9 +28,9 @@ _HOOK_BIN_DIR=$(_hook_script_dir "${BASH_SOURCE[0]}") || {
 }
 source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
 
-input=$(cat)
-sid=$(printf '%s' "$input" | jq -r '.session_id // empty')
-tp=$(printf '%s' "$input" | jq -r '.transcript_path // empty')
+_hook_read_input || exit 0
+sid=$(printf '%s' "$_HOOK_INPUT" | jq -r '.session_id // empty')
+tp=$(printf '%s' "$_HOOK_INPUT" | jq -r '.transcript_path // empty')
 export sid tp
 
 [ -z "$sid" ] || [ -z "$tp" ] || [ ! -f "$tp" ] && exit 0
