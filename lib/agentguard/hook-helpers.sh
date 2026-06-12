@@ -82,24 +82,31 @@ _hook_codex_process_key() {
 }
 
 # Session key for state directory isolation. Prefer stable runtime ids. Codex
-# does not consistently expose one to hooks, so managed Codex hooks fall back to
-# the long-lived Codex parent process instead of each short-lived hook process.
-# Gemini also lacks a durable id, so its parent CLI process remains the key.
-# Other hook runners may only provide a JSON session_id on stdin; parsers
-# refresh after reading it. Empty or session-less JSON must still fall through to
-# the Codex process key; otherwise reading a closed stdin would downgrade an
-# already-stable session to this one hook process.
+# hook commands can inherit CODEX_THREAD_ID from an outer Codex process when a
+# user launches nested Codex, so once Codex JSON has been read its session_id is
+# the authoritative key. If Codex does not expose one, managed hooks fall back
+# to the long-lived Codex parent process instead of each short-lived hook
+# process. Gemini also lacks a durable id, so its parent CLI process remains
+# the key. Other hook runners may only provide a JSON session_id on stdin;
+# parsers refresh after reading it. Empty or session-less JSON must still fall
+# through to the Codex process key; otherwise reading a closed stdin would
+# downgrade an already-stable session to this one hook process.
 _hook_refresh_state_dir() {
   local session_key='' input_session='' codex_key=''
-  if [ -n "${AGENTGUARD_SESSION_ID:-}" ]; then
+  if [ -n "${_HOOK_INPUT+x}" ]; then
+    input_session=$(printf '%s' "$_HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+  fi
+
+  if [ "${AGENTGUARD_NAME:-}" = "codex" ] && [ -n "$input_session" ]; then
+    session_key="$input_session"
+  elif [ -n "${AGENTGUARD_SESSION_ID:-}" ]; then
     session_key="$AGENTGUARD_SESSION_ID"
   elif [ -n "${CODEX_THREAD_ID:-}" ]; then
     session_key="$CODEX_THREAD_ID"
   elif [ "${AGENTGUARD_NAME:-}" != "codex" ] && [ -n "${CLAUDE_CODE_CURRENT_SESSION_ID:-}" ]; then
     session_key="$CLAUDE_CODE_CURRENT_SESSION_ID"
-  elif [ -n "${_HOOK_INPUT+x}" ]; then
-    input_session=$(printf '%s' "$_HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null)
-    [ -n "$input_session" ] && session_key="$input_session"
+  elif [ -n "$input_session" ]; then
+    session_key="$input_session"
   fi
 
   if [ -z "$session_key" ] && codex_key=$(_hook_codex_process_key); then

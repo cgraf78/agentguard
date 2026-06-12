@@ -96,11 +96,13 @@ Each hook emits one JSON response through `_hook_finish`.
 - extension loading: `_hook_source_agent`, `_hook_source_work`
 - final JSON emission: `_hook_finish`
 
-The per-session state directory is computed once at source time. A neutral
-`AGENTGUARD_SESSION_ID` wins when a launcher supplies one. Otherwise, runtime
-session ids are preferred when available: Codex uses `CODEX_THREAD_ID`, Claude
-uses `CLAUDE_CODE_CURRENT_SESSION_ID`, Gemini uses `gemini-$PPID`, and unknown
-agents fall back to `$$`.
+The per-session state directory is computed once at source time and refreshed
+after hook JSON is read. A neutral `AGENTGUARD_SESSION_ID` wins when a launcher
+supplies one. Managed Codex hooks prefer JSON `session_id` after stdin is
+available, because nested Codex launches can inherit an outer
+`CODEX_THREAD_ID`. Without JSON, Codex uses `CODEX_THREAD_ID` or its parent
+process key, Claude uses `CLAUDE_CODE_CURRENT_SESSION_ID`, Gemini uses
+`gemini-$PPID`, and unknown agents fall back to `$$`.
 
 Launchers should set `AGENTGUARD_NAME` with `AGENTGUARD_SESSION_ID` when they know
 the concrete agent. `AGENTGUARD_SESSION_ID` alone falls back to the generic
