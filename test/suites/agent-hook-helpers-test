@@ -424,6 +424,84 @@ prompt_input_preserved=$(
 _assert_contains "hm hook: prompt-submit preserves JSON for later extensions" \
   '"prompt":"goal work"' "$prompt_input_preserved"
 
+_assert_hook_open_empty_stdin() {
+  local label="$1" hook="$2"
+  local open_stdin_dir open_stdin_fifo open_stdin_writer open_stdin_start
+  local open_stdin_rc open_stdin_elapsed open_stdin_fast
+  open_stdin_dir=$(_tmpdir)
+  open_stdin_fifo="$open_stdin_dir/stdin"
+  mkfifo "$open_stdin_fifo"
+  (
+    exec 3>"$open_stdin_fifo"
+    sleep 2
+  ) &
+  open_stdin_writer=$!
+  open_stdin_start=$(date +%s)
+  AGENTGUARD_SESSION_ID="$TEST_SID-$label" \
+    TMPDIR="$HM_TMP" \
+    AGENTGUARD_HIVE_MEMORY_HOOKS=0 \
+    AGENTGUARD_HOOK_STDIN_TIMEOUT=0.05 \
+    AGENTGUARD_NAME=agent \
+    _with_timeout 1 "$hook" <"$open_stdin_fifo" >/dev/null 2>/dev/null
+  open_stdin_rc=$?
+  open_stdin_elapsed=$(($(date +%s) - open_stdin_start))
+  kill "$open_stdin_writer" 2>/dev/null || true
+  wait "$open_stdin_writer" 2>/dev/null || true
+  _assert_eq "$label: open empty stdin exits successfully" "0" "$open_stdin_rc"
+  if [ "$open_stdin_elapsed" -lt 2 ]; then
+    open_stdin_fast=0
+  else
+    open_stdin_fast=1
+  fi
+  _assert_eq "$label: open empty stdin does not wait for EOF" "0" "$open_stdin_fast"
+}
+
+_assert_hook_open_empty_stdin "pre-bash" "$PRE_BASH"
+_assert_hook_open_empty_stdin "pre-edit" "$PRE_EDIT"
+_assert_hook_open_empty_stdin "pre-mcp" "$PRE_MCP"
+_assert_hook_open_empty_stdin "post-mcp" "$POST_MCP"
+_assert_hook_open_empty_stdin "session-end" "$BIN_DIR/agent-hook-session-end"
+
+open_stdin_dir=$(_tmpdir)
+open_stdin_fifo="$open_stdin_dir/stdin"
+mkfifo "$open_stdin_fifo"
+(
+  exec 3>"$open_stdin_fifo"
+  sleep 2
+) &
+open_stdin_writer=$!
+open_stdin_start=$(date +%s)
+open_stdin_out=$(
+  HOME="$HM_HOME" \
+    PATH="$HM_BIN:$PATH" \
+    TMPDIR="$HM_TMP" \
+    AGENTGUARD_HIVE_MEMORY_HOOKS=0 \
+    AGENTGUARD_HOOK_STDIN_TIMEOUT=0.05 \
+    AGENTGUARD_NAME=codex \
+    CODEX_THREAD_ID="hm-open-stdin" \
+    _with_timeout 1 bash -c '
+      source "$1"
+      _hook_hm_read_input
+      if [ -n "${_HOOK_INPUT+x}" ]; then
+        printf "input=%s\n" "$_HOOK_INPUT"
+      else
+        printf "no-input\n"
+      fi
+    ' _ "$HELPERS" <"$open_stdin_fifo"
+)
+open_stdin_rc=$?
+open_stdin_elapsed=$(($(date +%s) - open_stdin_start))
+kill "$open_stdin_writer" 2>/dev/null || true
+wait "$open_stdin_writer" 2>/dev/null || true
+_assert_eq "hm hook: open empty stdin exits successfully" "0" "$open_stdin_rc"
+_assert_eq "hm hook: open empty stdin is treated as no input" "no-input" "$open_stdin_out"
+if [ "$open_stdin_elapsed" -lt 2 ]; then
+  open_stdin_fast=0
+else
+  open_stdin_fast=1
+fi
+_assert_eq "hm hook: open empty stdin does not wait for EOF" "0" "$open_stdin_fast"
+
 : >"$HM_LOG"
 printf '%s' '{"session_id":"json-hm-session","workspace":{"current_dir":"/tmp/workspace"}}' |
   env -u CLAUDE_CODE_CURRENT_SESSION_ID \
@@ -1189,9 +1267,8 @@ _assert_eq "hook_finish: exits 0 when not blocked" "0" "$?"
 echo ""
 echo "=== hook-helpers: _hook_parse_command ==="
 
-# _hook_parse_command uses _HOOK_INPUT=$(cat) on first call.  Set
-# _HOOK_INPUT directly to avoid running the function in a pipe subshell
-# (which would discard the exported vars).
+# Set _HOOK_INPUT directly to avoid running _hook_parse_command in a pipe
+# subshell, which would discard the exported vars.
 
 # Single-line command: AGENTGUARD_CMD_LINE1 equals AGENTGUARD_CMD_TRIMMED
 (

@@ -188,6 +188,31 @@ $1"
 
 # --- Input parsing ---
 
+_hook_read_input() {
+  if [ -n "${_HOOK_INPUT+x}" ]; then
+    _hook_refresh_state_dir
+    return 0
+  fi
+  [ ! -t 0 ] || return 1
+  local input stdin_timeout
+  stdin_timeout="${AGENTGUARD_HOOK_STDIN_TIMEOUT:-0.05}"
+  # Some hook runners attach a non-tty stdin pipe before they have any payload
+  # to send. A plain `cat` waits for EOF and can consume the runner's whole hook
+  # timeout, so read at most the bytes that arrive promptly.
+  IFS= read -r -t "$stdin_timeout" -d '' input || true
+  # Non-interactive test shells and some hook launchers can present an already
+  # closed stdin. Treat that as "no hook JSON" instead of caching an empty input:
+  # an empty _HOOK_INPUT would make the state refresh look for a missing
+  # session_id and could downgrade a stable Codex process key to this short-lived
+  # hook process.
+  [ -n "$input" ] || return 1
+  _HOOK_INPUT="$input"
+  # Some hook runners provide the durable session id only in JSON stdin. Refresh
+  # after reading that payload so per-session state is keyed by the actual
+  # session instead of falling back to this one hook process id.
+  _hook_refresh_state_dir
+}
+
 # Parses the shell command from hook JSON input. Caches the full JSON in
 # _HOOK_INPUT (same contract as _hook_parse_mcp) so agent-specific and local
 # extensions can read additional fields. Sets AGENTGUARD_CMD_TRIMMED (full command,
@@ -195,8 +220,7 @@ $1"
 # command-detection guards that must ignore heredoc bodies). Exits early if no
 # command.
 _hook_parse_command() {
-  [ -z "${_HOOK_INPUT+x}" ] && _HOOK_INPUT=$(cat)
-  _hook_refresh_state_dir
+  _hook_read_input || exit 0
   local cmd
   cmd=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_input.command // .tool_input.cmd // empty')
   [ -z "$cmd" ] && exit 0
@@ -212,7 +236,7 @@ _hook_parse_command() {
 # object names, so keep the base post-bash scanner wired through this adapter
 # instead of reading a Claude-shaped field directly.
 _hook_tool_stdout() {
-  [ -z "${_HOOK_INPUT+x}" ] && _HOOK_INPUT=$(cat)
+  _hook_read_input || return 0
   printf '%s' "$_HOOK_INPUT" | jq -r '
     def text_value(v):
       if (v | type) == "string" then v else empty end;
@@ -231,8 +255,12 @@ _hook_tool_stdout() {
 # single file_path; Codex API apply_patch passes a patch body, so extract the
 # file headers from that structured patch format.
 _hook_parse_edit_files() {
-  [ -z "${_HOOK_INPUT+x}" ] && _HOOK_INPUT=$(cat)
-  _hook_refresh_state_dir
+  if ! _hook_read_input; then
+    AGENTGUARD_EDIT_FILES=''
+    AGENTGUARD_EDIT_FILE=''
+    export AGENTGUARD_EDIT_FILES AGENTGUARD_EDIT_FILE
+    return 0
+  fi
   AGENTGUARD_EDIT_FILES=$(printf '%s' "$_HOOK_INPUT" | jq -r '
     def patch_text:
       if (.tool_input | type) == "string" then .tool_input
@@ -258,8 +286,7 @@ _hook_parse_edit_files() {
 # for downstream field extraction), _HOOK_MCP_SERVER, and _HOOK_MCP_FAIL_FILE.
 # Exits early if the tool name or server can't be extracted.
 _hook_parse_mcp() {
-  _HOOK_INPUT=$(cat)
-  _hook_refresh_state_dir
+  _hook_read_input || exit 0
   local tool_name
   tool_name=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_name // empty')
   [ -z "$tool_name" ] && exit 0
@@ -300,21 +327,7 @@ _hook_hm_available() {
 }
 
 _hook_hm_read_input() {
-  [ -n "${_HOOK_INPUT+x}" ] && return 0
-  [ ! -t 0 ] || return 0
-  local input
-  input=$(cat)
-  # Non-interactive test shells and some hook launchers can present an already
-  # closed stdin. Treat that as "no hook JSON" instead of caching an empty input:
-  # an empty _HOOK_INPUT would make the state refresh look for a missing
-  # session_id and could downgrade a stable Codex process key to this short-lived
-  # hook process.
-  [ -n "$input" ] || return 0
-  _HOOK_INPUT="$input"
-  # Some hook runners provide the durable session id only in JSON stdin. Refresh
-  # after Hive Memory reads that payload so memory-pending state is session-wide
-  # instead of falling back to this one hook process id.
-  _hook_refresh_state_dir
+  _hook_read_input || return 0
 }
 
 _hook_hm_project_hint() {
