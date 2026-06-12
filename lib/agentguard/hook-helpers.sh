@@ -199,10 +199,32 @@ _hook_read_input() {
   # Some hook runners attach a non-tty stdin pipe before they have any payload
   # to send. A plain `cat` waits for EOF and can consume the runner's whole hook
   # timeout, so read at most the bytes that arrive promptly.
-  if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] && [[ "$stdin_timeout" == *.* ]]; then
+  if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] && [[ "$stdin_timeout" == *.* ]] &&
+    command -v perl >/dev/null 2>&1; then
+    input=$(
+      perl -e '
+        use strict;
+        use warnings;
+        use IO::Select;
+
+        my $timeout = shift @ARGV;
+        my $select = IO::Select->new(*STDIN);
+        my $input = "";
+        if ($select->can_read($timeout)) {
+          while ($select->can_read(0)) {
+            my $chunk = "";
+            my $read = sysread(STDIN, $chunk, 65536);
+            last if !defined($read) || $read == 0;
+            $input .= $chunk;
+          }
+        }
+        print $input;
+      ' "$stdin_timeout"
+    )
+  elif [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] && [[ "$stdin_timeout" == *.* ]]; then
     # Bash 3, still shipped as /bin/bash on macOS, rejects fractional timeouts.
-    # Probe readiness without consuming input; only if bytes are already ready
-    # do we use an integer timeout to finish reading the payload.
+    # Without Perl's `select`, fall back to an integer timeout only if bytes
+    # are already ready so open-empty pipes still return promptly.
     IFS= read -r -t 0 -d '' input || return 1
     IFS= read -r -t 1 -d '' input || true
   else
