@@ -202,6 +202,20 @@ _assert_eq "state_dir: codex process key fallback" "0" "$?"
 ) | grep -q PASS
 _assert_eq "state_dir: codex JSON session id wins over process fallback" "0" "$?"
 
+# Managed Codex configs often derive AGENTGUARD_SESSION_ID from
+# CODEX_THREAD_ID. Nested Codex launches can inherit that outer env var, so
+# refresh must trust the hook payload's session id once stdin JSON is available.
+(
+  AGENTGUARD_NAME="codex"
+  AGENTGUARD_SESSION_ID="outer-session"
+  CODEX_THREAD_ID="outer-session"
+  TMPDIR="/tmp/codex-nested-test"
+  _HOOK_INPUT='{"session_id":"inner-session"}'
+  source "$HELPERS"
+  [ "$_HOOK_STATE_DIR" = "/tmp/codex-nested-test/hook-state/inner-session" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | grep -q PASS
+_assert_eq "state_dir: codex JSON session id beats inherited env ids" "0" "$?"
+
 # _HOOK_STATE_DIR uses TMPDIR for the tmp root
 # shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
 (
