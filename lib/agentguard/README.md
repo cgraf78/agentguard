@@ -162,6 +162,10 @@ The shell hooks pass only event facts: agent id, session id, and the best
 available active path. Store affinity, project resolution, context freshness,
 and refresh policy live in `hm`, so agent-specific or local extension files
 do not need to duplicate memory policy.
+When an agent session is launched from `$HOME`, AgentGuard treats that as "no
+active project" rather than passing home as a project hint. Explicit file paths
+under `$HOME` still pass through, so one long-lived session can work across many
+projects without collapsing context onto the home directory itself.
 
 Claude-specific extensions auto-name untitled sessions and run the daily
 `claude-templates update` refresh in the background.
