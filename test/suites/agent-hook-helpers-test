@@ -358,7 +358,7 @@ cat >"$HM_BIN/hm" <<'SCRIPT'
   printf 'session=%s\n' "${HIVE_MEMORY_SESSION_ID:-}"
   printf 'project=%s\n' "${HIVE_MEMORY_PROJECT:-}"
   printf 'project_infer=%s\n' "${HIVE_MEMORY_PROJECT_INFER:-}"
-  printf 'active=%s\n' "${AGENTGUARD_HIVE_MEMORY_HOOK_ACTIVE:-}"
+  printf 'active=%s\n' "${HIVE_MEMORY_HOOK_ACTIVE:-}"
 } >>"$HM_LOG"
 
 case "${HM_MODE:-empty}" in
@@ -706,7 +706,7 @@ HOME="$HM_HOME" \
   TMPDIR="$HM_TMP" \
   HM_LOG="$HM_LOG" \
   AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
-  AGENTGUARD_HIVE_MEMORY_HOOK_ACTIVE=1 \
+  HIVE_MEMORY_HOOK_ACTIVE=1 \
   AGENTGUARD_NAME=claude \
   CODEX_THREAD_ID="" \
   CLAUDE_CODE_CURRENT_SESSION_ID="hm-session" \
