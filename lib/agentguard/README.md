@@ -50,8 +50,8 @@ Use shdeps to locate sourceable files instead of reconstructing install paths:
 
 Optional integrations are detected at runtime: `hm` enables Hive Memory hook
 context, `sl`, `git`, and `jj` enable repository status context, and
-`claude-templates` or `sync-memory` enable Claude-specific maintenance hooks
-when those commands are installed.
+`claude-templates` enables a Claude-specific maintenance hook when that
+command is installed.
 
 ## Lifecycle
 
@@ -163,8 +163,8 @@ available active path. Store affinity, project resolution, context freshness,
 and refresh policy live in `hm`, so agent-specific or local extension files
 do not need to duplicate memory policy.
 
-Claude-specific extensions auto-name untitled sessions, sync Claude memory on
-stop, and run the daily `claude-templates update` refresh in the background.
+Claude-specific extensions auto-name untitled sessions and run the daily
+`claude-templates update` refresh in the background.
 
 ## Script Notes
 
