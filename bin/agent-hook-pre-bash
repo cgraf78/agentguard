@@ -474,7 +474,7 @@ _hook_run_guards() {
             ((i++))
           done
         fi
-        # `git push --force` / `-f` / `--force-with-lease` — rewrites remote history.
+        # `git push --force` / `-f` rewrites remote history without a lease.
         if [ "$_GUARD_GIT_PUSH_FORCE" -eq 0 ] && _git_subcommand_is "$frag" "push"; then
           words=()
           while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$frag")
@@ -484,10 +484,11 @@ _hook_run_guards() {
             word=$(_clean_command_word "${words[$i]}")
             case "$word" in
               --) break ;;
-              --force | --force-with-lease | --force-with-lease=*)
+              --force)
                 _GUARD_GIT_PUSH_FORCE=1
                 break
                 ;;
+              --*) ;;
               -?*) [[ "${word#-}" == *f* ]] && {
                 _GUARD_GIT_PUSH_FORCE=1
                 break
@@ -676,9 +677,9 @@ fi
 [ "$_GUARD_GIT_CLEAN_FORCE" -eq 1 ] &&
   _hook_block 'git clean -f deletes untracked files permanently. Review with git clean -n first, then run manually.'
 
-# Block git push --force — rewrites remote history and can destroy others' work.
+# Block git push --force — rewrites remote history without a lease.
 [ "$_GUARD_GIT_PUSH_FORCE" -eq 1 ] &&
-  _hook_block 'git push --force rewrites remote history. Force-pushes must be run manually.'
+  _hook_block 'git push --force rewrites remote history without a lease. Use --force-with-lease for reviewed restacks.'
 
 # Block interactive TTY commands — they will silently hang the agent turn.
 [ "$_GUARD_TTY_REQUIRED" -eq 1 ] &&

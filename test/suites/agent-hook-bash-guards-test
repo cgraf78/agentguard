@@ -140,10 +140,12 @@ _run_hook "$PRE_BASH" '{"tool_input":{"command":"git push --force origin main"}}
 _assert_eq "git push --force origin main: blocked" "2" "$HOOK_EXIT"
 
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"git push --force-with-lease origin feat"}}'
-_assert_eq "git push --force-with-lease: blocked" "2" "$HOOK_EXIT"
+_assert_eq "git push --force-with-lease: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "git push --force-with-lease: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
 
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"git push --force-with-lease=HEAD origin feat"}}'
-_assert_eq "git push --force-with-lease=ref: blocked" "2" "$HOOK_EXIT"
+_assert_eq "git push --force-with-lease=ref: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "git push --force-with-lease=ref: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
 
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"git -C /tmp/repo push -f"}}'
 _assert_eq "git -C push -f: blocked" "2" "$HOOK_EXIT"

@@ -3383,7 +3383,7 @@ _git_clean_force_command() {
   return 1
 }
 
-# `git push --force` / `-f` / `--force-with-lease` — rewrites remote history.
+# `git push --force` / `-f` — rewrites remote history without a lease.
 _git_push_force_command() {
   local text="$1" fragment word i
   local -a words=()
@@ -3397,7 +3397,8 @@ _git_push_force_command() {
       word="$(_clean_command_word "${words[$i]}")"
       case "$word" in
         --) break ;;
-        --force | --force-with-lease | --force-with-lease=*) return 0 ;;
+        --force) return 0 ;;
+        --*) ;;
         -?*) [[ "${word#-}" == *f* ]] && return 0 ;;
       esac
       ((i++))
