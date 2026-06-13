@@ -59,8 +59,8 @@ dependency manager's contract:
 
 Optional integrations are detected at runtime: `hm` enables Hive Memory hook
 context, `sl`, `git`, and `jj` enable repository status context, and
-`claude-templates` or `sync-memory` enable Claude-specific maintenance hooks
-when those commands are installed.
+`claude-templates` enables a Claude-specific maintenance hook when that
+command is installed.
 
 ## Tests
 
@@ -183,8 +183,8 @@ commands run through the dotfiles launcher, which adds active agent/session
 environment so `hm` can write receipts and later clear pending-memory reminders
 after a successful tool event.
 
-Claude-specific extensions auto-name untitled sessions, sync Claude memory on
-stop, and run the daily `claude-templates update` refresh in the background.
+Claude-specific extensions auto-name untitled sessions and run the daily
+`claude-templates update` refresh in the background.
 
 ## Script Notes
 
