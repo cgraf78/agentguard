@@ -182,6 +182,10 @@ do not need to duplicate memory policy. Normal `hm remember` and `hm note`
 commands run through the dotfiles launcher, which adds active agent/session
 environment so `hm` can write receipts and later clear pending-memory reminders
 after a successful tool event.
+When an agent session is launched from `$HOME`, AgentGuard treats that as "no
+active project" rather than passing home as a project hint. Explicit file paths
+under `$HOME` still pass through, so one long-lived session can work across many
+projects without collapsing context onto the home directory itself.
 
 Claude-specific extensions auto-name untitled sessions and run the daily
 `claude-templates update` refresh in the background.

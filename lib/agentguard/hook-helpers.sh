@@ -360,6 +360,11 @@ _hook_hm_read_input() {
   _hook_read_input || return 0
 }
 
+_hook_hm_project_hint_is_home() {
+  local hint="${1%/}" home="${HOME%/}"
+  [ -n "$home" ] && [ "$hint" = "$home" ]
+}
+
 _hook_hm_project_hint() {
   _hook_hm_read_input
   if [ -n "${_HOOK_INPUT+x}" ]; then
@@ -375,11 +380,15 @@ _hook_hm_project_hint() {
       ] | map(select(type == "string" and . != "")) | .[0] // empty
     ' 2>/dev/null)
     [ -n "$hint" ] && {
+      _hook_hm_project_hint_is_home "$hint" && return 0
       printf '%s\n' "$hint"
       return 0
     }
   fi
-  pwd
+  local cwd
+  cwd=$(pwd) || return 0
+  _hook_hm_project_hint_is_home "$cwd" && return 0
+  printf '%s\n' "$cwd"
 }
 
 _hook_hm_prompt_text() {
@@ -491,7 +500,11 @@ _hook_hm_event() {
       ;;
     *)
       project=$(_hook_hm_project_hint)
-      hm_args+=(--project "$project")
+      if [ -n "$project" ]; then
+        hm_args+=(--project "$project")
+      else
+        project_infer=0
+      fi
       ;;
   esac
   hm_args+=(--json "$@")

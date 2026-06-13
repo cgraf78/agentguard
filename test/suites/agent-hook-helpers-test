@@ -407,6 +407,46 @@ _assert_contains "hm hook: surfaces response warnings" \
 _assert_contains "hm hook: tags reminders on stderr" \
   "REMINDER: write reminder" "$(cat "$hm_prompt_err")"
 
+: >"$HM_LOG"
+HOME="$HM_HOME" \
+  PATH="$HM_BIN:$PATH" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_NAME=codex \
+  CODEX_THREAD_ID="hm-home-session" \
+  bash -c '
+    source "$1"
+    _HOOK_INPUT=$(printf '\''{"prompt":"remember this","workspace":{"current_dir":"%s"}}'\'' "$HOME")
+    _hook_hm_prompt_submit
+  ' _ "$HELPERS" >/dev/null 2>/dev/null
+_assert_contains "hm hook: prompt-submit from home omits project argument" \
+  "args=hook prompt-submit --json --text remember this" "$(cat "$HM_LOG")"
+_assert_not_contains "hm hook: prompt-submit from home does not pass --project" \
+  "--project" "$(cat "$HM_LOG")"
+_assert_eq "hm hook: prompt-submit from home leaves project env unset" \
+  "project=" "$(grep '^project=' "$HM_LOG")"
+_assert_contains "hm hook: prompt-submit from home disables project inference" \
+  "project_infer=0" "$(cat "$HM_LOG")"
+
+: >"$HM_LOG"
+HOME="$HM_HOME" \
+  PATH="$HM_BIN:$PATH" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_NAME=codex \
+  CODEX_THREAD_ID="hm-home-session-start" \
+  bash -c '
+    cd "$HOME" || exit 1
+    source "$1"
+    _hook_hm_session_start
+  ' _ "$HELPERS" </dev/null >/dev/null 2>/dev/null
+_assert_contains "hm hook: session-start from home omits project argument" \
+  "args=hook session-start --json" "$(cat "$HM_LOG")"
+_assert_not_contains "hm hook: session-start from home does not pass --project" \
+  "--project" "$(cat "$HM_LOG")"
+
 prompt_input_preserved=$(
   printf '%s' '{"prompt":"goal work","workspace":{"current_dir":"/tmp/project"}}' |
     HOME="$HM_HOME" \
