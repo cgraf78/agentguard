@@ -169,6 +169,10 @@ To add a new managed agent runtime:
   reminders and context refresh decisions, then resets prompt-cycle state used
   by once-per-prompt guidance. The hook passes prompt text and path facts; it
   does not decide what should be written.
+- `agent-hook-post-bash`, `agent-hook-post-edit`, and `agent-hook-post-mcp`
+  pass successful/failed tool status to `hm hook tool-complete`; when the hook
+  payload already includes a path, they also pass it so Hive Memory can refresh
+  project-aware context after memory writes without doing extra path discovery.
 - `agent-hook-stop` asks Hive Memory for any pending-memory reminder, then plays
   terminal notifications. On Codex, only explicit reminders or blocks continue
   the turn; ordinary warnings do not trap shutdown. `agent-hook-notification`

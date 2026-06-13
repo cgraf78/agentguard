@@ -569,13 +569,11 @@ HOME="$HM_HOME" \
     _hook_hm_tool_complete
   ' _ "$HELPERS" >/dev/null 2>/dev/null
 _assert_contains "hm hook: tool-complete maps failed status to nonzero" \
-  "args=hook tool-complete --json --status 1" "$(cat "$HM_LOG")"
-_assert_not_contains "hm hook: tool-complete skips project argument" \
-  "--project" "$(cat "$HM_LOG")"
-_assert_contains "hm hook: tool-complete disables launcher project inference" \
-  "project_infer=0" "$(cat "$HM_LOG")"
-_assert_eq "hm hook: tool-complete leaves project env unset" \
-  "project=" "$(grep '^project=' "$HM_LOG")"
+  "args=hook tool-complete --project /tmp/project --json --status 1" "$(cat "$HM_LOG")"
+_assert_contains "hm hook: tool-complete passes payload project env" \
+  "project=/tmp/project" "$(cat "$HM_LOG")"
+_assert_contains "hm hook: tool-complete enables project inference for payload path" \
+  "project_infer=1" "$(cat "$HM_LOG")"
 
 : >"$HM_LOG"
 HOME="$HM_HOME" \
@@ -592,9 +590,7 @@ HOME="$HM_HOME" \
     _hook_hm_tool_complete
   ' _ "$HELPERS" >/dev/null 2>/dev/null
 _assert_contains "hm hook: tool-complete maps MCP error boolean to nonzero" \
-  "args=hook tool-complete --json --status 1" "$(cat "$HM_LOG")"
-_assert_not_contains "hm hook: MCP tool-complete skips project argument" \
-  "--project" "$(cat "$HM_LOG")"
+  "args=hook tool-complete --project /tmp/project/mcp.txt --json --status 1" "$(cat "$HM_LOG")"
 
 : >"$HM_LOG"
 HOME="$HM_HOME" \
@@ -610,6 +606,12 @@ HOME="$HM_HOME" \
   ' _ "$HELPERS" </dev/null >/dev/null 2>/dev/null
 _assert_contains "hm hook: tool-complete defaults missing status to zero" \
   "args=hook tool-complete --json --status 0" "$(cat "$HM_LOG")"
+_assert_not_contains "hm hook: pathless tool-complete skips project argument" \
+  "--project" "$(cat "$HM_LOG")"
+_assert_contains "hm hook: pathless tool-complete disables launcher project inference" \
+  "project_infer=0" "$(cat "$HM_LOG")"
+_assert_eq "hm hook: pathless tool-complete leaves project env unset" \
+  "project=" "$(grep '^project=' "$HM_LOG")"
 
 : >"$HM_LOG"
 printf '%s' 'not-json' |

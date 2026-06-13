@@ -360,7 +360,7 @@ _hook_hm_read_input() {
   _hook_read_input || return 0
 }
 
-_hook_hm_project_hint() {
+_hook_hm_input_project_hint() {
   _hook_hm_read_input
   if [ -n "${_HOOK_INPUT+x}" ]; then
     local hint
@@ -378,6 +378,15 @@ _hook_hm_project_hint() {
       printf '%s\n' "$hint"
       return 0
     }
+  fi
+}
+
+_hook_hm_project_hint() {
+  local hint
+  hint=$(_hook_hm_input_project_hint)
+  if [ -n "$hint" ]; then
+    printf '%s\n' "$hint"
+    return 0
   fi
   pwd
 }
@@ -482,12 +491,21 @@ _hook_hm_event() {
   # coalescing from config and hook state.
   hm_args=(hook "$event")
   case "$event" in
-    stop | tool-complete)
-      # Intentionally omit project context for these high-frequency events.
-      # `session-start` and `prompt-submit` are the project-aware context
-      # boundaries; `tool-complete` only reports status, and passing a project
-      # hint here forces `hm` through VCS discovery after every tool call.
+    stop)
+      # `hm hook stop` has no project option; it only checks session-local
+      # memory debt and returns a final reminder when needed.
       project_infer=0
+      ;;
+    tool-complete)
+      # Post-tool hooks are frequent, so preserve the cheap path unless the
+      # runner already gave us a path. When a payload path is present, pass it
+      # through so `hm` can refresh project-aware context after memory writes.
+      project=$(_hook_hm_input_project_hint)
+      if [ -n "$project" ]; then
+        hm_args+=(--project "$project")
+      else
+        project_infer=0
+      fi
       ;;
     *)
       project=$(_hook_hm_project_hint)

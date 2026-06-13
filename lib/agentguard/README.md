@@ -154,6 +154,9 @@ To add a new managed agent runtime:
 - `agent-hook-prompt-submit` lets `hm hook prompt-submit` handle memory-intent
   reminders and context refresh decisions, then resets prompt-cycle state used
   by once-per-prompt guidance.
+- `agent-hook-post-bash`, `agent-hook-post-edit`, and `agent-hook-post-mcp`
+  pass tool status and any payload path to `hm hook tool-complete` so Hive
+  Memory can refresh project-aware context after memory writes.
 - `agent-hook-stop` asks Hive Memory for any pending-memory reminder, then plays
   terminal notifications. `agent-hook-notification` only plays notifications.
 
