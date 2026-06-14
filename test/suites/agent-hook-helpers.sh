@@ -20,6 +20,15 @@ unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID \
 # behavior against repo defaults; individual tests set custom thresholds where
 # that contract is under test.
 unset AGENTGUARD_EDIT_CHURN_WARN AGENTGUARD_EDIT_CHURN_BLOCK
+# A machine that protects a bare-Git work tree exports these (e.g. a dotfiles
+# bare repo). Scrub them so non-protected fixtures stay hermetic regardless of
+# the running session; the protected-bare suites set them explicitly via
+# _mock_protected_bare_git_home.
+unset AGENTGUARD_PROTECTED_BARE_GIT_DIR AGENTGUARD_PROTECTED_BARE_GIT_WORK_TREE \
+  AGENTGUARD_PROTECTED_BARE_GIT_ALIASES AGENTGUARD_PROTECTED_BARE_GIT_LAUNCHER \
+  AGENTGUARD_PROTECTED_BARE_GIT_STATUS_MESSAGE \
+  AGENTGUARD_PROTECTED_BARE_GIT_LS_FILES_MESSAGE \
+  AGENTGUARD_PROTECTED_BARE_GIT_CLEAN_MESSAGE
 
 AGENTGUARD_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 AGENTGUARD_ROOT="$(cd -- "$AGENTGUARD_TEST_DIR/.." && pwd -P)"
