@@ -59,13 +59,18 @@ Base hooks follow the same shape:
 
 ```text
 set -u
-_HOOK_SELF="$0"
-_HOOK_BIN_DIR=$(resolve-real-script-dir "$BASH_SOURCE")
+_HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}"
+_HOOK_BIN_DIR=$(_hook_script_dir "${BASH_SOURCE[0]}")
 source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
 # parse input and run base logic
 _hook_source_extensions
 _hook_finish
 ```
+
+`_hook_script_dir`/`_hook_script_parent` are inlined into each hook (not shared
+from `lib/` or a PATH command): they locate `lib/` itself, and launchers may use
+a minimal PATH, so the resolver stays self-contained on `BASH_SOURCE` +
+`readlink`.
 
 The split between `_HOOK_SELF` and `_HOOK_BIN_DIR` is intentional: `_HOOK_SELF`
 keeps extension discovery adjacent to the invoked symlink in `~/.local/bin`,

@@ -108,12 +108,12 @@ _apply_patch_json=$(jq -n --arg patch \
     "*** End Patch")" \
   '{"tool_input":$patch}')
 
-# Run a hook with controlled env. Captures stderr into $HOOK_STDERR,
-# stdout into $HOOK_STDOUT, and exit code into $HOOK_EXIT.
-_run_hook() {
-  local hook="$1"
-  shift
-  local input="${1:-}"
+# Run a hook with controlled env. Captures stdout into $HOOK_STDOUT, stderr
+# into $HOOK_STDERR, and exit code into $HOOK_EXIT. The environment is taken from
+# the caller's `_RUN_HOOK_ENV` array (env(1) operands: NAME=value entries and
+# `-u NAME` removals); the thin wrappers below differ only in that array.
+_run_hook_env() {
+  local hook="$1" input="${2:-}"
   # shellcheck disable=SC2034
   HOOK_STDOUT=""
   HOOK_STDERR=""
@@ -123,124 +123,63 @@ _run_hook() {
   err_file=$(mktemp "$TEST_TMPDIR/err.XXXXXX")
   if [ -n "$input" ]; then
     printf '%s' "$input" |
-      AGENTGUARD_SESSION_ID="$TEST_SID" \
-        TMPDIR="$TEST_TMPDIR" \
-        AGENTGUARD_NAME="agent" \
-        CODEX_THREAD_ID="" \
-        "$hook" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
+      env "${_RUN_HOOK_ENV[@]}" "$hook" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
   else
-    AGENTGUARD_SESSION_ID="$TEST_SID" \
-      TMPDIR="$TEST_TMPDIR" \
-      AGENTGUARD_NAME="agent" \
-      CODEX_THREAD_ID="" \
-      "$hook" >"$out_file" 2>"$err_file" </dev/null || HOOK_EXIT=$?
+    env "${_RUN_HOOK_ENV[@]}" "$hook" >"$out_file" 2>"$err_file" </dev/null || HOOK_EXIT=$?
   fi
   # shellcheck disable=SC2034
   HOOK_STDOUT=$(cat "$out_file")
   HOOK_STDERR=$(cat "$err_file")
   rm -f "$out_file" "$err_file"
+}
+
+_run_hook() {
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    AGENTGUARD_SESSION_ID="$TEST_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="agent"
+    CODEX_THREAD_ID=
+  )
+  _run_hook_env "$@"
 }
 
 _run_hook_with_git_env() {
-  local hook="$1"
-  shift
-  local input="${1:-}"
-  # shellcheck disable=SC2034
-  HOOK_STDOUT=""
-  HOOK_STDERR=""
-  HOOK_EXIT=0
-  local out_file err_file
-  out_file=$(mktemp "$TEST_TMPDIR/out.XXXXXX")
-  err_file=$(mktemp "$TEST_TMPDIR/err.XXXXXX")
-  if [ -n "$input" ]; then
-    printf '%s' "$input" |
-      GIT_DIR="$HOME/.protected-bare-git" \
-        GIT_WORK_TREE="$HOME" \
-        AGENTGUARD_SESSION_ID="$TEST_SID" \
-        TMPDIR="$TEST_TMPDIR" \
-        AGENTGUARD_NAME="agent" \
-        CODEX_THREAD_ID="" \
-        "$hook" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
-  else
-    GIT_DIR="$HOME/.protected-bare-git" \
-      GIT_WORK_TREE="$HOME" \
-      AGENTGUARD_SESSION_ID="$TEST_SID" \
-      TMPDIR="$TEST_TMPDIR" \
-      AGENTGUARD_NAME="agent" \
-      CODEX_THREAD_ID="" \
-      "$hook" >"$out_file" 2>"$err_file" </dev/null || HOOK_EXIT=$?
-  fi
-  # shellcheck disable=SC2034
-  HOOK_STDOUT=$(cat "$out_file")
-  HOOK_STDERR=$(cat "$err_file")
-  rm -f "$out_file" "$err_file"
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    GIT_DIR="$HOME/.protected-bare-git"
+    GIT_WORK_TREE="$HOME"
+    AGENTGUARD_SESSION_ID="$TEST_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="agent"
+    CODEX_THREAD_ID=
+  )
+  _run_hook_env "$@"
 }
 
 _run_hook_without_user() {
-  local hook="$1"
-  shift
-  local input="${1:-}"
-  # shellcheck disable=SC2034
-  HOOK_STDOUT=""
-  HOOK_STDERR=""
-  HOOK_EXIT=0
-  local out_file err_file
-  out_file=$(mktemp "$TEST_TMPDIR/out.XXXXXX")
-  err_file=$(mktemp "$TEST_TMPDIR/err.XXXXXX")
-  if [ -n "$input" ]; then
-    printf '%s' "$input" |
-      env -u USER \
-        AGENTGUARD_SESSION_ID="$TEST_SID" \
-        TMPDIR="$TEST_TMPDIR" \
-        AGENTGUARD_NAME="agent" \
-        CODEX_THREAD_ID="" \
-        "$hook" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
-  else
-    env -u USER \
-      AGENTGUARD_SESSION_ID="$TEST_SID" \
-      TMPDIR="$TEST_TMPDIR" \
-      AGENTGUARD_NAME="agent" \
-      CODEX_THREAD_ID="" \
-      "$hook" >"$out_file" 2>"$err_file" </dev/null || HOOK_EXIT=$?
-  fi
-  # shellcheck disable=SC2034
-  HOOK_STDOUT=$(cat "$out_file")
-  HOOK_STDERR=$(cat "$err_file")
-  rm -f "$out_file" "$err_file"
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    -u USER
+    AGENTGUARD_SESSION_ID="$TEST_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="agent"
+    CODEX_THREAD_ID=
+  )
+  _run_hook_env "$@"
 }
 
 # Run a hook with Gemini env vars instead of Claude. Same capture contract.
 _run_hook_gemini() {
-  local hook="$1"
-  shift
-  local input="${1:-}"
-  # shellcheck disable=SC2034
-  HOOK_STDOUT=""
-  HOOK_STDERR=""
-  HOOK_EXIT=0
-  local out_file err_file
-  out_file=$(mktemp "$TEST_TMPDIR/out.XXXXXX")
-  err_file=$(mktemp "$TEST_TMPDIR/err.XXXXXX")
-  if [ -n "$input" ]; then
-    printf '%s' "$input" |
-      GEMINI_PROJECT_DIR="$TEST_TMPDIR" \
-        AGENTGUARD_SESSION_ID="" \
-        CLAUDE_CODE_CURRENT_SESSION_ID="" \
-        AGENTGUARD_NAME="gemini" \
-        TMPDIR="$TEST_TMPDIR" \
-        "$hook" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
-  else
-    GEMINI_PROJECT_DIR="$TEST_TMPDIR" \
-      AGENTGUARD_SESSION_ID="" \
-      CLAUDE_CODE_CURRENT_SESSION_ID="" \
-      AGENTGUARD_NAME="gemini" \
-      TMPDIR="$TEST_TMPDIR" \
-      "$hook" >"$out_file" 2>"$err_file" </dev/null || HOOK_EXIT=$?
-  fi
-  # shellcheck disable=SC2034
-  HOOK_STDOUT=$(cat "$out_file")
-  HOOK_STDERR=$(cat "$err_file")
-  rm -f "$out_file" "$err_file"
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    GEMINI_PROJECT_DIR="$TEST_TMPDIR"
+    AGENTGUARD_SESSION_ID=
+    CLAUDE_CODE_CURRENT_SESSION_ID=
+    AGENTGUARD_NAME="gemini"
+    TMPDIR="$TEST_TMPDIR"
+  )
+  _run_hook_env "$@"
 }
 
 # Clean hook state between tests
