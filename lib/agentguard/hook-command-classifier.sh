@@ -2428,88 +2428,104 @@ _env_split_payloads() {
   done < <(_fragment_tokens "$fragment")
   [ "${#words[@]}" -gt 0 ] || return 1
 
-  # Find the `env` that carries the split-string, skipping anything transparent
-  # in front of it. Without this, a single wrapper token defeats the guard:
-  # `sudo env -S 'rm -rf /'`, `nice env -S …`, `xargs env -S …` all reduce to a
-  # plain `env -S` once the wrapper is stripped, but the wrapper hides it here.
+  # Resolve the env that carries the split-string, transparently stepping over
+  # anything in front of it. A single transparent layer otherwise defeats the
+  # guard: `sudo env -S …`, `nice env -S …`, `xargs env -S …`, and `env env -S …`
+  # (env is itself a command runner) all reduce to a plain `env -S`. The outer
+  # loop re-resolves after each layer so wrappers stack; it always advances past
+  # at least one env per iteration, so it cannot spin.
   while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
-    case "$word" in
-      [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
+    # Skip transparent prefixes (assignments, command prefixes, privilege and
+    # execution wrappers) until the next env executable.
+    while [ "$i" -lt "${#words[@]}" ]; do
+      word="$(_clean_command_word "${words[$i]}")"
+      case "$word" in
+        [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
+          ((i++))
+          continue
+          ;;
+      esac
+
+      if _word_is_command_prefix "$word"; then
         ((i++))
         continue
-        ;;
-    esac
+      fi
+      if _word_is_privilege_wrapper "$word"; then
+        i="$(_skip_privilege_wrapper "$i" "${words[@]}")" || return 1
+        continue
+      fi
+      if _word_is_execution_wrapper "$word"; then
+        i="$(_skip_execution_wrapper "$i" "${words[@]}")" || return 1
+        continue
+      fi
 
-    if _word_is_command_prefix "$word"; then
+      _word_is_env_executable "$word" || return 1
       ((i++))
-      continue
-    fi
-    if _word_is_privilege_wrapper "$word"; then
-      i="$(_skip_privilege_wrapper "$i" "${words[@]}")" || return 1
-      continue
-    fi
-    if _word_is_execution_wrapper "$word"; then
-      i="$(_skip_execution_wrapper "$i" "${words[@]}")" || return 1
-      continue
-    fi
+      break
+    done
+    [ "$i" -lt "${#words[@]}" ] || return 1
 
-    _word_is_env_executable "$word" || return 1
-    ((i++))
-    break
-  done
-
-  while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
-    case "$word" in
-      -S | --split-string)
-        # -S takes the next token (its string); env appends any following args.
-        _join_fragment_tokens_from "$((i + 1))" "${words[@]}" && return 0
-        return 1
-        ;;
-      --split-string=*)
-        _env_split_emit "${word#--split-string=}" "$((i + 1))" "${words[@]}"
-        return $?
-        ;;
-      -S?*)
-        # Attached short option: -S<string>.
-        _env_split_emit "${word#-S}" "$((i + 1))" "${words[@]}"
-        return $?
-        ;;
-      -[!-]*S*)
-        # Clustered short options ending in the split flag, e.g. -iS<string>.
-        # Uppercase S is env's only such option, so any cluster containing it is
-        # a split-string; treat the rest of the token (after S) as the payload.
-        case "$word" in
-          *S?*)
-            _env_split_emit "${word#*S}" "$((i + 1))" "${words[@]}"
-            return $?
-            ;;
-          *)
-            _join_fragment_tokens_from "$((i + 1))" "${words[@]}" && return 0
-            return 1
-            ;;
-        esac
-        ;;
-      -u | --unset | -C | --chdir)
-        i=$((i + 2))
-        ;;
-      --unset=* | --chdir=*)
-        ((i++))
-        ;;
-      --)
-        return 1
-        ;;
-      -*)
-        ((i++))
-        ;;
-      [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
-        ((i++))
-        ;;
-      *)
-        return 1
-        ;;
-    esac
+    # Parse this env's options. -S/--split-string yields the payload; option
+    # values are consumed. Reaching env's command-position word (a bare word, or
+    # the token after `--`) re-enters the outer loop so a nested env/wrapper
+    # around the real `env -S` is still resolved rather than dismissed.
+    while [ "$i" -lt "${#words[@]}" ]; do
+      word="$(_clean_command_word "${words[$i]}")"
+      case "$word" in
+        -S | --split-string)
+          # -S takes the next token (its string); env appends any following args.
+          _join_fragment_tokens_from "$((i + 1))" "${words[@]}" && return 0
+          return 1
+          ;;
+        --split-string=*)
+          _env_split_emit "${word#--split-string=}" "$((i + 1))" "${words[@]}"
+          return $?
+          ;;
+        -S?*)
+          # Attached short option: -S<string>.
+          _env_split_emit "${word#-S}" "$((i + 1))" "${words[@]}"
+          return $?
+          ;;
+        -[!-]*S*)
+          # Clustered short options ending in the split flag, e.g. -iS<string>.
+          # Uppercase S is env's only such option, so any cluster containing it
+          # is a split-string; treat the rest of the token (after S) as payload.
+          case "$word" in
+            *S?*)
+              _env_split_emit "${word#*S}" "$((i + 1))" "${words[@]}"
+              return $?
+              ;;
+            *)
+              _join_fragment_tokens_from "$((i + 1))" "${words[@]}" && return 0
+              return 1
+              ;;
+          esac
+          ;;
+        -u | --unset | -C | --chdir)
+          i=$((i + 2))
+          ;;
+        --unset=* | --chdir=*)
+          ((i++))
+          ;;
+        --)
+          # End of this env's options; its command word follows. Advance and
+          # re-resolve it in case it is another env/wrapper around the payload.
+          ((i++))
+          break
+          ;;
+        -*)
+          ((i++))
+          ;;
+        [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
+          ((i++))
+          ;;
+        *)
+          # Command-position word: re-resolve via the outer loop without
+          # advancing (the outer skip consumes it if env/wrapper, else bails).
+          break
+          ;;
+      esac
+    done
   done
 
   return 1
@@ -2778,10 +2794,24 @@ _rm_target_is_dangerous() {
   # forms that resolve to a catastrophic target without being literal matches.
   expanded="$(_expand_home_path_token "$target")"
   norm="$(_normalize_path_lexically "$expanded")"
+  home_parent="$(_normalize_path_lexically "$HOME/..")"
   [ "$norm" = "/" ] && return 0
   [ "$norm" = "$HOME" ] && return 0
-  home_parent="$(_normalize_path_lexically "$HOME/..")"
   [ -n "$home_parent" ] && [ "$norm" = "$home_parent" ] && return 0
+
+  # A trailing `/*` glob wipes everything directly under its parent, so it is as
+  # dangerous as the parent itself. Catch the normalized parent-of-home form
+  # (`/home/*`, `${HOME}/../*`, `~/../*` → `/home/*`); the literal `/*` and
+  # `$HOME/*` forms are already handled above.
+  case "$norm" in
+    */'*')
+      local globdir="${norm%/'*'}"
+      [ -z "$globdir" ] && globdir="/"
+      [ "$globdir" = "/" ] && return 0
+      [ "$globdir" = "$HOME" ] && return 0
+      [ -n "$home_parent" ] && [ "$globdir" = "$home_parent" ] && return 0
+      ;;
+  esac
   return 1
 }
 

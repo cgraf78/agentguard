@@ -363,6 +363,24 @@ _run_hook "$PRE_BASH" '{"tool_input":{"command":"sudo env -S '\''ls -la'\''"}}'
 _assert_eq "sudo env -S ls -la: allowed" "0" "$HOOK_EXIT"
 _assert_not_contains "sudo env -S ls -la: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
 
+# env is itself a transparent command runner, so `env … env -S '<payload>'`
+# reaches a second env whose split-string must still be extracted. The payload
+# extractor re-resolves after each transparent layer.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env env -S '\''rm -rf /'\''"}}'
+_assert_eq "env env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env A=1 env -S '\''rm -rf /'\''"}}'
+_assert_eq "env assignment then env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# `-u` takes a value: in `env -u env -S …` the inner `env` is the unset target,
+# not a command, so -S is still this env's option and the payload still blocks.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env -u env -S '\''rm -rf /'\''"}}'
+_assert_eq "env -u env (value) -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env env -S '\''ls -la'\''"}}'
+_assert_eq "env env -S ls -la: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "env env -S ls -la: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
 # Dangerous rm targets expressed through brace expansion or path normalization
 # resolve to / or $HOME and must block. _clean_command_word strips a trailing
 # `}`, so the guard inspects the raw token to recognize ${HOME} forms.
@@ -379,6 +397,27 @@ _assert_eq "rm -rf ~/..: exit 2" "2" "$HOOK_EXIT"
 
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf //"}}'
 _assert_eq "rm -rf //: exit 2" "2" "$HOOK_EXIT"
+
+# A trailing `/*` glob wipes everything directly under its parent, so a glob
+# whose parent normalizes to $HOME's parent is as catastrophic as that parent.
+# Use $HOME-relative forms so the assertion is portable (the actual home parent
+# differs per platform, e.g. /home vs /Users).
+# shellcheck disable=SC2016
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf ${HOME}/../*"}}'
+_assert_eq "rm -rf \${HOME}/../*: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf ~/../*"}}'
+_assert_eq "rm -rf ~/../*: exit 2" "2" "$HOOK_EXIT"
+
+# Safe globs under non-catastrophic directories must still pass.
+# shellcheck disable=SC2016
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf ${HOME}/.cache/*"}}'
+_assert_eq "rm -rf \${HOME}/.cache/*: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "rm -rf \${HOME}/.cache/*: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf /tmp/*"}}'
+_assert_eq "rm -rf /tmp/*: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "rm -rf /tmp/*: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
 
 # Arithmetic left-shift uses `<<`, which must not be misparsed as a heredoc
 # operator. If it were, the delimiter-seeking parser would swallow the rest of
