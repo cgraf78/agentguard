@@ -195,6 +195,9 @@ _assert_eq "state_dir: codex process key fallback" "0" "$?"
 # is not misread as a Codex process. _hook_codex_process_key matches the
 # executable NAME (comm) only, never argv, so a bash process with "codex" in its
 # arguments must not yield a codex-* session key when process detection runs.
+# Assumption: no real ancestor of the test runner has comm basename "codex"
+# (true under bash/node/CI runner ancestry on both Linux and macOS). ps -o comm=
+# returns a basename on Linux and a full path on macOS; basename normalizes both.
 (
   env -u CODEX_THREAD_ID -u CODEX_INTERNAL_ORIGINATOR_OVERRIDE \
     -u CLAUDE_CODE_CURRENT_SESSION_ID -u AGENTGUARD_NAME \

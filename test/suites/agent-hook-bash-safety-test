@@ -322,12 +322,46 @@ _assert_eq "env --split-string= attached value rm -rf /: exit 2" "2" "$HOOK_EXIT
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"xargs rm -rf /"}}'
 _assert_eq "xargs rm -rf /: exit 2" "2" "$HOOK_EXIT"
 
-_run_hook "$PRE_BASH" '{"tool_input":{"command":"find . | xargs -I{} rm -rf /"}}'
+# `echo` (not `find`) leads here on purpose: piping through `find` would block
+# via the find guard and mask whether the xargs wrapper itself was unwrapped.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"echo x | xargs -I{} rm -rf /"}}'
 _assert_eq "xargs -I{} rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# xargs `-i` / `--replace` take an OPTIONAL attached argument and do NOT consume
+# the next token, so the command word follows immediately. The wrapper-skip must
+# not swallow `rm` as if `-i` were a value-taking option.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"xargs -i rm -rf /"}}'
+_assert_eq "xargs -i rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"xargs --replace rm -rf /"}}'
+_assert_eq "xargs --replace rm -rf /: exit 2" "2" "$HOOK_EXIT"
 
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"xargs -n1 ls"}}'
 _assert_eq "xargs -n1 ls: allowed" "0" "$HOOK_EXIT"
 _assert_not_contains "xargs -n1 ls: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"xargs -i ls {}"}}'
+_assert_eq "xargs -i ls: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "xargs -i ls: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# A single transparent wrapper in front of `env --split-string` must not hide
+# the payload: the env-split extractor skips privilege/execution wrappers before
+# looking for the env that carries -S.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"sudo env -S '\''rm -rf /'\''"}}'
+_assert_eq "sudo env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nice env -S '\''rm -rf /'\''"}}'
+_assert_eq "nice env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"timeout 5 env -S '\''rm -rf /'\''"}}'
+_assert_eq "timeout 5 env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"xargs env -S '\''rm -rf /'\''"}}'
+_assert_eq "xargs env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"sudo env -S '\''ls -la'\''"}}'
+_assert_eq "sudo env -S ls -la: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "sudo env -S ls -la: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
 
 # Dangerous rm targets expressed through brace expansion or path normalization
 # resolve to / or $HOME and must block. _clean_command_word strips a trailing

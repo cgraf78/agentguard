@@ -541,16 +541,20 @@ _hook_run_guards() {
           while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$frag")
           i=$(_fragment_command_index "$frag") || continue
           i=$((i + 1))
-          local has_sigkill=0
+          local has_sigkill=0 first_token=1
           while [ "$i" -lt "${#words[@]}" ]; do
             word=$(_clean_command_word "${words[$i]}")
             case "$word" in
               --)
                 # End of options: the rest are PID/target operands. Keep scanning
-                # them for PID 1 instead of breaking (kill -- 1 must still block).
+                # them for catastrophic targets instead of breaking — `kill -- 1`
+                # (init) and `kill -- -1` (every process / process group) must
+                # both still block.
                 ((i++))
                 while [ "$i" -lt "${#words[@]}" ]; do
-                  [ "$(_clean_command_word "${words[$i]}")" = "1" ] && _GUARD_KILL="block"
+                  case "$(_clean_command_word "${words[$i]}")" in
+                    1 | -1) _GUARD_KILL="block" ;;
+                  esac
                   ((i++))
                 done
                 break
@@ -563,9 +567,18 @@ _hook_run_guards() {
                 case "$word" in KILL | SIGKILL | 9) has_sigkill=1 ;; esac
                 ;;
               --signal=KILL | --signal=SIGKILL | --signal=9) has_sigkill=1 ;;
+              -1)
+                # Target `-1` means "every process the user can signal" (and as
+                # root, literally everything) — strictly worse than killing init.
+                # It is catastrophic only in operand position; as the FIRST token
+                # it is the signal spec (SIGHUP), e.g. `kill -1 1234`, which is
+                # harmless, so skip that case.
+                [ "$first_token" -eq 0 ] && _GUARD_KILL="block"
+                ;;
               -*) ;;
               1) _GUARD_KILL="block" ;;
             esac
+            first_token=0
             ((i++))
           done
           [ "$has_sigkill" -eq 1 ] && [ "$_GUARD_KILL" != "block" ] && _GUARD_KILL="warn"

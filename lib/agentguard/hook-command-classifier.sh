@@ -1794,8 +1794,15 @@ _skip_execution_wrapper() {
       while [ "$i" -lt "${#words[@]}" ]; do
         word="$(_clean_command_word "${words[$i]}")"
         case "$word" in
-          -I | -i | -n | -P | -a | -d | -E | -L | -s | \
-            --replace | --max-args | --max-procs | --arg-file | --delimiter | \
+          -i | --replace)
+            # GNU xargs `-i[replstr]` / `--replace[=replstr]` take an OPTIONAL
+            # attached argument and never consume the next token, so the command
+            # word follows immediately. (The attached forms `-irepl` and
+            # `--replace=repl` are handled by the `--*=*` / `-[Ii]?*` arms below.)
+            ((i++))
+            ;;
+          -I | -n | -P | -a | -d | -E | -L | -s | \
+            --max-args | --max-procs | --arg-file | --delimiter | \
             --eof | --max-lines | --max-chars | --process-slot-var)
             i=$((i + 2))
             ;;
@@ -2421,6 +2428,10 @@ _env_split_payloads() {
   done < <(_fragment_tokens "$fragment")
   [ "${#words[@]}" -gt 0 ] || return 1
 
+  # Find the `env` that carries the split-string, skipping anything transparent
+  # in front of it. Without this, a single wrapper token defeats the guard:
+  # `sudo env -S 'rm -rf /'`, `nice env -S …`, `xargs env -S …` all reduce to a
+  # plain `env -S` once the wrapper is stripped, but the wrapper hides it here.
   while [ "$i" -lt "${#words[@]}" ]; do
     word="$(_clean_command_word "${words[$i]}")"
     case "$word" in
@@ -2428,13 +2439,20 @@ _env_split_payloads() {
         ((i++))
         continue
         ;;
-      *)
-        if _word_is_command_prefix "$word"; then
-          ((i++))
-          continue
-        fi
-        ;;
     esac
+
+    if _word_is_command_prefix "$word"; then
+      ((i++))
+      continue
+    fi
+    if _word_is_privilege_wrapper "$word"; then
+      i="$(_skip_privilege_wrapper "$i" "${words[@]}")" || return 1
+      continue
+    fi
+    if _word_is_execution_wrapper "$word"; then
+      i="$(_skip_execution_wrapper "$i" "${words[@]}")" || return 1
+      continue
+    fi
 
     _word_is_env_executable "$word" || return 1
     ((i++))
