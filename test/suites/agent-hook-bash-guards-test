@@ -322,6 +322,20 @@ _run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -s 0 1234"}}'
 _assert_eq "kill -s 0 1234 (null signal via -s): allowed" "0" "$HOOK_EXIT"
 _assert_not_contains "kill -s 0 1234: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
 
+# `-n signum` (bash builtin) takes the signal by number as the next token, so it
+# must be consumed — otherwise a signal value of 0/1 is misread as a target.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -n 0 1234"}}'
+_assert_eq "kill -n 0 1234 (null signal by number): allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "kill -n 0 1234: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -n 1 1234"}}'
+_assert_eq "kill -n 1 1234 (SIGHUP by number to PID): allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "kill -n 1 1234: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# But the signal number must not shadow a real catastrophic target operand.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -n 9 1"}}'
+_assert_eq "kill -n 9 1 (SIGKILL to init): blocked" "2" "$HOOK_EXIT"
+
 # ---------------------------------------------------------------------------
 # Tests: chmod overreach guard
 # ---------------------------------------------------------------------------

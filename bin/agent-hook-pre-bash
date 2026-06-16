@@ -560,7 +560,10 @@ _hook_run_guards() {
                 break
                 ;;
               -9 | -KILL | -SIGKILL) has_sigkill=1 ;;
-              -s | --signal)
+              -s | --signal | -n)
+                # All take the signal as the NEXT token (bash's `-n` is by
+                # number). Consume it so a signal value of 0/1/-1 is not misread
+                # as a catastrophic target operand (`kill -n 0 1234`).
                 ((i++))
                 [ "$i" -lt "${#words[@]}" ] || break
                 word=$(_clean_command_word "${words[$i]}")

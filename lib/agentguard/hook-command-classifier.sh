@@ -950,6 +950,13 @@ _hook_executable_fragments_uncached() {
         while IFS= read -r payload; do
           _hook_executable_fragments "$payload" $((depth + 1))
         done < <(_nested_shell_payloads "$fragment")
+        # Per fragment, not per line: `env -S` must be decomposed wherever it
+        # runs, not only as the first command. `true; env -S 'rm -rf /'` is one
+        # line but the env invocation is the second fragment. (The protected
+        # bare-Git scanner already calls this per fragment.)
+        while IFS= read -r payload; do
+          _hook_executable_fragments "$payload" $((depth + 1))
+        done < <(_env_split_payloads "$fragment")
       fi
     done < <(_split_command_fragments "${command//$'\n'/ }")
 
@@ -960,9 +967,6 @@ _hook_executable_fragments_uncached() {
       while IFS= read -r -d '' payload; do
         _hook_executable_fragments "$payload" $((depth + 1))
       done < <(_executable_expansion_payloads "$command")
-      while IFS= read -r payload; do
-        _hook_executable_fragments "$payload" $((depth + 1))
-      done < <(_env_split_payloads "$command")
     fi
   done < <(_hook_command_lines "$text")
 

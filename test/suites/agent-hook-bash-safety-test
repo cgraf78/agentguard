@@ -381,6 +381,25 @@ _run_hook "$PRE_BASH" '{"tool_input":{"command":"env env -S '\''ls -la'\''"}}'
 _assert_eq "env env -S ls -la: allowed" "0" "$HOOK_EXIT"
 _assert_not_contains "env env -S ls -la: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
 
+# `env -S` must be decomposed wherever it runs on the line, not only as the first
+# command: a `true;`/`&&`/`|`/`cd;` prefix must not hide the split-string payload.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"true; env -S '\''rm -rf /'\''"}}'
+_assert_eq "non-leading env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"echo hi && env -S '\''rm -rf /'\''"}}'
+_assert_eq "&&-chained env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"echo a | env -S '\''rm -rf /'\''"}}'
+_assert_eq "piped env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# Non-leading and wrapped at once: the per-fragment scan still reaches it.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"true; sudo env -S '\''rm -rf /'\''"}}'
+_assert_eq "non-leading sudo env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"true; env -S '\''ls -la'\''"}}'
+_assert_eq "non-leading env -S ls -la: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "non-leading env -S ls -la: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
 # Dangerous rm targets expressed through brace expansion or path normalization
 # resolve to / or $HOME and must block. _clean_command_word strips a trailing
 # `}`, so the guard inspects the raw token to recognize ${HOME} forms.
