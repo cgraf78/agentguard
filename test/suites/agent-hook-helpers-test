@@ -190,6 +190,26 @@ _assert_eq "state_dir: codex thread id wins over claude env" "0" "$?"
 ) | grep -q PASS
 _assert_eq "state_dir: codex process key fallback" "0" "$?"
 
+# detect.sh hardened agent attribution so an ancestor whose argv merely mentions
+# codex (a commit message, an editor opening /path/codex, `hm remember … codex …`)
+# is not misread as a Codex process. _hook_codex_process_key matches the
+# executable NAME (comm) only, never argv, so a bash process with "codex" in its
+# arguments must not yield a codex-* session key when process detection runs.
+(
+  env -u CODEX_THREAD_ID -u CODEX_INTERNAL_ORIGINATOR_OVERRIDE \
+    -u CLAUDE_CODE_CURRENT_SESSION_ID -u AGENTGUARD_NAME \
+    AGENTGUARD_PROCESS_DETECT=1 \
+    bash -c '
+    source "$2"
+    if _hook_codex_process_key >/dev/null 2>&1; then
+      echo "FAIL: argv mention misattributed to codex"
+    else
+      echo "PASS"
+    fi
+  ' _ "this argv mentions codex but is not codex" "$HELPERS"
+) | grep -q PASS
+_assert_eq "codex_process_key: argv mention is not misattributed to codex" "0" "$?"
+
 # If the hook runner provides a JSON session id, prefer that precise key over
 # the Codex process fallback.
 (

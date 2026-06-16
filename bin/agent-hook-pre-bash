@@ -545,7 +545,16 @@ _hook_run_guards() {
           while [ "$i" -lt "${#words[@]}" ]; do
             word=$(_clean_command_word "${words[$i]}")
             case "$word" in
-              --) break ;;
+              --)
+                # End of options: the rest are PID/target operands. Keep scanning
+                # them for PID 1 instead of breaking (kill -- 1 must still block).
+                ((i++))
+                while [ "$i" -lt "${#words[@]}" ]; do
+                  [ "$(_clean_command_word "${words[$i]}")" = "1" ] && _GUARD_KILL="block"
+                  ((i++))
+                done
+                break
+                ;;
               -9 | -KILL | -SIGKILL) has_sigkill=1 ;;
               -s | --signal)
                 ((i++))

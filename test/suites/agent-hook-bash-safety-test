@@ -278,4 +278,89 @@ _assert_not_contains "ls: no warning" "WARNING" "$HOOK_STDERR"
 _run_hook "$PRE_BASH" '{"tool_input":{"command":""}}'
 _assert_eq "empty cmd: exit 0" "0" "$HOOK_EXIT"
 
+# ---------------------------------------------------------------------------
+# Tests: hardening red-team — bypass families closed by harden-command-guards
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-bash: rm guard bypass hardening ==="
+
+# Short and empty env-prefix assignments must not hide the real command word.
+# A single-character or empty-value assignment is still an env prefix, so the
+# guard has to skip past it and classify the rm that follows.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"A=1 rm -rf /"}}'
+_assert_eq "single-char env assignment then rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"_=1 rm -rf /"}}'
+_assert_eq "underscore env assignment then rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"x= rm -rf /"}}'
+_assert_eq "empty-value env assignment then rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# A leading digit is not a valid identifier, so `1=2` is not an env prefix —
+# the whole token is the command word and there is no dangerous rm to find.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"A=1 ls"}}'
+_assert_eq "single-char env assignment then ls: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "single-char env assignment then ls: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# env --split-string variants: the payload can be attached to a short flag or
+# clustered with other single-letter options. Each form still runs `rm -rf /`.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env -S'\''rm -rf /'\''"}}'
+_assert_eq "env -S attached value rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env -iS '\''rm -rf /'\''"}}'
+_assert_eq "env clustered -iS spaced value rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env -iS'\''rm -rf /'\''"}}'
+_assert_eq "env clustered -iS attached value rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env --split-string='\''rm -rf /'\''"}}'
+_assert_eq "env --split-string= attached value rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# xargs is an execution wrapper: the dangerous command follows it (optionally
+# behind its own value-taking flags) and must still be classified.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"xargs rm -rf /"}}'
+_assert_eq "xargs rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"find . | xargs -I{} rm -rf /"}}'
+_assert_eq "xargs -I{} rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"xargs -n1 ls"}}'
+_assert_eq "xargs -n1 ls: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "xargs -n1 ls: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# Dangerous rm targets expressed through brace expansion or path normalization
+# resolve to / or $HOME and must block. _clean_command_word strips a trailing
+# `}`, so the guard inspects the raw token to recognize ${HOME} forms.
+# shellcheck disable=SC2016
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf ${HOME}"}}'
+_assert_eq "rm -rf \${HOME}: exit 2" "2" "$HOOK_EXIT"
+
+# shellcheck disable=SC2016
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf ${HOME}/"}}'
+_assert_eq "rm -rf \${HOME}/: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf ~/.."}}'
+_assert_eq "rm -rf ~/..: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf //"}}'
+_assert_eq "rm -rf //: exit 2" "2" "$HOOK_EXIT"
+
+# Arithmetic left-shift uses `<<`, which must not be misparsed as a heredoc
+# operator. If it were, the delimiter-seeking parser would swallow the rest of
+# the script and hide the dangerous rm on the following line.
+_arith_shift_heredoc_json=$(jq -nc --arg c $'echo $((1 << 2))\nrm -rf /' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_arith_shift_heredoc_json"
+_assert_eq "arith shift then rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_arith_cmd_shift_heredoc_json=$(jq -nc --arg c $'((x << 3))\nrm -rf /' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_arith_cmd_shift_heredoc_json"
+_assert_eq "arith command shift then rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# The shift expression on its own is benign and must not warn or block.
+_arith_shift_only_json=$(jq -nc --arg c 'echo $((1 << 2))' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_arith_shift_only_json"
+_assert_eq "arith shift only: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "arith shift only: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
 _test_summary

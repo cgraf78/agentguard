@@ -263,6 +263,20 @@ _run_hook "$PRE_BASH" '{"tool_input":{"command":"echo kill 1"}}'
 _assert_eq "echo kill 1: allowed" "0" "$HOOK_EXIT"
 _assert_not_contains "echo kill 1: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
 
+# A `--` end-of-options separator must not let PID 1 slip past the broad-kill
+# guard: the guard consumes `--` and keeps scanning the operands for `1`.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -- 1"}}'
+_assert_eq "kill -- 1: blocked" "2" "$HOOK_EXIT"
+_assert_contains "kill -- 1: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -9 -- 1"}}'
+_assert_eq "kill -9 -- 1: blocked" "2" "$HOOK_EXIT"
+
+# `--` before a normal PID is still allowed (SIGTERM to a non-init process).
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -- 1234"}}'
+_assert_eq "kill -- 1234: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "kill -- 1234: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
 # ---------------------------------------------------------------------------
 # Tests: chmod overreach guard
 # ---------------------------------------------------------------------------
