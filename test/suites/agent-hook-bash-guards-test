@@ -299,6 +299,29 @@ _run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -1 1234"}}'
 _assert_eq "kill -1 1234 (SIGHUP to PID): allowed" "0" "$HOOK_EXIT"
 _assert_not_contains "kill -1 1234: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
 
+# Target `0` is the caller's entire process group (for an agent: its own session
+# and sibling tasks). A bare operand is never a signal, so `0` is catastrophic in
+# any position — including after `--` and behind a signal flag.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill 0"}}'
+_assert_eq "kill 0 (caller process group): blocked" "2" "$HOOK_EXIT"
+_assert_contains "kill 0: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -- 0"}}'
+_assert_eq "kill -- 0: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -9 0"}}'
+_assert_eq "kill -9 0: blocked" "2" "$HOOK_EXIT"
+
+# `-0` is the null signal (existence check), not a target: `kill -0 1234` and
+# `kill -s 0 1234` send no signal to a specific PID and must stay allowed.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -0 1234"}}'
+_assert_eq "kill -0 1234 (null-signal existence check): allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "kill -0 1234: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -s 0 1234"}}'
+_assert_eq "kill -s 0 1234 (null signal via -s): allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "kill -s 0 1234: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
 # ---------------------------------------------------------------------------
 # Tests: chmod overreach guard
 # ---------------------------------------------------------------------------

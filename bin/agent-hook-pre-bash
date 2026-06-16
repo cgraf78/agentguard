@@ -548,12 +548,12 @@ _hook_run_guards() {
               --)
                 # End of options: the rest are PID/target operands. Keep scanning
                 # them for catastrophic targets instead of breaking — `kill -- 1`
-                # (init) and `kill -- -1` (every process / process group) must
-                # both still block.
+                # (init), `kill -- -1` (every process / process group), and
+                # `kill -- 0` (the caller's whole process group) must all block.
                 ((i++))
                 while [ "$i" -lt "${#words[@]}" ]; do
                   case "$(_clean_command_word "${words[$i]}")" in
-                    1 | -1) _GUARD_KILL="block" ;;
+                    0 | 1 | -1) _GUARD_KILL="block" ;;
                   esac
                   ((i++))
                 done
@@ -576,7 +576,12 @@ _hook_run_guards() {
                 [ "$first_token" -eq 0 ] && _GUARD_KILL="block"
                 ;;
               -*) ;;
-              1) _GUARD_KILL="block" ;;
+              0 | 1)
+                # Target `0` is the caller's entire process group (PID 1 is init).
+                # A bare operand is never a signal (signals carry a dash), so both
+                # are catastrophic targets regardless of position.
+                _GUARD_KILL="block"
+                ;;
             esac
             first_token=0
             ((i++))
