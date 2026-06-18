@@ -202,21 +202,13 @@ fi
 # Plain `git commit` can operate on a configured protected bare repo via a Git
 # launcher. Run plain `sley` from the command cwd so the Sley launcher applies
 # the same buffer/cwd-local repository decision.
-# `sl amend|commit` forces `_REPO_TYPE=sl` so dual-managed repos (Sapling clone
-# with .git dir) don't fall back to git auto-detection.
+# `sl` commit-producing commands force `_REPO_TYPE=sl` so dual-managed repos
+# (Sapling clone with .git dir) don't fall back to git auto-detection.
 
 _git_commit_command() {
   local fragment
   while IFS= read -r fragment; do
     _git_subcommand_is "$fragment" "commit" && return 0
-  done < <(_hook_executable_fragments "$AGENTGUARD_CMD_TRIMMED")
-  return 1
-}
-
-_git_commit_effective_dir() {
-  local fragment
-  while IFS= read -r fragment; do
-    _git_subcommand_effective_dir "$fragment" "commit" && return 0
   done < <(_hook_executable_fragments "$AGENTGUARD_CMD_TRIMMED")
   return 1
 }
@@ -229,37 +221,152 @@ _git_commit_amend_command() {
   return 1
 }
 
-_sl_metadata_only_fragment() {
+_sl_amend_message_option_fragment() {
   local fragment="$1"
-  _command_subcommand_is "$fragment" "sl" "metaedit" && return 0
   _command_subcommand_has_option "$fragment" "sl" "amend" "-m" && return 0
   _command_subcommand_has_option "$fragment" "sl" "amend" "--message" && return 0
+  _command_subcommand_has_option "$fragment" "sl" "amend" "-l" && return 0
+  _command_subcommand_has_option "$fragment" "sl" "amend" "--logfile" && return 0
+  _command_subcommand_has_option "$fragment" "sl" "amend" "-e" && return 0
+  _command_subcommand_has_option "$fragment" "sl" "amend" "--edit" && return 0
+  return 1
+}
+
+_sl_dir_has_pending_changes() {
+  local run_dir="$1" status
+  [ -d "$run_dir/.sl" ] || return 1
+  status=$(sl --cwd "$run_dir" status 2>/dev/null) || return 0
+  [ -n "$status" ]
+}
+
+_sl_fragment_effective_dir_for() {
+  local fragment="$1" subcommand="$2"
+  _command_subcommand_effective_dir "$fragment" "sl" "$subcommand" || printf '%s' "$PWD"
+}
+
+_sl_rewrites_commit_fragment() {
+  local fragment="$1"
+
+  _command_subcommand_is "$fragment" "sl" "metaedit" && return 1
+
+  if _command_subcommand_is "$fragment" "sl" "amend"; then
+    local amend_dir
+    amend_dir=$(_sl_fragment_effective_dir_for "$fragment" "amend")
+    if _sl_amend_message_option_fragment "$fragment" &&
+      ! _sl_dir_has_pending_changes "$amend_dir"; then
+      return 1
+    fi
+    return 0
+  fi
+
+  _command_subcommand_is "$fragment" "sl" "commit" "absorb" "record" "continue" "fold" "split" &&
+    return 0
+
+  if _command_subcommand_is "$fragment" "sl" "backout"; then
+    _command_subcommand_has_option "$fragment" "sl" "backout" "--no-commit" && return 1
+    return 0
+  fi
+
+  if _command_subcommand_is "$fragment" "sl" "graft"; then
+    _command_subcommand_has_option "$fragment" "sl" "graft" "--abort" && return 1
+    _command_subcommand_has_option "$fragment" "sl" "graft" "-n" && return 1
+    _command_subcommand_has_option "$fragment" "sl" "graft" "--dry-run" && return 1
+    return 0
+  fi
+
+  if _command_subcommand_is "$fragment" "sl" "import"; then
+    _command_subcommand_has_option "$fragment" "sl" "import" "--no-commit" && return 1
+    return 0
+  fi
+
+  if _command_subcommand_is "$fragment" "sl" "rebase"; then
+    _command_subcommand_has_option "$fragment" "sl" "rebase" "-a" && return 1
+    _command_subcommand_has_option "$fragment" "sl" "rebase" "--abort" && return 1
+    _command_subcommand_has_option "$fragment" "sl" "rebase" "--quit" && return 1
+    return 0
+  fi
+
+  if _command_subcommand_is "$fragment" "sl" "histedit"; then
+    _command_subcommand_has_option "$fragment" "sl" "histedit" "--abort" && return 1
+    _command_subcommand_has_option "$fragment" "sl" "histedit" "--show-plan" && return 1
+    _command_subcommand_has_option "$fragment" "sl" "histedit" "--edit-plan" && return 1
+    return 0
+  fi
+
   return 1
 }
 
 _sl_commit_command() {
   local fragment
   while IFS= read -r fragment; do
-    _command_subcommand_is "$fragment" "sl" "amend" "commit" "absorb" || continue
-    _sl_metadata_only_fragment "$fragment" && continue
-    return 0
+    _sl_rewrites_commit_fragment "$fragment" && return 0
   done < <(_hook_executable_fragments "$AGENTGUARD_CMD_TRIMMED")
   return 1
 }
 
-_sl_commit_effective_dir() {
+_sl_commit_effective_dirs() {
   local fragment subcommand
   while IFS= read -r fragment; do
-    _sl_metadata_only_fragment "$fragment" && continue
-    for subcommand in amend commit absorb; do
-      _command_subcommand_effective_dir "$fragment" "sl" "$subcommand" && return 0
+    _sl_rewrites_commit_fragment "$fragment" || continue
+    for subcommand in amend commit absorb record continue backout graft import fold split rebase histedit; do
+      if _command_subcommand_is "$fragment" "sl" "$subcommand"; then
+        _sl_fragment_effective_dir_for "$fragment" "$subcommand"
+        printf '\n'
+        break
+      fi
     done
   done < <(_hook_executable_fragments "$AGENTGUARD_CMD_TRIMMED")
-  return 1
 }
 
 _sley_commit_command() {
   _git_commit_command || _sl_commit_command
+}
+
+_sley_gate_seen_key() {
+  local seen="$1" key="$2"
+  case "$seen" in
+    *"
+$key
+"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_sley_run_ready_in_dir() {
+  local run_dir="$1" repo_type="$2" sley_out rc
+
+  # SLEY_VERIFY_STATE_DIR lets local extensions check whether the verify phase
+  # ran without parsing sley's human output.
+  sley_out=$(
+    cd "$run_dir" 2>/dev/null || exit 0
+    if [ -n "$repo_type" ]; then
+      _REPO_TYPE="$repo_type" SLEY_VERIFY_STATE_DIR="$_HOOK_STATE_DIR" \
+        sley ready --fix --quiet --commit
+    else
+      SLEY_VERIFY_STATE_DIR="$_HOOK_STATE_DIR" \
+        sley ready --fix --quiet --commit
+    fi
+  ) 2>&1
+  rc=$?
+
+  case "$rc" in
+    0) ;;
+    1)
+      _hook_block "sley ready blocked the commit:
+$sley_out"
+      ;;
+    2)
+      case "$sley_out" in
+        *"unsupported repo"*) ;;
+        *) _hook_warn "sley ready could not run cleanly (rc=2):
+$sley_out" ;;
+      esac
+      ;;
+    *)
+      _hook_warn "sley ready exited with status $rc:
+$sley_out"
+      ;;
+  esac
 }
 
 # The gate enforces mechanical readiness; review/simplify are separate
@@ -267,73 +374,45 @@ _sley_commit_command() {
 _sley_commit_gate() {
   _sley_commit_command || return 0
 
-  local skip=0
-  local run_dir="$PWD"
-  local repo_type=""
-  local sley_out=""
-  local rc=0
+  local run_dir="" repo_type="" key="" seen=$'\n' ran_gate=0
 
   if [ "${AGENTGUARD_SLEY_GATE:-1}" != "0" ]; then
     _hook_require_sley || return 0
 
-    if _git_commit_command; then
-      run_dir="$(_git_commit_effective_dir || printf '%s' "$PWD")"
-    elif _sl_commit_command; then
-      run_dir="$(_sl_commit_effective_dir || printf '%s' "$PWD")"
-    else
-      run_dir="$PWD"
-    fi
+    local fragment
+    while IFS= read -r fragment; do
+      _git_subcommand_is "$fragment" "commit" || continue
+      run_dir="$(_git_subcommand_effective_dir "$fragment" "commit" || printf '%s' "$PWD")"
+      [ -n "$run_dir" ] || continue
+      # Message-only git amends do not change code, so the original commit gate
+      # result still applies. Amends with staged content continue through sley.
+      if _git_subcommand_has_option "$fragment" "commit" "--amend" &&
+        git -C "$run_dir" diff --cached --quiet 2>/dev/null; then
+        continue
+      fi
+      key="git|$run_dir"
+      _sley_gate_seen_key "$seen" "$key" && continue
+      seen+="$key"$'\n'
+      _sley_run_ready_in_dir "$run_dir" ""
+      ran_gate=1
+    done < <(_hook_executable_fragments "$AGENTGUARD_CMD_TRIMMED")
 
-    # Force `_REPO_TYPE=sl` only when the target dir is actually a Sapling
-    # checkout; dual-managed repos with `.git` need Sapling detection, but
-    # non-Sapling trees should not call environment-specific Sapling hooks.
-    if _sl_commit_command && [ -d "$run_dir/.sl" ]; then
-      repo_type=sl
-    fi
-
-    # Message-only git amends do not change code, so the original commit gate
-    # result still applies. Amends with staged content continue through sley.
-    if _git_commit_amend_command; then
-      git -C "$run_dir" diff --cached --quiet 2>/dev/null && skip=1
-    fi
-
-    if [ "$skip" -eq 0 ]; then
-      # --quiet emits only failures. SLEY_VERIFY_STATE_DIR lets local extensions check
-      # whether the verify phase ran without parsing sley's human output.
-      sley_out=$(
-        cd "$run_dir" 2>/dev/null || exit 0
-        if [ -n "$repo_type" ]; then
-          _REPO_TYPE="$repo_type" SLEY_VERIFY_STATE_DIR="$_HOOK_STATE_DIR" \
-            sley ready --fix --quiet --commit
-        else
-          SLEY_VERIFY_STATE_DIR="$_HOOK_STATE_DIR" \
-            sley ready --fix --quiet --commit
-        fi
-      ) 2>&1
-      rc=$?
-
-      case "$rc" in
-        0) ;;
-        1)
-          _hook_block "sley ready blocked the commit:
-$sley_out"
-          ;;
-        2)
-          case "$sley_out" in
-            *"unsupported repo"*) ;;
-            *) _hook_warn "sley ready could not run cleanly (rc=2):
-$sley_out" ;;
-          esac
-          ;;
-        *)
-          _hook_warn "sley ready exited with status $rc:
-$sley_out"
-          ;;
-      esac
-    fi
+    while IFS= read -r run_dir; do
+      [ -n "$run_dir" ] || continue
+      repo_type=""
+      # Force `_REPO_TYPE=sl` only when the target dir is actually a Sapling
+      # checkout; dual-managed repos with `.git` need Sapling detection, but
+      # non-Sapling trees should not call environment-specific Sapling hooks.
+      [ -d "$run_dir/.sl" ] && repo_type=sl
+      key="sl|$run_dir"
+      _sley_gate_seen_key "$seen" "$key" && continue
+      seen+="$key"$'\n'
+      _sley_run_ready_in_dir "$run_dir" "$repo_type"
+      ran_gate=1
+    done < <(_sl_commit_effective_dirs)
   fi
 
-  if [ "$skip" -eq 0 ]; then
+  if [ "$ran_gate" -eq 1 ] || [ "${AGENTGUARD_SLEY_GATE:-1}" = "0" ]; then
     _hook_remind 'Consider running /review or /simplify on your changes before committing. Review the final diff for correctness, scope, stale docs/tests, edge cases, and accidental unrelated changes.'
   fi
 }
@@ -525,14 +604,11 @@ _hook_run_guards() {
         ;;
 
       # Sapling commit detection for the sley readiness gate.
-      # Matches `sl amend`, `sl commit`, and `sl absorb` but excludes
-      # metadata-only operations (sl metaedit, sl amend -m) that don't
-      # change code.
+      # Matches commands that can create or rewrite submitted commits while
+      # excluding metadata-only and abort/preview operations.
       sl | */sl)
         if [ "$_GUARD_SL_COMMIT" -eq 0 ]; then
-          if _command_subcommand_is "$frag" "sl" "amend" "commit" "absorb"; then
-            _sl_metadata_only_fragment "$frag" || _GUARD_SL_COMMIT=1
-          fi
+          _sl_rewrites_commit_fragment "$frag" && _GUARD_SL_COMMIT=1
         fi
         ;;
 

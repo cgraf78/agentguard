@@ -27,6 +27,7 @@ printf 'mock-sley=1\n'
 printf 'mock-args=%s\n' "$*"
 printf 'mock-pwd=%s\n' "$PWD"
 [ -n "${_REPO_TYPE:-}" ] && printf 'mock-repo-type=%s\n' "$_REPO_TYPE"
+[ -n "${MOCK_SLEY_LOG:-}" ] && printf '%s\t%s\t%s\n' "$PWD" "${_REPO_TYPE:-}" "$*" >>"$MOCK_SLEY_LOG"
 [ -n "${MOCK_SLEY_OUT:-}" ] && printf '%s\n' "$MOCK_SLEY_OUT"
 # Mirror real sley: write verify marker on pass when state dir is provided.
 if [ "$_rc" = "0" ] && [ -n "${SLEY_VERIFY_STATE_DIR:-}" ]; then
@@ -183,6 +184,79 @@ PATH="$_gate_path" MOCK_SLEY_RC=1 \
 _assert_eq "sl metadata then cwd absorb: gate blocks" "2" "$HOOK_EXIT"
 _assert_contains "sl metadata then cwd absorb: runs sley in mutating target repo" "mock-pwd=$_sl_compound_repo" "$HOOK_STDERR"
 _assert_contains "sl metadata then cwd absorb: forces _REPO_TYPE=sl" "mock-repo-type=sl" "$HOOK_STDERR"
+
+_sl_compound_first_repo=$(_tmpdir)
+_sl_compound_second_repo=$(_tmpdir)
+mkdir "$_sl_compound_first_repo/.sl" "$_sl_compound_second_repo/.sl"
+_sl_compound_log=$(_tmpdir)/sley.log
+_sl_compound_saved_pwd=$PWD
+cd "$_sl_compound_first_repo" || exit 1
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=0 MOCK_SLEY_LOG="$_sl_compound_log" \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c "sl amend; sl --cwd $_sl_compound_second_repo absorb" '{"tool_input":{"command":$c}}')"
+cd "$_sl_compound_saved_pwd" || exit 1
+_assert_contains "sl compound mutating commands: gates first repo" "$_sl_compound_first_repo" "$(cat "$_sl_compound_log")"
+_assert_contains "sl compound mutating commands: gates second repo" "$_sl_compound_second_repo" "$(cat "$_sl_compound_log")"
+_assert_eq "sl compound mutating commands: one gate per target repo" "2" "$(wc -l <"$_sl_compound_log" | tr -d ' ')"
+
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl record -m foo"}}'
+_assert_eq "sl record: gate blocks" "2" "$HOOK_EXIT"
+_assert_contains "sl record: runs sley" "mock-sley=1" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl continue"}}'
+_assert_eq "sl continue: gate blocks" "2" "$HOOK_EXIT"
+_assert_contains "sl continue: runs sley" "mock-sley=1" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl rebase --continue"}}'
+_assert_eq "sl rebase --continue: gate blocks" "2" "$HOOK_EXIT"
+_assert_contains "sl rebase --continue: runs sley" "mock-sley=1" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl rebase --restack"}}'
+_assert_eq "sl rebase --restack: gate blocks" "2" "$HOOK_EXIT"
+_assert_contains "sl rebase --restack: runs sley" "mock-sley=1" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl rebase --abort"}}'
+_assert_not_contains "sl rebase --abort: gate skipped" "mock-sley=1" "$HOOK_STDERR"
+
+_sl_message_mockbin=$(_mock_bin)
+cat >"$_sl_message_mockbin/sl" <<'MOCK'
+#!/usr/bin/env bash
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --cwd) shift 2 ;;
+    status)
+      [ -n "${MOCK_SL_STATUS_OUT:-}" ] && printf '%s\n' "$MOCK_SL_STATUS_OUT"
+      exit 0
+      ;;
+    *) shift ;;
+  esac
+done
+exit 1
+MOCK
+chmod +x "$_sl_message_mockbin/sl"
+
+_sl_message_repo=$(_tmpdir)
+mkdir "$_sl_message_repo/.sl"
+_reset_state
+PATH="$_sl_message_mockbin:$_gate_path" MOCK_SLEY_RC=1 MOCK_SL_STATUS_OUT="M file.cpp" \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c "sl --cwd $_sl_message_repo amend -m metadata" '{"tool_input":{"command":$c}}')"
+_assert_eq "sl amend -m with pending changes: gate blocks" "2" "$HOOK_EXIT"
+_assert_contains "sl amend -m with pending changes: runs sley" "mock-sley=1" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_sl_message_mockbin:$_gate_path" MOCK_SLEY_RC=1 MOCK_SL_STATUS_OUT="" \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c "sl --cwd $_sl_message_repo amend -m metadata" '{"tool_input":{"command":$c}}')"
+_assert_not_contains "sl amend -m without pending changes: gate skipped" "mock-sley=1" "$HOOK_STDERR"
 
 # In a non-sapling cwd, the gate must NOT force `_REPO_TYPE=sl`. Otherwise
 # Sapling-specific local `sley_hook_*` functions target a git tree and produce
