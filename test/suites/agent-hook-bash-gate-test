@@ -150,6 +150,13 @@ PATH="$_gate_path" MOCK_SLEY_RC=1 \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl commit -m foo"}}'
 _assert_contains "sl commit in .sl repo: forces _REPO_TYPE=sl" "mock-repo-type=sl" "$HOOK_STDERR"
 
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl absorb"}}'
+_assert_eq "sl absorb in .sl repo: gate blocks" "2" "$HOOK_EXIT"
+_assert_contains "sl absorb in .sl repo: forces _REPO_TYPE=sl" "mock-repo-type=sl" "$HOOK_STDERR"
+_assert_contains "sl absorb in .sl repo: uses mutating commit scope" "mock-args=--fix --quiet --commit" "$HOOK_STDERR"
+
 # In a non-sapling cwd, the gate must NOT force `_REPO_TYPE=sl`. Otherwise
 # Sapling-specific local `sley_hook_*` functions target a git tree and produce
 # confusing tool errors that the gate would surface as a block.
@@ -453,6 +460,12 @@ _reset_state
 PATH="$_gate_path" MOCK_SLEY_RC=0 \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl amend"}}'
 _assert_contains "design-review nudge: fires on sl amend" \
+  "/review or /simplify" "$HOOK_STDERR"
+
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=0 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl absorb"}}'
+_assert_contains "design-review nudge: fires on sl absorb" \
   "/review or /simplify" "$HOOK_STDERR"
 
 _reset_state

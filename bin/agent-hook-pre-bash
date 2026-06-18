@@ -240,7 +240,7 @@ _sl_metadata_only_fragment() {
 _sl_commit_command() {
   local fragment
   while IFS= read -r fragment; do
-    _command_subcommand_is "$fragment" "sl" "amend" "commit" || continue
+    _command_subcommand_is "$fragment" "sl" "amend" "commit" "absorb" || continue
     _sl_metadata_only_fragment "$fragment" && continue
     return 0
   done < <(_hook_executable_fragments "$AGENTGUARD_CMD_TRIMMED")
@@ -508,11 +508,12 @@ _hook_run_guards() {
         ;;
 
       # Sapling commit detection for the sley readiness gate.
-      # Matches `sl amend` and `sl commit` but excludes metadata-only
-      # operations (sl metaedit, sl amend -m) that don't change code.
+      # Matches `sl amend`, `sl commit`, and `sl absorb` but excludes
+      # metadata-only operations (sl metaedit, sl amend -m) that don't
+      # change code.
       sl | */sl)
         if [ "$_GUARD_SL_COMMIT" -eq 0 ]; then
-          if _command_subcommand_is "$frag" "sl" "amend" "commit"; then
+          if _command_subcommand_is "$frag" "sl" "amend" "commit" "absorb"; then
             _sl_metadata_only_fragment "$frag" || _GUARD_SL_COMMIT=1
           fi
         fi
