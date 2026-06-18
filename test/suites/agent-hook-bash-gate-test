@@ -157,6 +157,33 @@ _assert_eq "sl absorb in .sl repo: gate blocks" "2" "$HOOK_EXIT"
 _assert_contains "sl absorb in .sl repo: forces _REPO_TYPE=sl" "mock-repo-type=sl" "$HOOK_STDERR"
 _assert_contains "sl absorb in .sl repo: uses mutating commit scope" "mock-args=--fix --quiet --commit" "$HOOK_STDERR"
 
+_sl_cwd_repo=$(_tmpdir)
+mkdir "$_sl_cwd_repo/.sl"
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c "sl --cwd $_sl_cwd_repo absorb" '{"tool_input":{"command":$c}}')"
+_assert_eq "sl --cwd absorb: gate blocks" "2" "$HOOK_EXIT"
+_assert_contains "sl --cwd absorb: runs sley in target repo" "mock-pwd=$_sl_cwd_repo" "$HOOK_STDERR"
+_assert_contains "sl --cwd absorb: forces _REPO_TYPE=sl" "mock-repo-type=sl" "$HOOK_STDERR"
+
+_sl_repository_repo=$(_tmpdir)
+mkdir "$_sl_repository_repo/.sl"
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c "sl --repository $_sl_repository_repo absorb" '{"tool_input":{"command":$c}}')"
+_assert_eq "sl --repository absorb: gate blocks" "2" "$HOOK_EXIT"
+_assert_contains "sl --repository absorb: runs sley in target repo" "mock-pwd=$_sl_repository_repo" "$HOOK_STDERR"
+_assert_contains "sl --repository absorb: forces _REPO_TYPE=sl" "mock-repo-type=sl" "$HOOK_STDERR"
+
+_sl_compound_repo=$(_tmpdir)
+mkdir "$_sl_compound_repo/.sl"
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c "sl amend -m metadata; sl --cwd $_sl_compound_repo absorb" '{"tool_input":{"command":$c}}')"
+_assert_eq "sl metadata then cwd absorb: gate blocks" "2" "$HOOK_EXIT"
+_assert_contains "sl metadata then cwd absorb: runs sley in mutating target repo" "mock-pwd=$_sl_compound_repo" "$HOOK_STDERR"
+_assert_contains "sl metadata then cwd absorb: forces _REPO_TYPE=sl" "mock-repo-type=sl" "$HOOK_STDERR"
+
 # In a non-sapling cwd, the gate must NOT force `_REPO_TYPE=sl`. Otherwise
 # Sapling-specific local `sley_hook_*` functions target a git tree and produce
 # confusing tool errors that the gate would surface as a block.

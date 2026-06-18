@@ -195,21 +195,49 @@ _assert_eq "state_dir: codex process key fallback" "0" "$?"
 # is not misread as a Codex process. _hook_codex_process_key matches the
 # executable NAME (comm) only, never argv, so a bash process with "codex" in its
 # arguments must not yield a codex-* session key when process detection runs.
-# Assumption: no real ancestor of the test runner has comm basename "codex"
-# (true under bash/node/CI runner ancestry on both Linux and macOS). ps -o comm=
-# returns a basename on Linux and a full path on macOS; basename normalizes both.
+# Mock `ps` so this assertion is independent of whether the suite itself is
+# currently being run from Codex.
+state_mock_ps_args_dir=$(_tmpdir)
+cat >"$state_mock_ps_args_dir/ps" <<'SCRIPT'
+#!/usr/bin/env bash
+field=""
+pid=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field="${2:-}"; shift 2 ;;
+    -p) pid="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+case "$field:$pid" in
+  comm=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash" ;;
+  args=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash -c hm remember --text only codex exec headless" ;;
+  ppid=:"${MOCK_CHILD_PID:-}") printf '%s\n' "4242" ;;
+  comm=:4242) printf '%s\n' "zsh" ;;
+  args=:4242) printf '%s\n' "zsh -i" ;;
+  ppid=:4242) printf '%s\n' "1" ;;
+  comm=:1) printf '%s\n' "init" ;;
+  args=:1) printf '%s\n' "init" ;;
+  ppid=:1) printf '%s\n' "0" ;;
+  *) exit 1 ;;
+esac
+SCRIPT
+chmod +x "$state_mock_ps_args_dir/ps"
 (
   env -u CODEX_THREAD_ID -u CODEX_INTERNAL_ORIGINATOR_OVERRIDE \
     -u CLAUDE_CODE_CURRENT_SESSION_ID -u AGENTGUARD_NAME \
     AGENTGUARD_PROCESS_DETECT=1 \
     bash -c '
+    export MOCK_CHILD_PID="$$"
+    PATH="$1:$PATH"
     source "$2"
     if _hook_codex_process_key >/dev/null 2>&1; then
       echo "FAIL: argv mention misattributed to codex"
     else
       echo "PASS"
     fi
-  ' _ "this argv mentions codex but is not codex" "$HELPERS"
+  ' _ "$state_mock_ps_args_dir" "$HELPERS"
 ) | grep -q PASS
 _assert_eq "codex_process_key: argv mention is not misattributed to codex" "0" "$?"
 

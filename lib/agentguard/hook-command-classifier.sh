@@ -2656,6 +2656,71 @@ _git_subcommand_effective_dir() {
   return 1
 }
 
+_command_subcommand_effective_dir() {
+  local fragment="$1" command="$2" target="$3" word value effective_dir="$PWD"
+  local i
+  local -a words=()
+
+  while IFS= read -r word; do
+    words+=("$word")
+  done < <(_fragment_tokens "$fragment")
+  [ "${#words[@]}" -gt 0 ] || return 1
+
+  i="$(_fragment_command_index "$fragment")" || return 1
+  [ "$i" -lt "${#words[@]}" ] || return 1
+  _word_matches_command "${words[$i]}" "$command" || return 1
+  ((i++))
+
+  while [ "$i" -lt "${#words[@]}" ]; do
+    word="$(_clean_command_word "${words[$i]}")"
+    case "$word" in
+      --cwd | --repository | -R)
+        value="${words[$((i + 1))]:-}"
+        effective_dir=$(_hook_resolve_dir_lexically "$effective_dir" "$value") || return 1
+        i=$((i + 2))
+        ;;
+      --cwd=* | --repository=*)
+        value="${word#*=}"
+        effective_dir=$(_hook_resolve_dir_lexically "$effective_dir" "$value") || return 1
+        ((i++))
+        ;;
+      -R?*)
+        value="${word#-R}"
+        effective_dir=$(_hook_resolve_dir_lexically "$effective_dir" "$value") || return 1
+        ((i++))
+        ;;
+      --config)
+        i=$((i + 2))
+        ;;
+      --config=*)
+        ((i++))
+        ;;
+      --color | --pager | --encoding)
+        i=$((i + 2))
+        ;;
+      --color=* | --pager=* | --encoding=*)
+        ((i++))
+        ;;
+      --debugger | --encodingmode | --profile | --quiet | --time | --traceback | --verbose | -q | -v)
+        ((i++))
+        ;;
+      --)
+        return 1
+        ;;
+      -*)
+        ((i++))
+        ;;
+      *)
+        [ "$word" = "$target" ] || return 1
+        printf '%s' "$effective_dir"
+        return 0
+        ;;
+    esac
+  done
+
+  return 1
+}
+
 _git_subcommand_has_option() {
   local fragment="$1" target="$2" option="$3" word index
   local -a words=()

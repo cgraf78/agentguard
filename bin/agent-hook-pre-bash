@@ -247,6 +247,17 @@ _sl_commit_command() {
   return 1
 }
 
+_sl_commit_effective_dir() {
+  local fragment subcommand
+  while IFS= read -r fragment; do
+    _sl_metadata_only_fragment "$fragment" && continue
+    for subcommand in amend commit absorb; do
+      _command_subcommand_effective_dir "$fragment" "sl" "$subcommand" && return 0
+    done
+  done < <(_hook_executable_fragments "$AGENTGUARD_CMD_TRIMMED")
+  return 1
+}
+
 _sley_commit_command() {
   _git_commit_command || _sl_commit_command
 }
@@ -265,7 +276,13 @@ _sley_commit_gate() {
   if [ "${AGENTGUARD_SLEY_GATE:-1}" != "0" ]; then
     _hook_require_sley || return 0
 
-    run_dir="$(_git_commit_effective_dir || printf '%s' "$PWD")"
+    if _git_commit_command; then
+      run_dir="$(_git_commit_effective_dir || printf '%s' "$PWD")"
+    elif _sl_commit_command; then
+      run_dir="$(_sl_commit_effective_dir || printf '%s' "$PWD")"
+    else
+      run_dir="$PWD"
+    fi
 
     # Force `_REPO_TYPE=sl` only when the target dir is actually a Sapling
     # checkout; dual-managed repos with `.git` need Sapling detection, but
