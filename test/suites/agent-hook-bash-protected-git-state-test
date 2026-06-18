@@ -120,4 +120,26 @@ _assert_eq "git config overridden by status --untracked-files=no: allowed" "0" "
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=status.showUntrackedFiles GIT_CONFIG_VALUE_0=all git status --untracked-files=no"}}'
 _assert_eq "git config env overridden by status --untracked-files=no: allowed" "0" "$HOOK_EXIT"
 
+# Git accepts any unambiguous abbreviation of --untracked-files, so the guard
+# must match every prefix down to --u, not just the fully-spelled option.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked=all"}}'
+_assert_eq "git status --untracked=all abbrev: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untr=all"}}'
+_assert_eq "git status --untr=all abbrev: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --unt=all"}}'
+_assert_eq "git status --unt=all abbrev: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --u=all"}}'
+_assert_eq "git status --u=all abbrev: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --u all"}}'
+_assert_eq "git status --u all abbrev separate arg: blocked" "2" "$HOOK_EXIT"
+
+# An unrelated long option that merely starts with --u must not be mistaken for
+# an --untracked-files abbreviation.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked-files=no"}}'
+_assert_eq "git status --untracked-files=no: allowed" "0" "$HOOK_EXIT"
+
 _test_summary

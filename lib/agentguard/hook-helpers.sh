@@ -52,13 +52,16 @@ _hook_codex_process_key() {
       ;;
   esac
 
-  local pid parent comm args saw_codex=''
+  local pid parent comm saw_codex=''
   pid="$$"
   while [ -n "$pid" ] && [ "$pid" != "0" ]; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//') || break
-    args=$(ps -o args= -p "$pid" 2>/dev/null || true)
-    case "$(basename "$comm" 2>/dev/null) $args" in
-      codex\ * | *"/codex "* | *"/codex" | *" codex "*)
+    # Match the executable NAME only, never argv. detect.sh hardened _agent_name
+    # against exactly this: an ancestor whose argv merely contains "codex"
+    # (a commit message, `hm remember … codex …`, an editor opening /path/codex)
+    # must not be misattributed to Codex and corrupt the per-session state key.
+    case "$(basename "$comm" 2>/dev/null)" in
+      codex)
         saw_codex="$pid"
         ;;
     esac

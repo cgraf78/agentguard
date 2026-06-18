@@ -263,6 +263,79 @@ _run_hook "$PRE_BASH" '{"tool_input":{"command":"echo kill 1"}}'
 _assert_eq "echo kill 1: allowed" "0" "$HOOK_EXIT"
 _assert_not_contains "echo kill 1: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
 
+# A `--` end-of-options separator must not let PID 1 slip past the broad-kill
+# guard: the guard consumes `--` and keeps scanning the operands for `1`.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -- 1"}}'
+_assert_eq "kill -- 1: blocked" "2" "$HOOK_EXIT"
+_assert_contains "kill -- 1: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -9 -- 1"}}'
+_assert_eq "kill -9 -- 1: blocked" "2" "$HOOK_EXIT"
+
+# `--` before a normal PID is still allowed (SIGTERM to a non-init process).
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -- 1234"}}'
+_assert_eq "kill -- 1234: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "kill -- 1234: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# Target `-1` signals every process the user can reach (process group -1) — even
+# more destructive than killing init. It must block in operand position, whether
+# after a signal, after `--`, or as a later operand.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -9 -1"}}'
+_assert_eq "kill -9 -1: blocked" "2" "$HOOK_EXIT"
+_assert_contains "kill -9 -1: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -- -1"}}'
+_assert_eq "kill -- -1: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -s KILL -1"}}'
+_assert_eq "kill -s KILL -1: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -1 -1"}}'
+_assert_eq "kill -1 -1 (signal then target): blocked" "2" "$HOOK_EXIT"
+
+# Leading `-1` is the SIGHUP signal spec, not a target: `kill -1 1234` sends
+# SIGHUP to one process and must stay allowed.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -1 1234"}}'
+_assert_eq "kill -1 1234 (SIGHUP to PID): allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "kill -1 1234: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# Target `0` is the caller's entire process group (for an agent: its own session
+# and sibling tasks). A bare operand is never a signal, so `0` is catastrophic in
+# any position — including after `--` and behind a signal flag.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill 0"}}'
+_assert_eq "kill 0 (caller process group): blocked" "2" "$HOOK_EXIT"
+_assert_contains "kill 0: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -- 0"}}'
+_assert_eq "kill -- 0: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -9 0"}}'
+_assert_eq "kill -9 0: blocked" "2" "$HOOK_EXIT"
+
+# `-0` is the null signal (existence check), not a target: `kill -0 1234` and
+# `kill -s 0 1234` send no signal to a specific PID and must stay allowed.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -0 1234"}}'
+_assert_eq "kill -0 1234 (null-signal existence check): allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "kill -0 1234: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -s 0 1234"}}'
+_assert_eq "kill -s 0 1234 (null signal via -s): allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "kill -s 0 1234: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# `-n signum` (bash builtin) takes the signal by number as the next token, so it
+# must be consumed — otherwise a signal value of 0/1 is misread as a target.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -n 0 1234"}}'
+_assert_eq "kill -n 0 1234 (null signal by number): allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "kill -n 0 1234: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -n 1 1234"}}'
+_assert_eq "kill -n 1 1234 (SIGHUP by number to PID): allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "kill -n 1 1234: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# But the signal number must not shadow a real catastrophic target operand.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"kill -n 9 1"}}'
+_assert_eq "kill -n 9 1 (SIGKILL to init): blocked" "2" "$HOOK_EXIT"
+
 # ---------------------------------------------------------------------------
 # Tests: chmod overreach guard
 # ---------------------------------------------------------------------------

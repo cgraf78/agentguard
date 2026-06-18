@@ -278,4 +278,181 @@ _assert_not_contains "ls: no warning" "WARNING" "$HOOK_STDERR"
 _run_hook "$PRE_BASH" '{"tool_input":{"command":""}}'
 _assert_eq "empty cmd: exit 0" "0" "$HOOK_EXIT"
 
+# ---------------------------------------------------------------------------
+# Tests: hardening red-team — bypass families closed by harden-command-guards
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-bash: rm guard bypass hardening ==="
+
+# Short and empty env-prefix assignments must not hide the real command word.
+# A single-character or empty-value assignment is still an env prefix, so the
+# guard has to skip past it and classify the rm that follows.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"A=1 rm -rf /"}}'
+_assert_eq "single-char env assignment then rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"_=1 rm -rf /"}}'
+_assert_eq "underscore env assignment then rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"x= rm -rf /"}}'
+_assert_eq "empty-value env assignment then rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# A leading digit is not a valid identifier, so `1=2` is not an env prefix —
+# the whole token is the command word and there is no dangerous rm to find.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"A=1 ls"}}'
+_assert_eq "single-char env assignment then ls: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "single-char env assignment then ls: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# env --split-string variants: the payload can be attached to a short flag or
+# clustered with other single-letter options. Each form still runs `rm -rf /`.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env -S'\''rm -rf /'\''"}}'
+_assert_eq "env -S attached value rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env -iS '\''rm -rf /'\''"}}'
+_assert_eq "env clustered -iS spaced value rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env -iS'\''rm -rf /'\''"}}'
+_assert_eq "env clustered -iS attached value rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env --split-string='\''rm -rf /'\''"}}'
+_assert_eq "env --split-string= attached value rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# xargs is an execution wrapper: the dangerous command follows it (optionally
+# behind its own value-taking flags) and must still be classified.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"xargs rm -rf /"}}'
+_assert_eq "xargs rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# `echo` (not `find`) leads here on purpose: piping through `find` would block
+# via the find guard and mask whether the xargs wrapper itself was unwrapped.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"echo x | xargs -I{} rm -rf /"}}'
+_assert_eq "xargs -I{} rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# xargs `-i` / `--replace` take an OPTIONAL attached argument and do NOT consume
+# the next token, so the command word follows immediately. The wrapper-skip must
+# not swallow `rm` as if `-i` were a value-taking option.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"xargs -i rm -rf /"}}'
+_assert_eq "xargs -i rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"xargs --replace rm -rf /"}}'
+_assert_eq "xargs --replace rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"xargs -n1 ls"}}'
+_assert_eq "xargs -n1 ls: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "xargs -n1 ls: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"xargs -i ls {}"}}'
+_assert_eq "xargs -i ls: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "xargs -i ls: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# A single transparent wrapper in front of `env --split-string` must not hide
+# the payload: the env-split extractor skips privilege/execution wrappers before
+# looking for the env that carries -S.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"sudo env -S '\''rm -rf /'\''"}}'
+_assert_eq "sudo env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nice env -S '\''rm -rf /'\''"}}'
+_assert_eq "nice env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"timeout 5 env -S '\''rm -rf /'\''"}}'
+_assert_eq "timeout 5 env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"xargs env -S '\''rm -rf /'\''"}}'
+_assert_eq "xargs env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"sudo env -S '\''ls -la'\''"}}'
+_assert_eq "sudo env -S ls -la: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "sudo env -S ls -la: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# env is itself a transparent command runner, so `env … env -S '<payload>'`
+# reaches a second env whose split-string must still be extracted. The payload
+# extractor re-resolves after each transparent layer.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env env -S '\''rm -rf /'\''"}}'
+_assert_eq "env env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env A=1 env -S '\''rm -rf /'\''"}}'
+_assert_eq "env assignment then env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# `-u` takes a value: in `env -u env -S …` the inner `env` is the unset target,
+# not a command, so -S is still this env's option and the payload still blocks.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env -u env -S '\''rm -rf /'\''"}}'
+_assert_eq "env -u env (value) -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"env env -S '\''ls -la'\''"}}'
+_assert_eq "env env -S ls -la: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "env env -S ls -la: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# `env -S` must be decomposed wherever it runs on the line, not only as the first
+# command: a `true;`/`&&`/`|`/`cd;` prefix must not hide the split-string payload.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"true; env -S '\''rm -rf /'\''"}}'
+_assert_eq "non-leading env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"echo hi && env -S '\''rm -rf /'\''"}}'
+_assert_eq "&&-chained env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"echo a | env -S '\''rm -rf /'\''"}}'
+_assert_eq "piped env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# Non-leading and wrapped at once: the per-fragment scan still reaches it.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"true; sudo env -S '\''rm -rf /'\''"}}'
+_assert_eq "non-leading sudo env -S rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"true; env -S '\''ls -la'\''"}}'
+_assert_eq "non-leading env -S ls -la: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "non-leading env -S ls -la: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# Dangerous rm targets expressed through brace expansion or path normalization
+# resolve to / or $HOME and must block. _clean_command_word strips a trailing
+# `}`, so the guard inspects the raw token to recognize ${HOME} forms.
+# shellcheck disable=SC2016
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf ${HOME}"}}'
+_assert_eq "rm -rf \${HOME}: exit 2" "2" "$HOOK_EXIT"
+
+# shellcheck disable=SC2016
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf ${HOME}/"}}'
+_assert_eq "rm -rf \${HOME}/: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf ~/.."}}'
+_assert_eq "rm -rf ~/..: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf //"}}'
+_assert_eq "rm -rf //: exit 2" "2" "$HOOK_EXIT"
+
+# A trailing `/*` glob wipes everything directly under its parent, so a glob
+# whose parent normalizes to $HOME's parent is as catastrophic as that parent.
+# Use $HOME-relative forms so the assertion is portable (the actual home parent
+# differs per platform, e.g. /home vs /Users).
+# shellcheck disable=SC2016
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf ${HOME}/../*"}}'
+_assert_eq "rm -rf \${HOME}/../*: exit 2" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf ~/../*"}}'
+_assert_eq "rm -rf ~/../*: exit 2" "2" "$HOOK_EXIT"
+
+# Safe globs under non-catastrophic directories must still pass.
+# shellcheck disable=SC2016
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf ${HOME}/.cache/*"}}'
+_assert_eq "rm -rf \${HOME}/.cache/*: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "rm -rf \${HOME}/.cache/*: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"rm -rf /tmp/*"}}'
+_assert_eq "rm -rf /tmp/*: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "rm -rf /tmp/*: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# Arithmetic left-shift uses `<<`, which must not be misparsed as a heredoc
+# operator. If it were, the delimiter-seeking parser would swallow the rest of
+# the script and hide the dangerous rm on the following line.
+_arith_shift_heredoc_json=$(jq -nc --arg c $'echo $((1 << 2))\nrm -rf /' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_arith_shift_heredoc_json"
+_assert_eq "arith shift then rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+_arith_cmd_shift_heredoc_json=$(jq -nc --arg c $'((x << 3))\nrm -rf /' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_arith_cmd_shift_heredoc_json"
+_assert_eq "arith command shift then rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# The shift expression on its own is benign and must not warn or block.
+_arith_shift_only_json=$(jq -nc --arg c 'echo $((1 << 2))' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_arith_shift_only_json"
+_assert_eq "arith shift only: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "arith shift only: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
 _test_summary

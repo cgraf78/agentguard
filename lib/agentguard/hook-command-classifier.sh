@@ -35,7 +35,7 @@ _trim_hook_fragment() {
 # and protected bare-Git scan blocker agree on multiple heredocs, quoted delimiters, and
 # `<<-` tab stripping.
 _heredoc_specs() {
-  local line="$1" quote="" ch next next2 delim active strip_tabs marker_quote="" escaped=0
+  local line="$1" quote="" ch next next2 delim active strip_tabs marker_quote="" escaped=0 in_arith=0 arith_depth=0
   local i j
 
   for ((i = 0; i < ${#line}; i++)); do
@@ -59,6 +59,24 @@ _heredoc_specs() {
       fi
       continue
     fi
+    # Inside arithmetic (`$(( … ))` or `(( … ))`) a `<<` is the left-shift
+    # operator, not a heredoc. Track paren depth and suppress heredoc detection
+    # until arithmetic closes, or `$((1 << 2))` would register a phantom heredoc
+    # and swallow every following command (a guard bypass).
+    if [ "$in_arith" -eq 1 ]; then
+      case "$ch" in
+        "(") arith_depth=$((arith_depth + 1)) ;;
+        ")")
+          if [ "$next" = ")" ] && [ "$arith_depth" -eq 0 ]; then
+            in_arith=0
+            ((i++))
+          elif [ "$arith_depth" -gt 0 ]; then
+            arith_depth=$((arith_depth - 1))
+          fi
+          ;;
+      esac
+      continue
+    fi
     case "$ch" in
       "$")
         if [ "$next" = "'" ]; then
@@ -72,6 +90,16 @@ _heredoc_specs() {
         continue
         ;;
     esac
+
+    # Adjacent `((` opens arithmetic (both `$((` — the `$` is a no-op above — and
+    # the `((` arithmetic command). A space (`( (`) is nested subshells, which is
+    # not arithmetic and where heredocs are still valid.
+    if [ "$ch" = "(" ] && [ "$next" = "(" ]; then
+      in_arith=1
+      arith_depth=0
+      ((i++))
+      continue
+    fi
 
     [ "$ch" = "<" ] || continue
     [ "$next" = "<" ] || continue
@@ -922,6 +950,13 @@ _hook_executable_fragments_uncached() {
         while IFS= read -r payload; do
           _hook_executable_fragments "$payload" $((depth + 1))
         done < <(_nested_shell_payloads "$fragment")
+        # Per fragment, not per line: `env -S` must be decomposed wherever it
+        # runs, not only as the first command. `true; env -S 'rm -rf /'` is one
+        # line but the env invocation is the second fragment. (The protected
+        # bare-Git scanner already calls this per fragment.)
+        while IFS= read -r payload; do
+          _hook_executable_fragments "$payload" $((depth + 1))
+        done < <(_env_split_payloads "$fragment")
       fi
     done < <(_split_command_fragments "${command//$'\n'/ }")
 
@@ -932,9 +967,6 @@ _hook_executable_fragments_uncached() {
       while IFS= read -r -d '' payload; do
         _hook_executable_fragments "$payload" $((depth + 1))
       done < <(_executable_expansion_payloads "$command")
-      while IFS= read -r payload; do
-        _hook_executable_fragments "$payload" $((depth + 1))
-      done < <(_env_split_payloads "$command")
     fi
   done < <(_hook_command_lines "$text")
 
@@ -1433,7 +1465,7 @@ _remember_protected_bare_git_path_assignments() {
         [ "$assignment_builtin" -eq 1 ] && continue
         return 0
         ;;
-      [A-Za-z_][A-Za-z0-9_]*=*)
+      [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
         name="${word%%=*}"
         value="${word#*=}"
         if [ "$unset_builtin" -eq 1 ] || [ "$export_functions" -eq 1 ]; then
@@ -1662,7 +1694,7 @@ _skip_privilege_wrapper() {
             ;;
         esac
         ;;
-      [A-Za-z_][A-Za-z0-9_]*=*)
+      [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
         ((i++))
         ;;
       *)
@@ -1682,7 +1714,7 @@ _word_is_execution_wrapper() {
   local word
   word="$(_clean_command_word "$1")"
   case "$word" in
-    nohup | */nohup | nice | */nice | timeout | */timeout)
+    nohup | */nohup | nice | */nice | timeout | */timeout | xargs | */xargs)
       return 0
       ;;
   esac
@@ -1754,6 +1786,41 @@ _skip_execution_wrapper() {
           *)
             # First non-option positional is the duration; skip it.
             ((i++))
+            break
+            ;;
+        esac
+      done
+      ;;
+    xargs)
+      # xargs runs the trailing command (once even on empty input). Skip its
+      # options — value-taking ones consume the next token; the first positional
+      # is the command word.
+      while [ "$i" -lt "${#words[@]}" ]; do
+        word="$(_clean_command_word "${words[$i]}")"
+        case "$word" in
+          -i | --replace)
+            # GNU xargs `-i[replstr]` / `--replace[=replstr]` take an OPTIONAL
+            # attached argument and never consume the next token, so the command
+            # word follows immediately. (The attached forms `-irepl` and
+            # `--replace=repl` are handled by the `--*=*` / `-[Ii]?*` arms below.)
+            ((i++))
+            ;;
+          -I | -n | -P | -a | -d | -E | -L | -s | \
+            --max-args | --max-procs | --arg-file | --delimiter | \
+            --eof | --max-lines | --max-chars | --process-slot-var)
+            i=$((i + 2))
+            ;;
+          --*=* | -[IinPadELs]?*)
+            ((i++))
+            ;;
+          --)
+            ((i++))
+            break
+            ;;
+          -*)
+            ((i++))
+            ;;
+          *)
             break
             ;;
         esac
@@ -1907,7 +1974,7 @@ _protected_bare_git_context() {
         ((i++))
         continue
         ;;
-      [A-Za-z_][A-Za-z0-9_]*=*)
+      [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
         ((i++))
         continue
         ;;
@@ -2021,7 +2088,7 @@ _fragment_command_index() {
   while [ "$i" -lt "${#words[@]}" ]; do
     word="$(_clean_command_word "${words[$i]}")"
     case "$word" in
-      [A-Za-z_][A-Za-z0-9_]*=*)
+      [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
         ((i++))
         ;;
       *)
@@ -2330,77 +2397,139 @@ _nested_shell_payloads() {
 
 # `env -S` asks env to split and run a command string. Treat that string like a
 # bounded nested payload so wrapper paths cannot hide protected bare-Git scans.
+# Emit a split-string payload: an optional value attached to the -S option token
+# (`-Scmd`, `--split-string=cmd`, clustered `-iScmd`) joined with the remaining
+# argv tokens (env's -S splits its string and appends any following args, so the
+# whole remainder is the command env runs and must be classified).
+_env_split_emit() {
+  local attached="$1" start="$2"
+  shift 2
+  local rest
+  if rest="$(_join_fragment_tokens_from "$start" "$@")"; then
+    if [ -n "$attached" ]; then
+      printf '%s %s\n' "$attached" "$rest"
+    else
+      printf '%s\n' "$rest"
+    fi
+    return 0
+  fi
+  if [ -n "$attached" ]; then
+    printf '%s\n' "$attached"
+    return 0
+  fi
+  return 1
+}
+
 _env_split_payloads() {
-  local fragment="$1" word rest payload
+  local fragment="$1" word attached
   local i=0
   local -a words=()
 
-  read -r -a words <<<"$fragment"
+  # Quote-aware tokenization: a naive whitespace split breaks attached forms like
+  # `-S'rm -rf /'` across words, hiding the payload from the recursive classifier.
+  while IFS= read -r word; do
+    words+=("$word")
+  done < <(_fragment_tokens "$fragment")
   [ "${#words[@]}" -gt 0 ] || return 1
 
+  # Resolve the env that carries the split-string, transparently stepping over
+  # anything in front of it. A single transparent layer otherwise defeats the
+  # guard: `sudo env -S …`, `nice env -S …`, `xargs env -S …`, and `env env -S …`
+  # (env is itself a command runner) all reduce to a plain `env -S`. The outer
+  # loop re-resolves after each layer so wrappers stack; it always advances past
+  # at least one env per iteration, so it cannot spin.
   while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
-    case "$word" in
-      [A-Za-z_][A-Za-z0-9_]*=*)
-        ((i++))
-        continue
-        ;;
-      *)
-        if _word_is_command_prefix "$word"; then
+    # Skip transparent prefixes (assignments, command prefixes, privilege and
+    # execution wrappers) until the next env executable.
+    while [ "$i" -lt "${#words[@]}" ]; do
+      word="$(_clean_command_word "${words[$i]}")"
+      case "$word" in
+        [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
           ((i++))
           continue
-        fi
-        ;;
-    esac
+          ;;
+      esac
 
-    _word_is_env_executable "$word" || return 1
-    ((i++))
-    break
-  done
+      if _word_is_command_prefix "$word"; then
+        ((i++))
+        continue
+      fi
+      if _word_is_privilege_wrapper "$word"; then
+        i="$(_skip_privilege_wrapper "$i" "${words[@]}")" || return 1
+        continue
+      fi
+      if _word_is_execution_wrapper "$word"; then
+        i="$(_skip_execution_wrapper "$i" "${words[@]}")" || return 1
+        continue
+      fi
 
-  while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
-    case "$word" in
-      -S | --split-string)
-        case "$fragment" in
-          *" $word "*)
-            rest="${fragment#*" $word "}"
-            ;;
-          *)
-            return 1
-            ;;
-        esac
-        payload="$(_first_shell_word_with_remainder "$rest")" || return 1
-        [ -n "$payload" ] || return 1
-        printf '%s\n' "$payload"
-        return 0
-        ;;
-      --split-string=*)
-        rest="${fragment#*" --split-string="}"
-        payload="$(_first_shell_word_with_remainder "$rest")" || return 1
-        [ -n "$payload" ] || return 1
-        printf '%s\n' "$payload"
-        return 0
-        ;;
-      -u | --unset | -C | --chdir)
-        i=$((i + 2))
-        ;;
-      --unset=* | --chdir=*)
-        ((i++))
-        ;;
-      --)
-        return 1
-        ;;
-      -*)
-        ((i++))
-        ;;
-      [A-Za-z_][A-Za-z0-9_]*=*)
-        ((i++))
-        ;;
-      *)
-        return 1
-        ;;
-    esac
+      _word_is_env_executable "$word" || return 1
+      ((i++))
+      break
+    done
+    [ "$i" -lt "${#words[@]}" ] || return 1
+
+    # Parse this env's options. -S/--split-string yields the payload; option
+    # values are consumed. Reaching env's command-position word (a bare word, or
+    # the token after `--`) re-enters the outer loop so a nested env/wrapper
+    # around the real `env -S` is still resolved rather than dismissed.
+    while [ "$i" -lt "${#words[@]}" ]; do
+      word="$(_clean_command_word "${words[$i]}")"
+      case "$word" in
+        -S | --split-string)
+          # -S takes the next token (its string); env appends any following args.
+          _join_fragment_tokens_from "$((i + 1))" "${words[@]}" && return 0
+          return 1
+          ;;
+        --split-string=*)
+          _env_split_emit "${word#--split-string=}" "$((i + 1))" "${words[@]}"
+          return $?
+          ;;
+        -S?*)
+          # Attached short option: -S<string>.
+          _env_split_emit "${word#-S}" "$((i + 1))" "${words[@]}"
+          return $?
+          ;;
+        -[!-]*S*)
+          # Clustered short options ending in the split flag, e.g. -iS<string>.
+          # Uppercase S is env's only such option, so any cluster containing it
+          # is a split-string; treat the rest of the token (after S) as payload.
+          case "$word" in
+            *S?*)
+              _env_split_emit "${word#*S}" "$((i + 1))" "${words[@]}"
+              return $?
+              ;;
+            *)
+              _join_fragment_tokens_from "$((i + 1))" "${words[@]}" && return 0
+              return 1
+              ;;
+          esac
+          ;;
+        -u | --unset | -C | --chdir)
+          i=$((i + 2))
+          ;;
+        --unset=* | --chdir=*)
+          ((i++))
+          ;;
+        --)
+          # End of this env's options; its command word follows. Advance and
+          # re-resolve it in case it is another env/wrapper around the payload.
+          ((i++))
+          break
+          ;;
+        -*)
+          ((i++))
+          ;;
+        [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
+          ((i++))
+          ;;
+        *)
+          # Command-position word: re-resolve via the outer loop without
+          # advancing (the outer skip consumes it if env/wrapper, else bails).
+          break
+          ;;
+      esac
+    done
   done
 
   return 1
@@ -2646,17 +2775,47 @@ _command_subcommand_has_option() {
 }
 
 _rm_target_is_dangerous() {
-  local target="$1" home_var="\$HOME" tilde
+  local target="$1" home_var="\$HOME" home_brace="\${HOME}" tilde expanded norm home_parent
   tilde=$(printf '\176')
   target="$(_shell_word_token "$target")"
 
+  # Literal catastrophic forms, including globs that wipe a whole tree (these
+  # don't normalize to a bare dir, so keep matching them directly).
   case "$target" in
-    / | '/*' | "$tilde" | "$tilde"/ | "$tilde"'/*' | "$home_var" | "$home_var"/ | "$home_var"'/*' | . | ./ | './*' | .. | ../ | '../*')
+    / | '/*' | '//' | '//*' | \
+      "$tilde" | "$tilde"/ | "$tilde"'/*' | \
+      "$home_var" | "$home_var"/ | "$home_var"'/*' | \
+      "$home_brace" | "$home_brace"/ | "$home_brace"'/*' | \
+      . | ./ | './*' | .. | ../ | '../*')
       return 0
       ;;
   esac
 
   { [ "$target" = "$HOME" ] || [ "$target" = "$HOME/" ]; } && return 0
+
+  # Lexically normalize (expanding ~ / $HOME / ${HOME}) and compare against /,
+  # $HOME, and $HOME's parent — catches $HOME/., ~/.., trailing-slash and ..
+  # forms that resolve to a catastrophic target without being literal matches.
+  expanded="$(_expand_home_path_token "$target")"
+  norm="$(_normalize_path_lexically "$expanded")"
+  home_parent="$(_normalize_path_lexically "$HOME/..")"
+  [ "$norm" = "/" ] && return 0
+  [ "$norm" = "$HOME" ] && return 0
+  [ -n "$home_parent" ] && [ "$norm" = "$home_parent" ] && return 0
+
+  # A trailing `/*` glob wipes everything directly under its parent, so it is as
+  # dangerous as the parent itself. Catch the normalized parent-of-home form
+  # (`/home/*`, `${HOME}/../*`, `~/../*` → `/home/*`); the literal `/*` and
+  # `$HOME/*` forms are already handled above.
+  case "$norm" in
+    */'*')
+      local globdir="${norm%/'*'}"
+      [ -z "$globdir" ] && globdir="/"
+      [ "$globdir" = "/" ] && return 0
+      [ "$globdir" = "$HOME" ] && return 0
+      [ -n "$home_parent" ] && [ "$globdir" = "$home_parent" ] && return 0
+      ;;
+  esac
   return 1
 }
 
@@ -2704,7 +2863,10 @@ _rm_fragment_rf_state() {
       esac
     fi
 
-    _rm_target_is_dangerous "$word" && dangerous=1
+    # Pass the raw token, not the _clean_command_word form: cleaning strips a
+    # trailing `}` (for `{ … }` groups), which would turn `${HOME}` into `${HOME`
+    # and hide it from the dangerous-target check.
+    _rm_target_is_dangerous "${words[$i]}" && dangerous=1
     ((i++))
   done
 
@@ -2842,19 +3004,31 @@ _git_option_untracked_status_state() {
       fi
       return 0
       ;;
-    --untracked*=*)
-      value="${word#*=}"
-      value="$(_shell_word_token "$value")"
-      [ "$value" = "no" ] && {
-        printf 'off'
-        return 0
-      }
-      printf 'on'
-      return 0
-      ;;
-    --untracked*)
-      printf 'on'
-      return 0
+    --u*)
+      # git accepts any unambiguous prefix of a long option, and for `status`
+      # --u… is unambiguously --untracked-files. Match any prefix (e.g. --u=all,
+      # --untr=all) so abbreviations can't slip an untracked walk past the guard.
+      local optname="${word#--}"
+      optname="${optname%%=*}"
+      # Constant subject on purpose: testing whether $optname is a PREFIX of the
+      # full option name (git abbreviation rules), not matching a literal.
+      # shellcheck disable=SC2194
+      case "untracked-files" in
+        "$optname"*)
+          case "$word" in
+            *=*)
+              value="${word#*=}"
+              value="$(_shell_word_token "$value")"
+              [ "$value" = "no" ] && {
+                printf 'off'
+                return 0
+              }
+              ;;
+          esac
+          printf 'on'
+          return 0
+          ;;
+      esac
       ;;
   esac
   if [[ "$word" == -* && "$word" != --* ]]; then
