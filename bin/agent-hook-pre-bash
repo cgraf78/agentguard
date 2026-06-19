@@ -201,9 +201,8 @@ fi
 #       rc=2 cases as warnings without blocking.
 # Plain `git commit` can operate on a configured protected bare repo via a Git
 # launcher. Run plain `sley` from the command cwd so the Sley launcher applies
-# the same buffer/cwd-local repository decision.
-# `sl` commit-producing commands force `_REPO_TYPE=sl` so dual-managed repos
-# (Sapling clone with .git dir) don't fall back to git auto-detection.
+# the same buffer/cwd-local repository decision. Sapling readiness is handled by
+# native Sapling hooks, not by this agent-level gate.
 
 _git_commit_command() {
   local fragment
@@ -296,30 +295,12 @@ _sl_rewrites_commit_fragment() {
   return 1
 }
 
-_sl_commit_command() {
-  local fragment
-  while IFS= read -r fragment; do
-    _sl_rewrites_commit_fragment "$fragment" && return 0
-  done < <(_hook_executable_fragments "$AGENTGUARD_CMD_TRIMMED")
-  return 1
-}
-
-_sl_commit_effective_dirs() {
-  local fragment subcommand
-  while IFS= read -r fragment; do
-    _sl_rewrites_commit_fragment "$fragment" || continue
-    for subcommand in amend commit absorb record continue backout graft import fold split rebase histedit; do
-      if _command_subcommand_is "$fragment" "sl" "$subcommand"; then
-        _sl_fragment_effective_dir_for "$fragment" "$subcommand"
-        printf '\n'
-        break
-      fi
-    done
-  done < <(_hook_executable_fragments "$AGENTGUARD_CMD_TRIMMED")
-}
-
 _sley_commit_command() {
-  _git_commit_command || _sl_commit_command
+  _git_commit_command
+}
+
+_commit_review_nudge() {
+  _hook_remind 'Consider running /review or /simplify on your changes before committing. Review the final diff for correctness, scope, stale docs/tests, edge cases, and accidental unrelated changes.'
 }
 
 _sley_gate_seen_key() {
@@ -369,12 +350,12 @@ $sley_out"
   esac
 }
 
-# The gate enforces mechanical readiness; review/simplify are separate
-# design checks. Suppress the review nudge for message-only amends.
+# The Git gate enforces mechanical readiness; Sapling readiness is enforced by
+# native Sapling hooks so human and agent workflows share the same path.
 _sley_commit_gate() {
   _sley_commit_command || return 0
 
-  local run_dir="" repo_type="" key="" seen=$'\n' ran_gate=0
+  local run_dir="" key="" seen=$'\n' ran_gate=0
 
   if [ "${AGENTGUARD_SLEY_GATE:-1}" != "0" ]; then
     _hook_require_sley || return 0
@@ -397,23 +378,10 @@ _sley_commit_gate() {
       ran_gate=1
     done < <(_hook_executable_fragments "$AGENTGUARD_CMD_TRIMMED")
 
-    while IFS= read -r run_dir; do
-      [ -n "$run_dir" ] || continue
-      repo_type=""
-      # Force `_REPO_TYPE=sl` only when the target dir is actually a Sapling
-      # checkout; dual-managed repos with `.git` need Sapling detection, but
-      # non-Sapling trees should not call environment-specific Sapling hooks.
-      [ -d "$run_dir/.sl" ] && repo_type=sl
-      key="sl|$run_dir"
-      _sley_gate_seen_key "$seen" "$key" && continue
-      seen+="$key"$'\n'
-      _sley_run_ready_in_dir "$run_dir" "$repo_type"
-      ran_gate=1
-    done < <(_sl_commit_effective_dirs)
   fi
 
   if [ "$ran_gate" -eq 1 ] || [ "${AGENTGUARD_SLEY_GATE:-1}" = "0" ]; then
-    _hook_remind 'Consider running /review or /simplify on your changes before committing. Review the final diff for correctness, scope, stale docs/tests, edge cases, and accidental unrelated changes.'
+    _commit_review_nudge
   fi
 }
 
@@ -603,7 +571,8 @@ _hook_run_guards() {
         _GUARD_GIT_ABSORB=1
         ;;
 
-      # Sapling commit detection for the sley readiness gate.
+      # Sapling commit detection for the review nudge. Native Sapling hooks own
+      # the Sley readiness gate so human and agent workflows share one path.
       # Matches commands that can create or rewrite submitted commits while
       # excluding metadata-only and abort/preview operations.
       sl | */sl)
@@ -780,10 +749,14 @@ case "$_GUARD_RM_RF" in
 esac
 
 # Short-circuit the sley commit gate: only enter when the bulk classifier
-# detected a commit command, saving ~50ms on the common non-commit path.
-if [ "$_GUARD_GIT_COMMIT" -eq 1 ] || [ "$_GUARD_SL_COMMIT" -eq 1 ]; then
+# detected a Git commit command, saving ~50ms on the common non-commit path.
+# Sapling commit-input commands are gated by native Sapling hooks so humans
+# and agents run the same Sley path.
+if [ "$_GUARD_GIT_COMMIT" -eq 1 ]; then
   _sley_commit_gate
 fi
+
+[ "$_GUARD_SL_COMMIT" -eq 1 ] && _commit_review_nudge
 
 if [ "$_GUARD_GIT_COMMIT" -eq 1 ]; then
   _hook_remind 'If this commit targets a public repo, verify no private or environment-specific details leak into staged code, comments, tests, generated files, docs, or the commit message.'

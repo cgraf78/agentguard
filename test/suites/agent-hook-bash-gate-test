@@ -128,12 +128,15 @@ PATH="$_gate_path" MOCK_SLEY_RC=1 \
 _assert_contains "git -C ~/path commit: expands tilde" "mock-pwd=$gate_tilde_dir" "$HOOK_STDERR"
 rm -rf "$gate_tilde_dir"
 
-# `sl amend|commit` exports `_REPO_TYPE=sl` so dual-managed repos (Sapling
-# clones with a `.git` dir) classify correctly instead of falling back to
-# git auto-detection. The override is gated on the target dir actually
-# containing a Sapling working copy (`.sl/`); without that guard, running
-# `sl amend` in a pure git checkout would force Sapling-specific local
-# extensions through a non-Sapling tree and error out.
+_reset_state
+PATH="$_gate_path" MOCK_SLEY_RC=1 \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl amend"}}'
+_assert_not_contains "sl amend: native Sapling hooks own sley gate" \
+  "mock-sley=1" "$HOOK_STDERR"
+
+# Sapling commit-input commands are gated by native Sapling hooks. Agentguard
+# still classifies them for the design-review nudge, but must not run its own
+# `sley ready` backstop and duplicate the native hook path.
 _fake_sl_repo=$(_tmpdir)
 mkdir "$_fake_sl_repo/.sl"
 gate_saved_pwd=$PWD
@@ -142,91 +145,112 @@ cd "$_fake_sl_repo" || exit 1
 _reset_state
 PATH="$_gate_path" MOCK_SLEY_RC=1 MOCK_SLEY_OUT="probing repo type" \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl amend"}}'
-_assert_eq "sl amend in .sl repo: gate blocks" "2" "$HOOK_EXIT"
-_assert_contains "sl amend in .sl repo: forces _REPO_TYPE=sl" "mock-repo-type=sl" "$HOOK_STDERR"
-_assert_contains "sl amend in .sl repo: uses mutating commit scope" "mock-args=--fix --quiet --commit" "$HOOK_STDERR"
+_assert_eq "sl amend in .sl repo: exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "sl amend in .sl repo: does not run sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_contains "sl amend in .sl repo: still nudges review" "/review or /simplify" "$HOOK_STDERR"
 
 _reset_state
 PATH="$_gate_path" MOCK_SLEY_RC=1 \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl commit -m foo"}}'
-_assert_contains "sl commit in .sl repo: forces _REPO_TYPE=sl" "mock-repo-type=sl" "$HOOK_STDERR"
+_assert_not_contains "sl commit in .sl repo: does not run sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_contains "sl commit in .sl repo: still nudges review" "/review or /simplify" "$HOOK_STDERR"
 
 _reset_state
 PATH="$_gate_path" MOCK_SLEY_RC=1 \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl absorb"}}'
-_assert_eq "sl absorb in .sl repo: gate blocks" "2" "$HOOK_EXIT"
-_assert_contains "sl absorb in .sl repo: forces _REPO_TYPE=sl" "mock-repo-type=sl" "$HOOK_STDERR"
-_assert_contains "sl absorb in .sl repo: uses mutating commit scope" "mock-args=--fix --quiet --commit" "$HOOK_STDERR"
+_assert_eq "sl absorb in .sl repo: exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "sl absorb in .sl repo: does not run sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_contains "sl absorb in .sl repo: still nudges review" "/review or /simplify" "$HOOK_STDERR"
 
 _sl_cwd_repo=$(_tmpdir)
 mkdir "$_sl_cwd_repo/.sl"
 _reset_state
 PATH="$_gate_path" MOCK_SLEY_RC=1 \
   _run_hook "$PRE_BASH" "$(jq -nc --arg c "sl --cwd $_sl_cwd_repo absorb" '{"tool_input":{"command":$c}}')"
-_assert_eq "sl --cwd absorb: gate blocks" "2" "$HOOK_EXIT"
-_assert_contains "sl --cwd absorb: runs sley in target repo" "mock-pwd=$_sl_cwd_repo" "$HOOK_STDERR"
-_assert_contains "sl --cwd absorb: forces _REPO_TYPE=sl" "mock-repo-type=sl" "$HOOK_STDERR"
+_assert_eq "sl --cwd absorb: exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "sl --cwd absorb: does not run sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_contains "sl --cwd absorb: still nudges review" "/review or /simplify" "$HOOK_STDERR"
 
 _sl_repository_repo=$(_tmpdir)
 mkdir "$_sl_repository_repo/.sl"
 _reset_state
 PATH="$_gate_path" MOCK_SLEY_RC=1 \
   _run_hook "$PRE_BASH" "$(jq -nc --arg c "sl --repository $_sl_repository_repo absorb" '{"tool_input":{"command":$c}}')"
-_assert_eq "sl --repository absorb: gate blocks" "2" "$HOOK_EXIT"
-_assert_contains "sl --repository absorb: runs sley in target repo" "mock-pwd=$_sl_repository_repo" "$HOOK_STDERR"
-_assert_contains "sl --repository absorb: forces _REPO_TYPE=sl" "mock-repo-type=sl" "$HOOK_STDERR"
+_assert_eq "sl --repository absorb: exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "sl --repository absorb: does not run sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_contains "sl --repository absorb: still nudges review" "/review or /simplify" "$HOOK_STDERR"
 
 _sl_compound_repo=$(_tmpdir)
 mkdir "$_sl_compound_repo/.sl"
 _reset_state
 PATH="$_gate_path" MOCK_SLEY_RC=1 \
   _run_hook "$PRE_BASH" "$(jq -nc --arg c "sl amend -m metadata; sl --cwd $_sl_compound_repo absorb" '{"tool_input":{"command":$c}}')"
-_assert_eq "sl metadata then cwd absorb: gate blocks" "2" "$HOOK_EXIT"
-_assert_contains "sl metadata then cwd absorb: runs sley in mutating target repo" "mock-pwd=$_sl_compound_repo" "$HOOK_STDERR"
-_assert_contains "sl metadata then cwd absorb: forces _REPO_TYPE=sl" "mock-repo-type=sl" "$HOOK_STDERR"
-
-_sl_compound_first_repo=$(_tmpdir)
-_sl_compound_second_repo=$(_tmpdir)
-mkdir "$_sl_compound_first_repo/.sl" "$_sl_compound_second_repo/.sl"
-_sl_compound_log=$(_tmpdir)/sley.log
-_sl_compound_saved_pwd=$PWD
-cd "$_sl_compound_first_repo" || exit 1
-_reset_state
-PATH="$_gate_path" MOCK_SLEY_RC=0 MOCK_SLEY_LOG="$_sl_compound_log" \
-  _run_hook "$PRE_BASH" "$(jq -nc --arg c "sl amend; sl --cwd $_sl_compound_second_repo absorb" '{"tool_input":{"command":$c}}')"
-cd "$_sl_compound_saved_pwd" || exit 1
-_assert_contains "sl compound mutating commands: gates first repo" "$_sl_compound_first_repo" "$(cat "$_sl_compound_log")"
-_assert_contains "sl compound mutating commands: gates second repo" "$_sl_compound_second_repo" "$(cat "$_sl_compound_log")"
-_assert_eq "sl compound mutating commands: one gate per target repo" "2" "$(wc -l <"$_sl_compound_log" | tr -d ' ')"
+_assert_eq "sl metadata then cwd absorb: exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "sl metadata then cwd absorb: does not run sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_contains "sl metadata then cwd absorb: still nudges review" "/review or /simplify" "$HOOK_STDERR"
 
 _reset_state
 PATH="$_gate_path" MOCK_SLEY_RC=1 \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl record -m foo"}}'
-_assert_eq "sl record: gate blocks" "2" "$HOOK_EXIT"
-_assert_contains "sl record: runs sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_eq "sl record: exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "sl record: does not run sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_contains "sl record: still nudges review" "/review or /simplify" "$HOOK_STDERR"
 
 _reset_state
 PATH="$_gate_path" MOCK_SLEY_RC=1 \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl continue"}}'
-_assert_eq "sl continue: gate blocks" "2" "$HOOK_EXIT"
-_assert_contains "sl continue: runs sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_eq "sl continue: exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "sl continue: does not run sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_contains "sl continue: still nudges review" "/review or /simplify" "$HOOK_STDERR"
 
 _reset_state
 PATH="$_gate_path" MOCK_SLEY_RC=1 \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl rebase --continue"}}'
-_assert_eq "sl rebase --continue: gate blocks" "2" "$HOOK_EXIT"
-_assert_contains "sl rebase --continue: runs sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_eq "sl rebase --continue: exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "sl rebase --continue: does not run sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_contains "sl rebase --continue: still nudges review" "/review or /simplify" "$HOOK_STDERR"
 
 _reset_state
 PATH="$_gate_path" MOCK_SLEY_RC=1 \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl rebase --restack"}}'
-_assert_eq "sl rebase --restack: gate blocks" "2" "$HOOK_EXIT"
-_assert_contains "sl rebase --restack: runs sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_eq "sl rebase --restack: exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "sl rebase --restack: does not run sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_contains "sl rebase --restack: still nudges review" "/review or /simplify" "$HOOK_STDERR"
 
 _reset_state
 PATH="$_gate_path" MOCK_SLEY_RC=1 \
   _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl rebase --abort"}}'
-_assert_not_contains "sl rebase --abort: gate skipped" "mock-sley=1" "$HOOK_STDERR"
+_assert_not_contains "sl rebase --abort: does not run sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_not_contains "sl rebase --abort: no review nudge" "/review or /simplify" "$HOOK_STDERR"
+
+for _sl_commit_cmd in \
+  "sl fold --from .^ -m folded" \
+  "sl split --no-rebase ." \
+  "sl graft ." \
+  "sl backout ." \
+  "sl import patch.diff" \
+  "sl histedit --continue"; do
+  _reset_state
+  PATH="$_gate_path" MOCK_SLEY_RC=1 \
+    _run_hook "$PRE_BASH" "$(jq -nc --arg c "$_sl_commit_cmd" '{"tool_input":{"command":$c}}')"
+  _assert_eq "$_sl_commit_cmd: exits 0" "0" "$HOOK_EXIT"
+  _assert_not_contains "$_sl_commit_cmd: does not run sley" "mock-sley=1" "$HOOK_STDERR"
+  _assert_contains "$_sl_commit_cmd: still nudges review" "/review or /simplify" "$HOOK_STDERR"
+done
+
+for _sl_preview_cmd in \
+  "sl rebase --quit" \
+  "sl graft --abort" \
+  "sl graft --dry-run ." \
+  "sl backout --no-commit ." \
+  "sl import --no-commit patch.diff" \
+  "sl histedit --show-plan"; do
+  _reset_state
+  PATH="$_gate_path" MOCK_SLEY_RC=1 \
+    _run_hook "$PRE_BASH" "$(jq -nc --arg c "$_sl_preview_cmd" '{"tool_input":{"command":$c}}')"
+  _assert_not_contains "$_sl_preview_cmd: does not run sley" "mock-sley=1" "$HOOK_STDERR"
+  _assert_not_contains "$_sl_preview_cmd: no review nudge" "/review or /simplify" "$HOOK_STDERR"
+done
 
 _sl_message_mockbin=$(_mock_bin)
 cat >"$_sl_message_mockbin/sl" <<'MOCK'
@@ -250,24 +274,15 @@ mkdir "$_sl_message_repo/.sl"
 _reset_state
 PATH="$_sl_message_mockbin:$_gate_path" MOCK_SLEY_RC=1 MOCK_SL_STATUS_OUT="M file.cpp" \
   _run_hook "$PRE_BASH" "$(jq -nc --arg c "sl --cwd $_sl_message_repo amend -m metadata" '{"tool_input":{"command":$c}}')"
-_assert_eq "sl amend -m with pending changes: gate blocks" "2" "$HOOK_EXIT"
-_assert_contains "sl amend -m with pending changes: runs sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_eq "sl amend -m with pending changes: exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "sl amend -m with pending changes: does not run sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_contains "sl amend -m with pending changes: still nudges review" "/review or /simplify" "$HOOK_STDERR"
 
 _reset_state
 PATH="$_sl_message_mockbin:$_gate_path" MOCK_SLEY_RC=1 MOCK_SL_STATUS_OUT="" \
   _run_hook "$PRE_BASH" "$(jq -nc --arg c "sl --cwd $_sl_message_repo amend -m metadata" '{"tool_input":{"command":$c}}')"
-_assert_not_contains "sl amend -m without pending changes: gate skipped" "mock-sley=1" "$HOOK_STDERR"
-
-# In a non-sapling cwd, the gate must NOT force `_REPO_TYPE=sl`. Otherwise
-# Sapling-specific local `sley_hook_*` functions target a git tree and produce
-# confusing tool errors that the gate would surface as a block.
-_non_sl_dir=$(_tmpdir)
-cd "$_non_sl_dir" || exit 1
-_reset_state
-PATH="$_gate_path" MOCK_SLEY_RC=1 \
-  _run_hook "$PRE_BASH" '{"tool_input":{"command":"sl amend"}}'
-_assert_not_contains "sl amend in non-sapling cwd: no _REPO_TYPE override" \
-  "mock-repo-type=" "$HOOK_STDERR"
+_assert_not_contains "sl amend -m without pending changes: does not run sley" "mock-sley=1" "$HOOK_STDERR"
+_assert_not_contains "sl amend -m without pending changes: no review nudge" "/review or /simplify" "$HOOK_STDERR"
 
 cd "$gate_saved_pwd" || exit 1
 

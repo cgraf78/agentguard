@@ -42,11 +42,12 @@ Use shdeps to locate sourceable files instead of reconstructing install paths:
   `/usr/local/bin/bash` when `/usr/bin/env bash` resolves to Bash 3.
 - `jq` for hook payload parsing and JSON responses.
 - `cgraf78/sley` is a hard runtime dependency for hooks that format files or
-  gate commits. `agent-hook-post-edit` invokes the PATH-visible
+  gate Git commits. `agent-hook-post-edit` invokes the PATH-visible
   `sley hook format-file` CLI, and `agent-hook-pre-bash` invokes
-  `sley ready --fix --quiet --commit` for the pre-commit readiness gate. If the
-  `sley` command is missing when one of those hook paths needs it, Agentguard
-  blocks loudly instead of silently skipping the policy.
+  `sley ready --fix --quiet --commit` for Git pre-commit readiness. Sapling
+  readiness belongs in native Sapling hooks so human and agent workflows share
+  one path. If the `sley` command is missing when one of those hook paths needs
+  it, Agentguard blocks loudly instead of silently skipping the policy.
 
 Optional integrations are detected at runtime: `hm` enables Hive Memory hook
 context, `sl`, `git`, and `jj` enable repository status context, and
@@ -135,10 +136,11 @@ To add a new managed agent runtime:
 ## Base Hook Policy
 
 - `agent-hook-pre-bash` blocks destructive `rm -rf` targets, warns on other
-  `rm -rf` usage, runs `sley ready` once per effective repo for commit-producing
-  Git/Sapling command fragments, and reminds agents to run a review/simplify
-  pass and inspect the final diff before commit-class commands. Metadata-only,
-  abort, dry-run, and no-commit Sapling operations skip the commit reminder.
+  `rm -rf` usage, runs `sley ready` once per effective repo for
+  commit-producing Git command fragments, and reminds agents to run a
+  review/simplify pass and inspect the final diff before Git/Sapling
+  commit-class commands. Metadata-only, abort, dry-run, and no-commit Sapling
+  operations skip the commit reminder.
 - `agent-hook-post-bash` scans command stdout for high-confidence credential
   patterns. Stdout extraction is centralized so agent-specific payload names do
   not leak into the base hook.
