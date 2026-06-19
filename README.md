@@ -50,13 +50,10 @@ dependency manager's contract:
   `agent-hook-pre-bash` re-execs `~/.local/bin/bash`, Homebrew Bash, or
   `/usr/local/bin/bash` when `/usr/bin/env bash` resolves to Bash 3.
 - `jq` for hook payload parsing and JSON responses.
-- `cgraf78/sley` is a hard runtime dependency for hooks that format files or
-  gate Git commits. `agent-hook-post-edit` invokes the PATH-visible
-  `sley hook format-file` CLI, and `agent-hook-pre-bash` invokes
-  `sley ready --fix --quiet --commit` for Git pre-commit readiness. Sapling
-  readiness belongs in native Sapling hooks so human and agent workflows share
-  one path. If the `sley` command is missing when one of those hook paths needs
-  it, Agentguard blocks loudly instead of silently skipping the policy.
+- `cgraf78/sley` is a hard runtime dependency for hooks that format files.
+  `agent-hook-post-edit` invokes the PATH-visible `sley hook format-file` CLI.
+  Commit readiness belongs in native VCS hooks so human and agent workflows
+  share one path.
 
 Optional integrations are detected at runtime: `hm` enables Hive Memory hook
 context, `sl`, `git`, and `jj` enable repository status context, and
@@ -162,7 +159,7 @@ To add a new managed agent runtime:
   room for environment-specific generated-file or readonly-file guards.
 - `agent-hook-post-edit` formats changed files through
   `sley hook format-file`. Broader lint and verification policy stays in the
-  commit gate.
+  native commit hooks.
 - `agent-hook-pre-mcp` guards MCP calls: it blocks a server after repeated
   failures, warns on broad `search_files` calls without a path filter, and
   warns on `knowledge_load` because large docs can consume significant context.
