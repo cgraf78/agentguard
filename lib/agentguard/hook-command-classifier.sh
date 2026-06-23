@@ -1810,7 +1810,7 @@ _skip_execution_wrapper() {
             --eof | --max-lines | --max-chars | --process-slot-var)
             i=$((i + 2))
             ;;
-          --*=* | -[IinPadELs]?*)
+          --*=* | -I?* | -i?* | -n?* | -P?* | -a?* | -d?* | -E?* | -L?* | -s?*)
             ((i++))
             ;;
           --)
@@ -2163,6 +2163,60 @@ _fragment_first_arg() {
   ((i++))
   [ "$i" -lt "${#words[@]}" ] || return 1
   printf '%s' "${words[$i]}"
+}
+
+_fragment_initial_cd_target() {
+  local fragment="$1" word
+  local i=0
+  local -a words=()
+
+  while IFS= read -r word; do
+    words+=("$word")
+  done < <(_fragment_tokens "$fragment")
+  [ "${#words[@]}" -gt 0 ] || return 1
+
+  while [ "$i" -lt "${#words[@]}" ]; do
+    word="$(_clean_command_word "${words[$i]}")"
+    case "$word" in
+      [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
+        ((i++))
+        ;;
+      command | builtin)
+        ((i++))
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  [ "$i" -lt "${#words[@]}" ] || return 1
+  word="$(_clean_command_word "${words[$i]}")"
+  [ "$word" = "cd" ] || return 1
+  ((i++))
+
+  while [ "$i" -lt "${#words[@]}" ]; do
+    word="$(_clean_command_word "${words[$i]}")"
+    case "$word" in
+      --)
+        ((i++))
+        break
+        ;;
+      -L | -P | -e)
+        ((i++))
+        ;;
+      -*)
+        return 1
+        ;;
+      *)
+        printf '%s' "$word"
+        return 0
+        ;;
+    esac
+  done
+
+  [ "$i" -lt "${#words[@]}" ] || return 1
+  _clean_command_word "${words[$i]}"
 }
 
 _unescape_nested_shell_text() {

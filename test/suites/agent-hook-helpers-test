@@ -1426,41 +1426,88 @@ _assert_eq "parse_command: AGENTGUARD_CMD_LINE1 strips leading whitespace" "0" "
 echo ""
 echo "=== hook-helpers: _hook_cd_to_target ==="
 
+_cd_test_phys_dir() {
+  (cd -- "$1" && pwd -P)
+}
+
 # cd command changes to target dir
 MOCK_CD_DIR=$(_tmpdir)
+MOCK_CD_DIR_PHYS=$(_cd_test_phys_dir "$MOCK_CD_DIR")
 (
   source "$HELPERS"
   AGENTGUARD_CMD_TRIMMED="cd $MOCK_CD_DIR && ls"
   AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
   _hook_cd_to_target
-  [ "$PWD" = "$MOCK_CD_DIR" ] && echo "PASS" || echo "FAIL: $PWD"
+  [ "$(pwd -P)" = "$MOCK_CD_DIR_PHYS" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
 ) | grep -q PASS
 _assert_eq "cd_to_target: changes to target dir" "0" "$?"
+
+MOCK_CD_SPACE_DIR="$(_tmpdir)/dir with spaces"
+mkdir -p "$MOCK_CD_SPACE_DIR"
+MOCK_CD_SPACE_DIR_PHYS=$(_cd_test_phys_dir "$MOCK_CD_SPACE_DIR")
+(
+  source "$HELPERS"
+  AGENTGUARD_CMD_TRIMMED="cd \"$MOCK_CD_SPACE_DIR\" && pwd"
+  AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
+  _hook_cd_to_target
+  [ "$(pwd -P)" = "$MOCK_CD_SPACE_DIR_PHYS" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
+) | grep -q PASS
+_assert_eq "cd_to_target: quoted path with spaces" "0" "$?"
+
+(
+  source "$HELPERS"
+  AGENTGUARD_CMD_TRIMMED="command cd -- \"$MOCK_CD_SPACE_DIR\" && pwd"
+  AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
+  _hook_cd_to_target
+  [ "$(pwd -P)" = "$MOCK_CD_SPACE_DIR_PHYS" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
+) | grep -q PASS
+_assert_eq "cd_to_target: command prefix and --" "0" "$?"
+
+(
+  source "$HELPERS"
+  original_pwd="$(pwd -P)"
+  AGENTGUARD_CMD_TRIMMED="./cd \"$MOCK_CD_SPACE_DIR\" && pwd"
+  AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
+  _hook_cd_to_target
+  [ "$(pwd -P)" = "$original_pwd" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
+) | grep -q PASS
+_assert_eq "cd_to_target: path-qualified cd stays put" "0" "$?"
 
 # Non-cd command stays in current dir
 (
   source "$HELPERS"
-  original_pwd="$PWD"
+  original_pwd="$(pwd -P)"
   AGENTGUARD_CMD_TRIMMED="ls -la /tmp"
   AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
   _hook_cd_to_target
-  [ "$PWD" = "$original_pwd" ] && echo "PASS" || echo "FAIL: $PWD"
+  [ "$(pwd -P)" = "$original_pwd" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
 ) | grep -q PASS
 _assert_eq "cd_to_target: non-cd stays put" "0" "$?"
+
+(
+  source "$HELPERS"
+  original_pwd="$(pwd -P)"
+  AGENTGUARD_CMD_TRIMMED="echo \$(cd \"$MOCK_CD_SPACE_DIR\" && pwd)"
+  AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
+  _hook_cd_to_target
+  [ "$(pwd -P)" = "$original_pwd" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
+) | grep -q PASS
+_assert_eq "cd_to_target: nested cd does not change hook cwd" "0" "$?"
 
 # cd to nonexistent dir stays in current dir
 (
   source "$HELPERS"
-  original_pwd="$PWD"
+  original_pwd="$(pwd -P)"
   AGENTGUARD_CMD_TRIMMED="cd /nonexistent_dir_xyz_999"
   AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
   _hook_cd_to_target
-  [ "$PWD" = "$original_pwd" ] && echo "PASS" || echo "FAIL: $PWD"
+  [ "$(pwd -P)" = "$original_pwd" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
 ) | grep -q PASS
 _assert_eq "cd_to_target: nonexistent dir stays put" "0" "$?"
 
 # cd with tilde expands to HOME
 MOCK_CD_HOME_DIR=$(mktemp -d "$HOME/.agent-hook-test-tilde.XXXXXX")
+MOCK_CD_HOME_DIR_PHYS=$(_cd_test_phys_dir "$MOCK_CD_HOME_DIR")
 MOCK_CD_RELATIVE="${MOCK_CD_HOME_DIR#"$HOME"}"
 (
   source "$HELPERS"
@@ -1468,7 +1515,7 @@ MOCK_CD_RELATIVE="${MOCK_CD_HOME_DIR#"$HOME"}"
   AGENTGUARD_CMD_TRIMMED="cd ~${MOCK_CD_RELATIVE}"
   AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
   _hook_cd_to_target
-  [ "$PWD" = "$MOCK_CD_HOME_DIR" ] && echo "PASS" || echo "FAIL: $PWD"
+  [ "$(pwd -P)" = "$MOCK_CD_HOME_DIR_PHYS" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
 ) | grep -q PASS
 _assert_eq "cd_to_target: tilde expansion" "0" "$?"
 rm -rf "$MOCK_CD_HOME_DIR"
