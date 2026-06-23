@@ -332,16 +332,25 @@ _hook_parse_mcp() {
   _HOOK_MCP_FAIL_FILE="$_HOOK_STATE_DIR/mcp-failures-$_HOOK_MCP_SERVER"
 }
 
-# Parses a cd target from AGENTGUARD_CMD_TRIMMED and changes to it. Used by
+# Uses the command classifier to change into a leading `cd` target. Used by
 # pre-bash and post-bash local `-work` variants to resolve repo context when
-# the agent's command starts with cd. No-op if the command doesn't
-# start with cd or the directory doesn't exist.
+# the agent's command starts with cd. No-op if the first top-level command
+# fragment is not cd or the directory doesn't exist.
 _hook_cd_to_target() {
-  local target_dir
-  target_dir=$(printf '%s' "$AGENTGUARD_CMD_LINE1" | sed -n 's/^cd[[:space:]]\{1,\}\([^[:space:];&]\{1,\}\).*/\1/p')
-  [ -z "$target_dir" ] && return
-  target_dir="${target_dir/#\~/$HOME}"
-  [ -d "$target_dir" ] && cd "$target_dir" || return 0
+  local fragment="" fragments target_dir
+
+  if [ "$(type -t _hook_command_fragments)" != "function" ]; then
+    # shellcheck source=hook-command-classifier.sh
+    source "$_AGENTGUARD_LIB_DIR/hook-command-classifier.sh" || return 0
+  fi
+
+  fragments="$(_hook_command_fragments "$AGENTGUARD_CMD_TRIMMED")" || return 0
+  IFS= read -r fragment <<<"$fragments"
+  [ -n "$fragment" ] || return 0
+
+  target_dir=$(_fragment_initial_cd_target "$fragment") || return 0
+  target_dir="$(_hook_resolve_dir "$PWD" "$target_dir")" || return 0
+  cd "$target_dir" || return 0
 }
 
 # --- Hive Memory integration ---
