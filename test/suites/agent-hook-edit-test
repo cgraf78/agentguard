@@ -175,6 +175,7 @@ _assert_eq "churn 5: exit 0 (warn doesn't block)" "0" "$HOOK_EXIT"
 _assert_contains "churn 5: WARNING in stderr" "WARNING" "$HOOK_STDERR"
 _assert_contains "churn 5: mentions count" "5 times" "$HOOK_STDERR"
 _assert_contains "churn 5: shows filename" "f.py" "$HOOK_STDERR"
+_assert_contains "churn 5: shows bypass" "AGENTGUARD_EDIT_CHURN_BYPASS=1" "$HOOK_STDERR"
 
 echo "=== edit churn: block at threshold ==="
 
@@ -188,6 +189,7 @@ _assert_eq "churn 10: exit 2 (blocked)" "2" "$HOOK_EXIT"
 _assert_contains "churn 10: BLOCKED in stderr" "BLOCKED" "$HOOK_STDERR"
 _assert_contains "churn 10: mentions count" "10 times" "$HOOK_STDERR"
 _assert_contains "churn 10: shows filename" "f.py" "$HOOK_STDERR"
+_assert_contains "churn 10: shows bypass" "AGENTGUARD_EDIT_CHURN_BYPASS=1" "$HOOK_STDERR"
 
 echo "=== edit churn: bypass ==="
 
@@ -206,6 +208,22 @@ rm -f "$out_file" "$err_file"
 _assert_eq "churn bypass: exit 0" "0" "$HOOK_EXIT"
 _assert_not_contains "churn bypass: no warning" "WARNING" "$HOOK_STDERR"
 _assert_not_contains "churn bypass: no block" "BLOCKED" "$HOOK_STDERR"
+
+HOOK_EXIT=0
+out_file=$(mktemp "$TEST_TMPDIR/out.XXXXXX")
+err_file=$(mktemp "$TEST_TMPDIR/err.XXXXXX")
+printf '%s' '{"tool_input":{"file_path":"/tmp/test/f.py"}}' |
+  AGENTGUARD_SESSION_ID="$TEST_SID" \
+    AGENTGUARD_NAME="agent" \
+    TMPDIR="$TEST_TMPDIR" \
+    CODEX_THREAD_ID="" \
+    AGENTGUARD_EDIT_CHURN_BYPASS=true \
+    "$PRE_EDIT" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
+HOOK_STDERR=$(cat "$err_file")
+rm -f "$out_file" "$err_file"
+_assert_eq "churn bypass true: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "churn bypass true: no warning" "WARNING" "$HOOK_STDERR"
+_assert_not_contains "churn bypass true: no block" "BLOCKED" "$HOOK_STDERR"
 
 echo "=== edit churn: first edit has no warning ==="
 

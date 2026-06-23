@@ -16,10 +16,11 @@ export AGENTGUARD_PROCESS_DETECT=0
 # it explicitly in their own subshell.
 unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID \
   CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR
-# Dotfiles and other consumers may tune guard thresholds globally. Test default
-# behavior against repo defaults; individual tests set custom thresholds where
-# that contract is under test.
-unset AGENTGUARD_EDIT_CHURN_WARN AGENTGUARD_EDIT_CHURN_BLOCK
+# Dotfiles and other consumers may tune or bypass edit-churn globally. Test
+# default behavior against repo defaults; individual tests set custom values
+# where that contract is under test.
+unset AGENTGUARD_EDIT_CHURN_WARN AGENTGUARD_EDIT_CHURN_BLOCK \
+  AGENTGUARD_EDIT_CHURN_BYPASS
 # A machine that protects a bare-Git work tree exports these (e.g. a dotfiles
 # bare repo). Scrub them so non-protected fixtures stay hermetic regardless of
 # the running session; the protected-bare suites set them explicitly via
