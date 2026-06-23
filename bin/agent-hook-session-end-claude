@@ -3,6 +3,12 @@
 # Sourced by agent-hook-session-end via _hook_source_agent.
 # Auto-names untitled sessions using claude-session-name.
 
+_AGENTGUARD_CUSTOM_TITLE_JQ='try fromjson catch empty | select(.type == "custom-title")'
+
+_agentguard_transcript_has_custom_title() {
+  jq -e -R "$_AGENTGUARD_CUSTOM_TITLE_JQ" "$1" >/dev/null 2>&1
+}
+
 _agentguard_claude_session_end() {
   # The base hook exports these before sourcing agent extensions; keep local
   # fallbacks so this file also lint-checks and no-ops when run directly.
@@ -10,17 +16,29 @@ _agentguard_claude_session_end() {
   [ -z "$transcript_path" ] && return 0
 
   # Already titled — skip
-  grep -q '"custom-title"' "$transcript_path" 2>/dev/null && return 0
+  _agentguard_transcript_has_custom_title "$transcript_path" && return 0
 
-  # Fire-and-forget: nohup so naming survives hook exit, timeout as a safeguard
+  local timeout_prefix=()
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_prefix=(timeout 60)
+  elif command -v gtimeout >/dev/null 2>&1; then
+    timeout_prefix=(gtimeout 60)
+  fi
+
+  # Fire-and-forget: nohup so naming survives hook exit, with a timeout when
+  # the platform provides one.
   # shellcheck disable=SC2016
-  nohup timeout 60 bash -c '
+  nohup "${timeout_prefix[@]}" bash -c '
+  transcript_has_custom_title() {
+    jq -e -R "$2" "$1" >/dev/null 2>&1
+  }
+
   NAME=$(claude-session-name "$1")
   [ -z "$NAME" ] && exit 0
-  grep -q "\"custom-title\"" "$1" 2>/dev/null && exit 0
+  transcript_has_custom_title "$1" "$3" && exit 0
   jq -nc --arg t "$NAME" --arg s "$2" \
     "{\"type\":\"custom-title\",\"customTitle\":\$t,\"sessionId\":\$s}" >> "$1"
-' _ "$transcript_path" "$session_id" >/dev/null 2>&1 &
+' _ "$transcript_path" "$session_id" "$_AGENTGUARD_CUSTOM_TITLE_JQ" >/dev/null 2>&1 &
   disown
 }
 

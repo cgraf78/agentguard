@@ -80,6 +80,71 @@ _assert_not_contains "stop: notification output is suppressed" \
   "notification noise" "$stop_out"
 
 echo ""
+echo "=== session-end: Claude structured title detection ==="
+
+_session_end_title_count() {
+  jq -rc -R '
+    try fromjson catch empty
+    | select(.type == "custom-title")
+  ' "$1" 2>/dev/null | wc -l | tr -d ' '
+}
+
+_wait_for_session_end_title_count() {
+  local transcript="$1" expected="$2" count=0
+
+  for _ in {1..50}; do
+    count=$(_session_end_title_count "$transcript")
+    [ "$count" = "$expected" ] && break
+    sleep 0.1
+  done
+
+  printf '%s\n' "$count"
+}
+
+MOCK_END_DIR=$(_tmpdir)
+_install_hook_fixture "$MOCK_END_DIR" agent-hook-session-end agent-hook-session-end-claude
+MOCK_END="$MOCK_END_DIR/bin/agent-hook-session-end"
+cat >"$MOCK_END_DIR/bin/claude-session-name" <<'MOCK'
+#!/usr/bin/env bash
+cat >/dev/null
+printf '%s\n' "structured-title"
+MOCK
+chmod +x "$MOCK_END_DIR/bin/claude-session-name"
+
+SESSION_END_TRANSCRIPT="$MOCK_END_DIR/transcript.jsonl"
+cat >"$SESSION_END_TRANSCRIPT" <<'JSONL'
+{"type":"user","message":{"content":[{"type":"custom-title","text":"Please inspect the custom-title behavior."}]}}
+JSONL
+
+printf '{"session_id":"sess-structured","transcript_path":"%s"}' "$SESSION_END_TRANSCRIPT" |
+  AGENTGUARD_SESSION_ID="$TEST_SID" \
+    TMPDIR="$TEST_TMPDIR" \
+    AGENTGUARD_NAME="claude" \
+    PATH="$MOCK_END_DIR/bin:$PATH" \
+    "$MOCK_END" >/dev/null 2>/dev/null
+
+title_count=$(_wait_for_session_end_title_count "$SESSION_END_TRANSCRIPT" 1)
+_assert_eq "session-end: user text mentioning custom-title does not suppress naming" \
+  "1" "$title_count"
+
+SESSION_END_TITLED_TRANSCRIPT="$MOCK_END_DIR/titled-transcript.jsonl"
+cat >"$SESSION_END_TITLED_TRANSCRIPT" <<'JSONL'
+{"type":"user","message":{"content":"Existing title should be preserved."}}
+{"type":"custom-title","customTitle":"existing-title","sessionId":"sess-titled"}
+JSONL
+
+printf '{"session_id":"sess-titled","transcript_path":"%s"}' "$SESSION_END_TITLED_TRANSCRIPT" |
+  AGENTGUARD_SESSION_ID="$TEST_SID" \
+    TMPDIR="$TEST_TMPDIR" \
+    AGENTGUARD_NAME="claude" \
+    PATH="$MOCK_END_DIR/bin:$PATH" \
+    "$MOCK_END" >/dev/null 2>/dev/null
+
+title_count=$(_session_end_title_count "$SESSION_END_TITLED_TRANSCRIPT")
+_assert_eq "session-end: real custom-title event still suppresses naming" \
+  "1" "$title_count"
+
+echo ""
 echo "=== claude-session-name ==="
 
 SESSION_NAME_DIR=$(_tmpdir)
