@@ -233,6 +233,21 @@ _assert_eq "churn first: exit 0" "0" "$HOOK_EXIT"
 _assert_not_contains "churn first: no WARNING" "WARNING" "$HOOK_STDERR"
 _assert_not_contains "churn first: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
 
+echo "=== edit churn: corrupt state resets cleanly ==="
+
+_reset_state
+mkdir -p "$(dirname "$(_churn_file "/tmp/test/corrupt.py")")"
+printf '%s\n' "not-a-number" >"$(_churn_file "/tmp/test/corrupt.py")"
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/tmp/test/corrupt.py"}}'
+_assert_eq "churn corrupt: pre-edit exits cleanly" "0" "$HOOK_EXIT"
+_assert_not_contains "churn corrupt: no arithmetic diagnostic" "integer expression" "$HOOK_STDERR"
+_assert_not_contains "churn corrupt: no warning" "WARNING" "$HOOK_STDERR"
+_assert_not_contains "churn corrupt: no block" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$POST_EDIT" '{"tool_input":{"file_path":"/tmp/test/corrupt.py"}}'
+_assert_file_content "churn corrupt: post-edit resets to 1" "1" \
+  "$(_churn_file "/tmp/test/corrupt.py")"
+
 echo "=== edit churn: custom thresholds ==="
 
 _reset_state

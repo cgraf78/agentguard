@@ -108,6 +108,62 @@ _assert_contains "hook_context: has second line" "line two" "$ctx_out"
 line_count=$(printf '%s\n' "$ctx_out" | wc -l)
 _assert_eq "hook_context: two lines" "2" "$(echo "$line_count" | tr -d ' ')"
 
+echo ""
+echo "=== hook-helpers: state counters ==="
+
+counter_dir=$(_tmpdir)
+counter_file="$counter_dir/state/counter"
+counter_out=$(
+  source "$HELPERS"
+  printf 'missing=%s\n' "$(_hook_counter_read "$counter_file")"
+  mkdir -p "${counter_file%/*}"
+  printf '%s\n' "garbage" >"$counter_file"
+  printf 'garbage=%s\n' "$(_hook_counter_read "$counter_file")"
+  _hook_counter_increment "$counter_file"
+  printf 'after_garbage=%s\n' "$(cat "$counter_file")"
+  _hook_counter_increment "$counter_file"
+  printf 'after_increment=%s\n' "$(cat "$counter_file")"
+  _hook_counter_reset "$counter_file"
+  [ ! -e "$counter_file" ] && printf 'reset=missing\n'
+)
+_assert_contains "hook counter: missing reads zero" "missing=0" "$counter_out"
+_assert_contains "hook counter: garbage reads zero" "garbage=0" "$counter_out"
+_assert_contains "hook counter: increment resets garbage to one" "after_garbage=1" "$counter_out"
+_assert_contains "hook counter: increment advances numeric count" "after_increment=2" "$counter_out"
+_assert_contains "hook counter: reset removes file" "reset=missing" "$counter_out"
+
+echo ""
+echo "=== hook-helpers: state markers ==="
+
+marker_dir=$(_tmpdir)
+marker_out=$(
+  TMPDIR="$marker_dir" AGENTGUARD_SESSION_ID="marker-session" bash -c '
+    source "$1"
+    _hook_once_per_session "warn-once" && printf "session_first=yes\n"
+    _hook_once_per_session "warn-once" || printf "session_second=no\n"
+    [ -e "$_HOOK_STATE_DIR/warn-once" ] && printf "session_marker=yes\n"
+    _hook_once_per_prompt "edit-reminder" && printf "prompt_first=yes\n"
+    _hook_once_per_prompt "edit-reminder" || printf "prompt_second=no\n"
+    _hook_prompt_cycle_reset
+    _hook_once_per_prompt "edit-reminder" && printf "prompt_after_reset=yes\n"
+  ' _ "$HELPERS"
+)
+_assert_contains "hook marker: session marker first call passes" \
+  "session_first=yes" "$marker_out"
+_assert_contains "hook marker: session marker second call stops" \
+  "session_second=no" "$marker_out"
+_assert_contains "hook marker: session marker file exists" \
+  "session_marker=yes" "$marker_out"
+_assert_contains "hook marker: prompt marker first call passes" \
+  "prompt_first=yes" "$marker_out"
+_assert_contains "hook marker: prompt marker second call stops" \
+  "prompt_second=no" "$marker_out"
+_assert_contains "hook marker: prompt reset re-arms marker" \
+  "prompt_after_reset=yes" "$marker_out"
+
+echo ""
+echo "=== hook-helpers: PATH fallback ==="
+
 path_home=$(_tmpdir)
 mkdir -p "$path_home/.local/bin"
 cat >"$path_home/.local/bin/sley" <<'MOCK'

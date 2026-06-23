@@ -95,8 +95,10 @@ Each hook emits one JSON response through `_hook_finish`.
 - tool payload adapters: `_hook_tool_stdout`
 - Hive Memory adapters: `_hook_hm_session_start`, `_hook_hm_prompt_submit`,
   `_hook_hm_tool_complete`, `_hook_hm_stop`
-- prompt-cycle state: `_hook_prompt_cycle_reset`, `_hook_once_per_prompt`
-- edit-churn state: `_hook_edit_churn_file`
+- once markers: `_hook_prompt_cycle_reset`, `_hook_once_per_prompt`,
+  `_hook_once_per_session`
+- state helpers: `_hook_edit_churn_file`, `_hook_counter_read`,
+  `_hook_counter_increment`, `_hook_counter_reset`
 - target directory setup: `_hook_cd_to_target`
 - extension loading: `_hook_source_agent`, `_hook_source_work`
 - final JSON emission: `_hook_finish`

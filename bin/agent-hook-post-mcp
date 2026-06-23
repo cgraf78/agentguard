@@ -35,12 +35,9 @@ _hook_parse_mcp
 is_error=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_result_is_error // false')
 
 if [ "$is_error" = "true" ]; then
-  mkdir -p "$_HOOK_STATE_DIR"
-  count=$(cat "$_HOOK_MCP_FAIL_FILE" 2>/dev/null || echo 0)
-  case "$count" in '' | *[!0-9]*) count=0 ;; esac
-  echo $((count + 1)) >"$_HOOK_MCP_FAIL_FILE"
+  _hook_counter_increment "$_HOOK_MCP_FAIL_FILE"
 else
-  rm -f "$_HOOK_MCP_FAIL_FILE" 2>/dev/null
+  _hook_counter_reset "$_HOOK_MCP_FAIL_FILE"
 fi
 
 # MCP success/failure is another tool boundary; `hm` owns any memory refresh.
