@@ -27,7 +27,8 @@ another tool that follows the same hook protocol.
   harnesses that source each dependency's shell API uniformly.
 - `agent-hook-pre-edit` warns after `AGENTGUARD_EDIT_CHURN_WARN` edits to a
   file and blocks after `AGENTGUARD_EDIT_CHURN_BLOCK` edits. Defaults are `5`
-  and `10`.
+  and `10`. Set `AGENTGUARD_EDIT_CHURN_BYPASS=1` to bypass the churn warning
+  and block for a deliberate edit pass.
 - `agent-hook-pre-bash` can guard a broad bare-Git work tree when an integration
   sets `AGENTGUARD_PROTECTED_BARE_GIT_DIR`. Optional companion settings are
   `AGENTGUARD_PROTECTED_BARE_GIT_WORK_TREE` (defaults to `$HOME`),
@@ -112,15 +113,18 @@ Each hook emits one JSON response through `_hook_finish`.
 - Hive Memory adapters: `_hook_hm_session_start`, `_hook_hm_prompt_submit`,
   `_hook_hm_tool_complete`, `_hook_hm_stop`
 - prompt-cycle state: `_hook_prompt_cycle_reset`, `_hook_once_per_prompt`
+- edit-churn state: `_hook_edit_churn_file`
 - target directory setup: `_hook_cd_to_target`
 - extension loading: `_hook_source_agent`, `_hook_source_work`
 - final JSON emission: `_hook_finish`
 
-The per-session state directory is computed once at source time. A neutral
-`AGENTGUARD_SESSION_ID` wins when a launcher supplies one. Otherwise, runtime
-session ids are preferred when available: Codex uses `CODEX_THREAD_ID`, Claude
-uses `CLAUDE_CODE_CURRENT_SESSION_ID`, Gemini uses `gemini-$PPID`, and unknown
-agents fall back to `$$`.
+The per-session state directory is computed once at source time and refreshed
+after hook JSON is read. A neutral `AGENTGUARD_SESSION_ID` wins when a launcher
+supplies one. Managed Codex hooks prefer JSON `session_id` after stdin is
+available, because nested Codex launches can inherit an outer
+`CODEX_THREAD_ID`. Without JSON, Codex uses `CODEX_THREAD_ID` or its parent
+process key, Claude uses `CLAUDE_CODE_CURRENT_SESSION_ID`, Gemini uses
+`gemini-$PPID`, and unknown agents fall back to `$$`.
 
 Launchers should set `AGENTGUARD_NAME` with `AGENTGUARD_SESSION_ID` when they know
 the concrete agent. `AGENTGUARD_SESSION_ID` alone falls back to the generic
@@ -155,14 +159,17 @@ To add a new managed agent runtime:
   patterns. Stdout extraction is centralized so agent-specific payload names do
   not leak into the base hook.
 - `agent-hook-pre-edit` parses edited paths, reminds once per user prompt on
-  code/config edits to apply AGENTS.md design/workflow guidance, and leaves
-  room for environment-specific generated-file or readonly-file guards.
+  code/config edits to apply AGENTS.md design/workflow guidance, warns or
+  blocks repeated edits to the same file unless `AGENTGUARD_EDIT_CHURN_BYPASS`
+  is enabled, and leaves room for environment-specific generated-file or
+  readonly-file guards.
 - `agent-hook-post-edit` formats changed files through
   `sley hook format-file`. Broader lint and verification policy stays in the
   native commit hooks.
 - `agent-hook-pre-mcp` guards MCP calls: it blocks a server after repeated
-  failures, warns on broad `search_files` calls without a path filter, and
-  warns on `knowledge_load` because large docs can consume significant context.
+  failures, warns on exact `search_files` leaf-tool calls without a path
+  filter, and warns once on exact `knowledge_load` leaf-tool calls because
+  large docs can consume significant context.
 - `agent-hook-post-mcp` tracks MCP failure streaks for that circuit breaker.
 - `agent-hook-session-start` detects repo type in `sl`, `git`, then `jj` order,
   reports uncommitted changes, warns on high disk usage, and injects Hive Memory

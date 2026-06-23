@@ -70,18 +70,20 @@ _pre_edit_comment_reminder() {
 }
 
 # Edit churn guard
-while IFS= read -r _fp; do
-  [ -n "$_fp" ] || continue
-  _churn_file="$_HOOK_STATE_DIR/edit-churn/$(printf '%s' "$_fp" | cksum | cut -d' ' -f1)"
-  if [ -f "$_churn_file" ]; then
-    _count=$(cat "$_churn_file")
-    if [ "${_count:-0}" -ge "${AGENTGUARD_EDIT_CHURN_BLOCK:-10}" ]; then
-      _hook_block "'$(basename "$_fp")' has been edited $_count times this session. Step back and rethink the approach instead of continuing to patch."
-    elif [ "${_count:-0}" -ge "${AGENTGUARD_EDIT_CHURN_WARN:-5}" ]; then
-      _hook_warn "'$(basename "$_fp")' has been edited $_count times this session. Consider whether you're making progress or going in circles."
+if ! _hook_flag_enabled "${AGENTGUARD_EDIT_CHURN_BYPASS:-}"; then
+  while IFS= read -r _fp; do
+    [ -n "$_fp" ] || continue
+    _churn_file=$(_hook_edit_churn_file "$_fp")
+    if [ -f "$_churn_file" ]; then
+      _count=$(cat "$_churn_file")
+      if [ "${_count:-0}" -ge "${AGENTGUARD_EDIT_CHURN_BLOCK:-10}" ]; then
+        _hook_block "'$(basename "$_fp")' has been edited $_count times this session. Step back and rethink the approach, or set AGENTGUARD_EDIT_CHURN_BYPASS=1 for a deliberate edit pass."
+      elif [ "${_count:-0}" -ge "${AGENTGUARD_EDIT_CHURN_WARN:-5}" ]; then
+        _hook_warn "'$(basename "$_fp")' has been edited $_count times this session. Consider whether you're making progress; set AGENTGUARD_EDIT_CHURN_BYPASS=1 for a deliberate edit pass."
+      fi
     fi
-  fi
-done <<<"$AGENTGUARD_EDIT_FILES"
+  done <<<"$AGENTGUARD_EDIT_FILES"
+fi
 
 # Block edits to secrets files — credentials, keys, and env files must not be
 # modified by an agent without explicit human review.

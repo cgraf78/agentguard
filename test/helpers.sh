@@ -180,6 +180,12 @@ _assert_file_content() {
   fi
 }
 
+_stdin_contains() {
+  local expected="$1" actual
+  actual=$(cat)
+  [[ "$actual" == *"$expected"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # Temp directory management
 # ---------------------------------------------------------------------------

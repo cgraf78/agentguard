@@ -20,9 +20,8 @@
 # produce Codex-shaped hook JSON even before regenerated config can inject
 # AGENTGUARD_NAME=codex explicitly.
 
-_agent_name_from_process_tree() {
-  [ "${AGENTGUARD_PROCESS_DETECT:-1}" != "0" ] || return 1
-
+_agent_process_tree_pid() {
+  local target="$1"
   local pid parent comm
   pid="$$"
   while [ -n "$pid" ] && [ "$pid" != "0" ]; do
@@ -33,8 +32,8 @@ _agent_name_from_process_tree() {
     # corrupting agent identity. Process identity must come from the binary
     # name, not from what the binary was asked to do.
     comm=$(ps -o comm= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//') || break
-    if [ "$(basename "$comm" 2>/dev/null)" = "codex" ]; then
-      echo "codex"
+    if [ "$(basename "$comm" 2>/dev/null)" = "$target" ]; then
+      echo "$pid"
       return 0
     fi
 
@@ -42,6 +41,21 @@ _agent_name_from_process_tree() {
     [ "$parent" != "$pid" ] || break
     pid="$parent"
   done
+
+  return 1
+}
+
+_agent_codex_process_pid() {
+  _agent_process_tree_pid codex
+}
+
+_agent_name_from_process_tree() {
+  [ "${AGENTGUARD_PROCESS_DETECT:-1}" != "0" ] || return 1
+
+  if _agent_codex_process_pid >/dev/null; then
+    echo "codex"
+    return 0
+  fi
 
   return 1
 }

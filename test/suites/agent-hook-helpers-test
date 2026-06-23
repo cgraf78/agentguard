@@ -45,13 +45,13 @@ HELPERS="$AGENTGUARD_ROOT/lib/agentguard/hook-helpers.sh"
   source "$HELPERS"
   _hook_block "test reason"
   [ "$_HOOK_BLOCKED" = 1 ] && echo "PASS" || echo "FAIL"
-) 2>/dev/null | grep -q PASS
+) 2>/dev/null | _stdin_contains PASS
 _assert_eq "hook_block: sets flag" "0" "$?"
 
 (
   source "$HELPERS"
   _hook_block "test reason" 2>&1
-) | grep -q 'BLOCKED: test reason'
+) | _stdin_contains 'BLOCKED: test reason'
 _assert_eq "hook_block: prints BLOCKED to stderr" "0" "$?"
 
 # _hook_warn prints WARNING to stderr, does not block
@@ -59,13 +59,13 @@ _assert_eq "hook_block: prints BLOCKED to stderr" "0" "$?"
   source "$HELPERS"
   _hook_warn "be careful"
   [ -z "$_HOOK_BLOCKED" ] && echo "PASS" || echo "FAIL"
-) 2>/dev/null | grep -q PASS
+) 2>/dev/null | _stdin_contains PASS
 _assert_eq "hook_warn: does not set block flag" "0" "$?"
 
 (
   source "$HELPERS"
   _hook_warn "be careful" 2>&1
-) | grep -q 'WARNING: be careful'
+) | _stdin_contains 'WARNING: be careful'
 _assert_eq "hook_warn: prints WARNING to stderr" "0" "$?"
 
 warn_ctx=$(
@@ -80,13 +80,13 @@ _assert_eq "hook_warn: adds hook context" "be careful" "$warn_ctx"
   source "$HELPERS"
   _hook_remind "check something"
   [ -z "$_HOOK_BLOCKED" ] && echo "PASS" || echo "FAIL"
-) 2>/dev/null | grep -q PASS
+) 2>/dev/null | _stdin_contains PASS
 _assert_eq "hook_remind: does not set block flag" "0" "$?"
 
 (
   source "$HELPERS"
   _hook_remind "check something" 2>&1
-) | grep -q 'REMINDER: check something'
+) | _stdin_contains 'REMINDER: check something'
 _assert_eq "hook_remind: prints REMINDER to stderr" "0" "$?"
 
 remind_ctx=$(
@@ -148,7 +148,7 @@ _assert_contains "hook PATH fallback: empty PATH keeps system tools" \
   else
     echo "FAIL: $_HOOK_STATE_DIR"
   fi
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "state_dir: neutral session id wins" "0" "$?"
 
 # _HOOK_STATE_DIR computed at source time (Claude env vars)
@@ -159,7 +159,7 @@ _assert_eq "state_dir: neutral session id wins" "0" "$?"
   TMPDIR="/tmp/test"
   source "$HELPERS"
   [ "$_HOOK_STATE_DIR" = "/tmp/test/hook-state/test123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "state_dir: claude env vars" "0" "$?"
 
 # _HOOK_STATE_DIR uses CODEX_THREAD_ID before Claude-compatible vars. Current
@@ -172,7 +172,7 @@ _assert_eq "state_dir: claude env vars" "0" "$?"
   TMPDIR="/tmp/test"
   source "$HELPERS"
   [ "$_HOOK_STATE_DIR" = "/tmp/test/hook-state/codex-thread-123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "state_dir: codex thread id wins over claude env" "0" "$?"
 
 # Codex hook subprocesses do not always inherit a runtime session id. Managed
@@ -187,7 +187,7 @@ _assert_eq "state_dir: codex thread id wins over claude env" "0" "$?"
     source "$1"
     [[ "$_HOOK_STATE_DIR" == "/tmp/codex-process-test/hook-state/codex-"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
   ' _ "$HELPERS"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "state_dir: codex process key fallback" "0" "$?"
 
 # detect.sh hardened agent attribution so an ancestor whose argv merely mentions
@@ -238,7 +238,7 @@ chmod +x "$state_mock_ps_args_dir/ps"
       echo "PASS"
     fi
   ' _ "$state_mock_ps_args_dir" "$HELPERS"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "codex_process_key: argv mention is not misattributed to codex" "0" "$?"
 
 # If the hook runner provides a JSON session id, prefer that precise key over
@@ -250,7 +250,7 @@ _assert_eq "codex_process_key: argv mention is not misattributed to codex" "0" "
   _HOOK_INPUT='{"session_id":"codex-json-session"}'
   source "$HELPERS"
   [ "$_HOOK_STATE_DIR" = "/tmp/codex-json-test/hook-state/codex-json-session" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "state_dir: codex JSON session id wins over process fallback" "0" "$?"
 
 # Managed Codex configs often derive AGENTGUARD_SESSION_ID from
@@ -264,7 +264,7 @@ _assert_eq "state_dir: codex JSON session id wins over process fallback" "0" "$?
   _HOOK_INPUT='{"session_id":"inner-session"}'
   source "$HELPERS"
   [ "$_HOOK_STATE_DIR" = "/tmp/codex-nested-test/hook-state/inner-session" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "state_dir: codex JSON session id beats inherited env ids" "0" "$?"
 
 # _HOOK_STATE_DIR uses TMPDIR for the tmp root
@@ -275,7 +275,7 @@ _assert_eq "state_dir: codex JSON session id beats inherited env ids" "0" "$?"
   TMPDIR="/tmp/custom"
   source "$HELPERS"
   [[ "$_HOOK_STATE_DIR" == "/tmp/custom/hook-state/"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "state_dir: TMPDIR fallback" "0" "$?"
 
 # _HOOK_STATE_DIR falls back to /tmp and PID when no env vars set
@@ -284,7 +284,7 @@ _assert_eq "state_dir: TMPDIR fallback" "0" "$?"
     CLAUDE_CODE_CURRENT_SESSION_ID TMPDIR 2>/dev/null
   source "$HELPERS"
   [[ "$_HOOK_STATE_DIR" == "/tmp/hook-state/"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "state_dir: falls back to /tmp and PID" "0" "$?"
 
 # _HOOK_STATE_DIR uses gemini-$PPID when GEMINI_PROJECT_DIR is set
@@ -296,7 +296,7 @@ _assert_eq "state_dir: falls back to /tmp and PID" "0" "$?"
   TMPDIR="/tmp/gemtest"
   source "$HELPERS"
   [[ "$_HOOK_STATE_DIR" == "/tmp/gemtest/hook-state/gemini-"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "state_dir: gemini uses PPID-based key" "0" "$?"
 
 # Claude session ID wins over Gemini for state dir.
@@ -308,7 +308,7 @@ _assert_eq "state_dir: gemini uses PPID-based key" "0" "$?"
   GEMINI_PROJECT_DIR="/tmp/project"
   source "$HELPERS"
   [ "$_HOOK_STATE_DIR" = "/tmp/test/hook-state/test123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "state_dir: claude session ID wins over gemini" "0" "$?"
 
 # _HOOK_STATE_DIR can be refreshed from hook JSON session_id when no agent env
@@ -320,7 +320,7 @@ _assert_eq "state_dir: claude session ID wins over gemini" "0" "$?"
   _HOOK_INPUT='{"session_id":"json-session-123"}'
   _hook_refresh_state_dir
   [ "$_HOOK_STATE_DIR" = "/tmp/json-session-test/hook-state/json-session-123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "state_dir: refresh uses input session_id" "0" "$?"
 
 # Existing env-derived keys continue to win over JSON session_id.
@@ -333,7 +333,7 @@ _assert_eq "state_dir: refresh uses input session_id" "0" "$?"
   _HOOK_INPUT='{"session_id":"json-session-123"}'
   _hook_refresh_state_dir
   [ "$_HOOK_STATE_DIR" = "/tmp/test/hook-state/test123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "state_dir: claude env wins over input session_id" "0" "$?"
 
 # Parsing command JSON refreshes state from session_id for agents without env
@@ -345,7 +345,7 @@ _assert_eq "state_dir: claude env wins over input session_id" "0" "$?"
   _HOOK_INPUT='{"session_id":"parse-session-123","tool_input":{"command":"echo ok"}}'
   _hook_parse_command 2>/dev/null </dev/null
   [ "$_HOOK_STATE_DIR" = "/tmp/parse-session-test/hook-state/parse-session-123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "state_dir: parse_command refreshes input session_id" "0" "$?"
 
 # Codex API exec_command payloads use tool_input.cmd instead of command.
@@ -355,7 +355,7 @@ _assert_eq "state_dir: parse_command refreshes input session_id" "0" "$?"
   _HOOK_INPUT='{"tool_input":{"cmd":"echo ok"}}'
   _hook_parse_command 2>/dev/null </dev/null
   [ "$AGENTGUARD_CMD_TRIMMED" = "echo ok" ] && echo "PASS" || echo "FAIL: $AGENTGUARD_CMD_TRIMMED"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "parse_command: accepts cmd fallback" "0" "$?"
 
 (
@@ -369,7 +369,7 @@ _assert_eq "parse_command: accepts cmd fallback" "0" "$?"
   else
     printf 'FAIL: files=%s fp=%s\n' "$AGENTGUARD_EDIT_FILES" "$AGENTGUARD_EDIT_FILE"
   fi
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "parse_edit_files: extracts apply_patch paths in order" "0" "$?"
 
 _apply_patch_object_json=$(jq -n --arg patch \
@@ -384,7 +384,7 @@ _apply_patch_object_json=$(jq -n --arg patch \
   _HOOK_INPUT="$_apply_patch_object_json"
   _hook_parse_edit_files 2>/dev/null </dev/null
   [ "$AGENTGUARD_EDIT_FILES" = "/tmp/test/remove.py" ] && echo "PASS" || echo "FAIL: $AGENTGUARD_EDIT_FILES"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "parse_edit_files: extracts object patch paths" "0" "$?"
 
 # ---------------------------------------------------------------------------
@@ -810,7 +810,7 @@ _assert_eq "hm hook: repeated failures warn once per session" "1" "$hm_fail_coun
   CLAUDE_CODE_CURRENT_SESSION_ID="test123"
   source "$HELPERS"
   [ "$(_hook_agent_name)" = "codex" ] && echo "PASS" || echo "FAIL"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "agent_name: codex override wins over claude env" "0" "$?"
 
 # _hook_agent_name returns "codex" when CODEX_THREAD_ID is set. Codex
@@ -822,7 +822,7 @@ _assert_eq "agent_name: codex override wins over claude env" "0" "$?"
   CLAUDE_CODE_CURRENT_SESSION_ID="test123"
   source "$HELPERS"
   [ "$(_hook_agent_name)" = "codex" ] && echo "PASS" || echo "FAIL"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "agent_name: codex thread id wins over claude env" "0" "$?"
 
 # _hook_agent_name falls back to the process tree for Codex. This covers
@@ -873,7 +873,7 @@ chmod +x "$MOCK_PS_DIR/ps"
     source "$2"
     [ "$(_hook_agent_name)" = "codex" ] && echo "PASS" || echo "FAIL"
   ' _ "$MOCK_PS_DIR" "$HELPERS"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "agent_name: codex process fallback" "0" "$?"
 
 # Regression: the process-tree fallback must match the executable NAME only,
@@ -919,7 +919,7 @@ chmod +x "$MOCK_PS_ARGS_DIR/ps"
     source "$2"
     [ "$(_hook_agent_name)" = "agent" ] && echo "PASS" || echo "FAIL"
   ' _ "$MOCK_PS_ARGS_DIR" "$HELPERS"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "agent_name: codex in ancestor args is ignored" "0" "$?"
 
 # Companion to the above: detection still finds Codex from the executable name
@@ -963,7 +963,7 @@ chmod +x "$MOCK_PS_COMM_DIR/ps"
     source "$2"
     [ "$(_hook_agent_name)" = "codex" ] && echo "PASS" || echo "FAIL"
   ' _ "$MOCK_PS_COMM_DIR" "$HELPERS"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "agent_name: codex executable name still detected" "0" "$?"
 
 # _hook_agent_name returns "claude" when only CLAUDE env is set
@@ -973,7 +973,7 @@ _assert_eq "agent_name: codex executable name still detected" "0" "$?"
   CLAUDE_CODE_CURRENT_SESSION_ID="test123"
   source "$HELPERS"
   [ "$(_hook_agent_name)" = "claude" ] && echo "PASS" || echo "FAIL"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "agent_name: claude when no codex override" "0" "$?"
 
 # Regression: Claude is identified from CLAUDE_CODE_SESSION_ID alone. Claude Code
@@ -988,7 +988,7 @@ _assert_eq "agent_name: claude when no codex override" "0" "$?"
   AGENTGUARD_PROCESS_DETECT=0
   source "$HELPERS"
   [ "$(_hook_agent_name)" = "claude" ] && echo "PASS" || echo "FAIL"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "agent_name: claude from CLAUDE_CODE_SESSION_ID alone" "0" "$?"
 
 # _is_agent_session detects a Claude tool subprocess via CLAUDE_CODE_SESSION_ID.
@@ -1005,7 +1005,7 @@ _assert_exit "is_session: detects Claude via CLAUDE_CODE_SESSION_ID" 0 "$?"
   unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID 2>/dev/null
   source "$HELPERS"
   [ "$(_hook_agent_name)" = "agent" ] && echo "PASS" || echo "FAIL"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "agent_name: fallback to agent" "0" "$?"
 
 # _hook_agent_name returns generic "agent" when only the neutral session id is
@@ -1016,7 +1016,7 @@ _assert_eq "agent_name: fallback to agent" "0" "$?"
   export AGENTGUARD_SESSION_ID="neutral-session"
   source "$HELPERS"
   [ "$(_hook_agent_name)" = "agent" ] && echo "PASS" || echo "FAIL"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "agent_name: neutral session id implies generic agent" "0" "$?"
 
 # _hook_agent_name ignores non-"codex" values of the override var
@@ -1027,7 +1027,7 @@ _assert_eq "agent_name: neutral session id implies generic agent" "0" "$?"
   CLAUDE_CODE_CURRENT_SESSION_ID="test123"
   source "$HELPERS"
   [ "$(_hook_agent_name)" = "claude" ] && echo "PASS" || echo "FAIL"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "agent_name: non-codex override falls through to claude" "0" "$?"
 
 # _hook_agent_name returns "gemini" when GEMINI_PROJECT_DIR is set
@@ -1037,7 +1037,7 @@ _assert_eq "agent_name: non-codex override falls through to claude" "0" "$?"
   GEMINI_PROJECT_DIR="/tmp/project"
   source "$HELPERS"
   [ "$(_hook_agent_name)" = "gemini" ] && echo "PASS" || echo "FAIL"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "agent_name: gemini when GEMINI_PROJECT_DIR set" "0" "$?"
 
 # _hook_agent_name prefers codex over gemini when both env vars present
@@ -1048,7 +1048,7 @@ _assert_eq "agent_name: gemini when GEMINI_PROJECT_DIR set" "0" "$?"
   GEMINI_PROJECT_DIR="/tmp/project"
   source "$HELPERS"
   [ "$(_hook_agent_name)" = "codex" ] && echo "PASS" || echo "FAIL"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "agent_name: codex wins over gemini" "0" "$?"
 
 # _hook_agent_name prefers gemini over claude when both env vars present
@@ -1059,7 +1059,7 @@ _assert_eq "agent_name: codex wins over gemini" "0" "$?"
   CLAUDE_CODE_CURRENT_SESSION_ID="test123"
   source "$HELPERS"
   [ "$(_hook_agent_name)" = "gemini" ] && echo "PASS" || echo "FAIL"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "agent_name: gemini wins over claude" "0" "$?"
 
 # _hook_agent_name returns AGENTGUARD_NAME before built-in agent env detection.
@@ -1072,7 +1072,7 @@ _assert_eq "agent_name: gemini wins over claude" "0" "$?"
   CLAUDE_CODE_CURRENT_SESSION_ID="test123"
   source "$HELPERS"
   [ "$(_hook_agent_name)" = "example-agent" ] && echo "PASS" || echo "FAIL"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "agent_name: AGENTGUARD_NAME wins" "0" "$?"
 
 # _hook_agent_name treats empty GEMINI_PROJECT_DIR as unset
@@ -1083,7 +1083,7 @@ _assert_eq "agent_name: AGENTGUARD_NAME wins" "0" "$?"
   CLAUDE_CODE_CURRENT_SESSION_ID="test123"
   source "$HELPERS"
   [ "$(_hook_agent_name)" = "claude" ] && echo "PASS" || echo "FAIL"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "agent_name: empty GEMINI_PROJECT_DIR falls through to claude" "0" "$?"
 
 # _hook_source_agent sources a -codex file when Codex is detected
@@ -1098,7 +1098,7 @@ SCRIPT
   _HOOK_SELF="$MOCK_AGENT_DIR/hook"
   _hook_source_agent
   [ "${_AGENT_EXTENSION_SOURCED:-}" = "codex" ] && echo "PASS" || echo "FAIL"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "source_agent: sources -codex file when codex detected" "0" "$?"
 
 # _hook_source_agent sources a -claude file when Claude is detected
@@ -1113,7 +1113,7 @@ SCRIPT
   _HOOK_SELF="$MOCK_AGENT_DIR/hook"
   _hook_source_agent
   [ "${_AGENT_EXTENSION_SOURCED:-}" = "claude" ] && echo "PASS" || echo "FAIL"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "source_agent: sources -claude file when claude detected" "0" "$?"
 
 # _hook_source_agent sources a -gemini file when Gemini is detected
@@ -1128,7 +1128,7 @@ SCRIPT
   _HOOK_SELF="$MOCK_AGENT_DIR/hook"
   _hook_source_agent
   [ "${_AGENT_EXTENSION_SOURCED:-}" = "gemini" ] && echo "PASS" || echo "FAIL"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "source_agent: sources -gemini file when gemini detected" "0" "$?"
 
 # _hook_source_agent skips cleanly when no extension file exists
@@ -1140,7 +1140,7 @@ MOCK_NOEXT_DIR=$(_tmpdir)
   _HOOK_SELF="$MOCK_NOEXT_DIR/hook"
   _hook_source_agent
   echo "PASS"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "source_agent: skips when no -codex file exists" "0" "$?"
 
 # _hook_finish emits context JSON when present
@@ -1367,7 +1367,7 @@ echo "=== hook-helpers: _hook_parse_command ==="
   _HOOK_INPUT='{"tool_input":{"command":"ls -la /tmp"}}'
   _hook_parse_command 2>/dev/null </dev/null
   [ "$AGENTGUARD_CMD_LINE1" = "$AGENTGUARD_CMD_TRIMMED" ] && echo "PASS" || echo "FAIL: AGENTGUARD_CMD_LINE1='$AGENTGUARD_CMD_LINE1' AGENTGUARD_CMD_TRIMMED='$AGENTGUARD_CMD_TRIMMED'"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "parse_command: single-line AGENTGUARD_CMD_LINE1 == AGENTGUARD_CMD_TRIMMED" "0" "$?"
 
 # Multi-line command: AGENTGUARD_CMD_LINE1 is only the first line
@@ -1379,7 +1379,7 @@ multiline_json=$(jq -nc --arg c "$(printf '%s\n%s\n%s' 'git commit -m "$(cat <<'
   _hook_parse_command 2>/dev/null </dev/null
   line_count=$(printf '%s\n' "$AGENTGUARD_CMD_LINE1" | wc -l | tr -d ' ')
   [ "$line_count" = "1" ] && echo "PASS" || echo "FAIL: $line_count lines"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "parse_command: multi-line AGENTGUARD_CMD_LINE1 is one line" "0" "$?"
 
 # Multi-line: AGENTGUARD_CMD_LINE1 contains the command, not the body
@@ -1387,8 +1387,8 @@ _assert_eq "parse_command: multi-line AGENTGUARD_CMD_LINE1 is one line" "0" "$?"
   source "$HELPERS"
   _HOOK_INPUT="$multiline_json"
   _hook_parse_command 2>/dev/null </dev/null
-  echo "$AGENTGUARD_CMD_LINE1" | grep -q 'git commit' && echo "PASS" || echo "FAIL: $AGENTGUARD_CMD_LINE1"
-) | grep -q PASS
+  echo "$AGENTGUARD_CMD_LINE1" | _stdin_contains 'git commit' && echo "PASS" || echo "FAIL: $AGENTGUARD_CMD_LINE1"
+) | _stdin_contains PASS
 _assert_eq "parse_command: AGENTGUARD_CMD_LINE1 has the command" "0" "$?"
 
 # Multi-line: AGENTGUARD_CMD_LINE1 does NOT contain heredoc body content
@@ -1396,8 +1396,8 @@ _assert_eq "parse_command: AGENTGUARD_CMD_LINE1 has the command" "0" "$?"
   source "$HELPERS"
   _HOOK_INPUT="$multiline_json"
   _hook_parse_command 2>/dev/null </dev/null
-  echo "$AGENTGUARD_CMD_LINE1" | grep -q 'git push' && echo "FAIL" || echo "PASS"
-) | grep -q PASS
+  echo "$AGENTGUARD_CMD_LINE1" | _stdin_contains 'git push' && echo "FAIL" || echo "PASS"
+) | _stdin_contains PASS
 _assert_eq "parse_command: AGENTGUARD_CMD_LINE1 excludes heredoc body" "0" "$?"
 
 # Multi-line: AGENTGUARD_CMD_TRIMMED still has the full content
@@ -1407,7 +1407,7 @@ _assert_eq "parse_command: AGENTGUARD_CMD_LINE1 excludes heredoc body" "0" "$?"
   _hook_parse_command 2>/dev/null </dev/null
   trimmed_lines=$(printf '%s\n' "$AGENTGUARD_CMD_TRIMMED" | wc -l | tr -d ' ')
   [ "$trimmed_lines" -gt 1 ] && echo "PASS" || echo "FAIL: $trimmed_lines lines"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "parse_command: AGENTGUARD_CMD_TRIMMED retains all lines" "0" "$?"
 
 # Leading whitespace stripped from AGENTGUARD_CMD_LINE1
@@ -1416,7 +1416,7 @@ _assert_eq "parse_command: AGENTGUARD_CMD_TRIMMED retains all lines" "0" "$?"
   _HOOK_INPUT='{"tool_input":{"command":"  ls -la"}}'
   _hook_parse_command 2>/dev/null </dev/null
   [ "$AGENTGUARD_CMD_LINE1" = "ls -la" ] && echo "PASS" || echo "FAIL: '$AGENTGUARD_CMD_LINE1'"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "parse_command: AGENTGUARD_CMD_LINE1 strips leading whitespace" "0" "$?"
 
 # ---------------------------------------------------------------------------
@@ -1439,7 +1439,7 @@ MOCK_CD_DIR_PHYS=$(_cd_test_phys_dir "$MOCK_CD_DIR")
   AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
   _hook_cd_to_target
   [ "$(pwd -P)" = "$MOCK_CD_DIR_PHYS" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "cd_to_target: changes to target dir" "0" "$?"
 
 MOCK_CD_SPACE_DIR="$(_tmpdir)/dir with spaces"
@@ -1451,7 +1451,7 @@ MOCK_CD_SPACE_DIR_PHYS=$(_cd_test_phys_dir "$MOCK_CD_SPACE_DIR")
   AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
   _hook_cd_to_target
   [ "$(pwd -P)" = "$MOCK_CD_SPACE_DIR_PHYS" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "cd_to_target: quoted path with spaces" "0" "$?"
 
 (
@@ -1460,7 +1460,7 @@ _assert_eq "cd_to_target: quoted path with spaces" "0" "$?"
   AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
   _hook_cd_to_target
   [ "$(pwd -P)" = "$MOCK_CD_SPACE_DIR_PHYS" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "cd_to_target: command prefix and --" "0" "$?"
 
 (
@@ -1470,7 +1470,7 @@ _assert_eq "cd_to_target: command prefix and --" "0" "$?"
   AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
   _hook_cd_to_target
   [ "$(pwd -P)" = "$original_pwd" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "cd_to_target: path-qualified cd stays put" "0" "$?"
 
 # Non-cd command stays in current dir
@@ -1481,7 +1481,7 @@ _assert_eq "cd_to_target: path-qualified cd stays put" "0" "$?"
   AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
   _hook_cd_to_target
   [ "$(pwd -P)" = "$original_pwd" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "cd_to_target: non-cd stays put" "0" "$?"
 
 (
@@ -1491,7 +1491,7 @@ _assert_eq "cd_to_target: non-cd stays put" "0" "$?"
   AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
   _hook_cd_to_target
   [ "$(pwd -P)" = "$original_pwd" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "cd_to_target: nested cd does not change hook cwd" "0" "$?"
 
 # cd to nonexistent dir stays in current dir
@@ -1502,7 +1502,7 @@ _assert_eq "cd_to_target: nested cd does not change hook cwd" "0" "$?"
   AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
   _hook_cd_to_target
   [ "$(pwd -P)" = "$original_pwd" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "cd_to_target: nonexistent dir stays put" "0" "$?"
 
 # cd with tilde expands to HOME
@@ -1516,7 +1516,7 @@ MOCK_CD_RELATIVE="${MOCK_CD_HOME_DIR#"$HOME"}"
   AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
   _hook_cd_to_target
   [ "$(pwd -P)" = "$MOCK_CD_HOME_DIR_PHYS" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
-) | grep -q PASS
+) | _stdin_contains PASS
 _assert_eq "cd_to_target: tilde expansion" "0" "$?"
 rm -rf "$MOCK_CD_HOME_DIR"
 

@@ -42,7 +42,7 @@ fi
 
 # --- Expensive operation guards ---
 
-if printf '%s' "$_HOOK_MCP_TOOL" | grep -qF 'search_files'; then
+if [ "$_HOOK_MCP_TOOL_NAME" = "search_files" ]; then
   has_path=$(printf '%s' "$_HOOK_INPUT" | jq -r '
     .tool_input
     | (.target_directories // .path // .directory // .paths // empty)
@@ -54,7 +54,7 @@ if printf '%s' "$_HOOK_MCP_TOOL" | grep -qF 'search_files'; then
   fi
 fi
 
-if printf '%s' "$_HOOK_MCP_TOOL" | grep -qF 'knowledge_load'; then
+if [ "$_HOOK_MCP_TOOL_NAME" = "knowledge_load" ]; then
   kl_flag="$_HOOK_STATE_DIR/knowledge-load-warned"
   if [ ! -f "$kl_flag" ]; then
     mkdir -p "$_HOOK_STATE_DIR" 2>/dev/null || true

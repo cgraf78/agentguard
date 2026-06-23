@@ -67,11 +67,10 @@ done <<<"$AGENTGUARD_EDIT_FILES"
 
 # Track edit churn per file
 if [ -n "$AGENTGUARD_EDIT_FILES" ]; then
-  _churn_dir="$_HOOK_STATE_DIR/edit-churn"
-  mkdir -p "$_churn_dir" 2>/dev/null
   while IFS= read -r _fp; do
     [ -n "$_fp" ] || continue
-    _churn_file="$_churn_dir/$(printf '%s' "$_fp" | cksum | cut -d' ' -f1)"
+    _churn_file=$(_hook_edit_churn_file "$_fp")
+    mkdir -p "${_churn_file%/*}" 2>/dev/null
     _count=$(cat "$_churn_file" 2>/dev/null || echo 0)
     echo $((_count + 1)) >"$_churn_file"
   done <<<"$AGENTGUARD_EDIT_FILES"
