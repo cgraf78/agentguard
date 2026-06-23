@@ -18,9 +18,17 @@ _agentguard_claude_session_end() {
   # Already titled — skip
   _agentguard_transcript_has_custom_title "$transcript_path" && return 0
 
-  # Fire-and-forget: nohup so naming survives hook exit, timeout as a safeguard
+  local timeout_prefix=()
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_prefix=(timeout 60)
+  elif command -v gtimeout >/dev/null 2>&1; then
+    timeout_prefix=(gtimeout 60)
+  fi
+
+  # Fire-and-forget: nohup so naming survives hook exit, with a timeout when
+  # the platform provides one.
   # shellcheck disable=SC2016
-  nohup timeout 60 bash -c '
+  nohup "${timeout_prefix[@]}" bash -c '
   transcript_has_custom_title() {
     jq -e -R "$2" "$1" >/dev/null 2>&1
   }
