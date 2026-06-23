@@ -148,18 +148,25 @@ _hook_prompt_cycle_reset() {
   rm -rf "$_HOOK_STATE_DIR/prompt-cycle" 2>/dev/null || true
 }
 
-_hook_once_per_prompt() {
-  local key="$1" dir marker
-  dir="$_HOOK_STATE_DIR/prompt-cycle"
+_hook_mark_once() {
+  local dir="$1" key="$2" marker
   marker="$dir/$key"
-
   [ ! -e "$marker" ] || return 1
 
-  # If state cannot be written, fail open and show the reminder. Missing a
-  # de-duplication marker is less harmful than silently dropping steer.
+  # If state cannot be written, fail open and show the reminder or warning.
+  # Missing a de-duplication marker is less harmful than silently dropping
+  # behavioral steer.
   mkdir -p "$dir" 2>/dev/null || return 0
   : >"$marker" 2>/dev/null || true
   return 0
+}
+
+_hook_once_per_prompt() {
+  _hook_mark_once "$_HOOK_STATE_DIR/prompt-cycle" "$1"
+}
+
+_hook_once_per_session() {
+  _hook_mark_once "$_HOOK_STATE_DIR" "$1"
 }
 
 _hook_flag_enabled() {
@@ -173,6 +180,31 @@ _hook_edit_churn_file() {
   local path="$1" key
   key=$(printf '%s' "$path" | cksum | cut -d' ' -f1)
   printf '%s/edit-churn/%s\n' "$_HOOK_STATE_DIR" "$key"
+}
+
+_hook_counter_read() {
+  local file="$1" count=''
+  if [ -f "$file" ]; then
+    IFS= read -r count <"$file" 2>/dev/null || count=''
+  fi
+  case "$count" in
+    '' | *[!0-9]*) count=0 ;;
+  esac
+  printf '%s\n' "$count"
+}
+
+_hook_counter_increment() {
+  local file="$1" dir count
+  dir="${file%/*}"
+  if [ "$dir" != "$file" ]; then
+    mkdir -p "$dir" 2>/dev/null || return 0
+  fi
+  count=$(_hook_counter_read "$file")
+  printf '%s\n' "$((count + 1))" >"$file" 2>/dev/null || true
+}
+
+_hook_counter_reset() {
+  rm -f "$1" 2>/dev/null || true
 }
 
 _hook_require_sley() {
@@ -487,17 +519,10 @@ _hook_hm_apply_response() {
 }
 
 _hook_hm_warn_once() {
-  local key="$1" message="$2" marker
+  local key="$1" message="$2"
   # Hook failures should be visible, but not repeated after every tool call in
   # a long-lived session if a sync mount or config is temporarily unavailable.
-  mkdir -p "$_HOOK_STATE_DIR" 2>/dev/null || {
-    _hook_warn "$message"
-    return 0
-  }
-  marker="$_HOOK_STATE_DIR/hm-warn-$key"
-  [ ! -e "$marker" ] || return 0
-  : >"$marker" 2>/dev/null || true
-  _hook_warn "$message"
+  _hook_once_per_session "hm-warn-$key" && _hook_warn "$message"
 }
 
 _hook_hm_event() {

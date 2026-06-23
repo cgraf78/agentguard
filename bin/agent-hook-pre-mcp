@@ -32,9 +32,7 @@ _hook_parse_mcp
 
 # --- Consecutive failure circuit breaker ---
 if [ -f "$_HOOK_MCP_FAIL_FILE" ]; then
-  count=$(cat "$_HOOK_MCP_FAIL_FILE" 2>/dev/null)
-  count="${count:-0}"
-  case "$count" in '' | *[!0-9]*) count=0 ;; esac
+  count=$(_hook_counter_read "$_HOOK_MCP_FAIL_FILE")
   if [ "$count" -ge 3 ]; then
     _hook_block "MCP server '$_HOOK_MCP_SERVER' has failed $count consecutive times this session. The server appears to be down — continuing to call it will produce errors. Try a different approach or ask the user to check the MCP server."
   fi
@@ -55,11 +53,8 @@ if [ "$_HOOK_MCP_TOOL_NAME" = "search_files" ]; then
 fi
 
 if [ "$_HOOK_MCP_TOOL_NAME" = "knowledge_load" ]; then
-  kl_flag="$_HOOK_STATE_DIR/knowledge-load-warned"
-  if [ ! -f "$kl_flag" ]; then
-    mkdir -p "$_HOOK_STATE_DIR" 2>/dev/null || true
+  if _hook_once_per_session "knowledge-load-warned"; then
     _hook_warn 'knowledge_load can consume significant context window on large documents. Prefer knowledge_filtered_search for targeted lookups.'
-    touch "$kl_flag" 2>/dev/null || true
   fi
 fi
 
