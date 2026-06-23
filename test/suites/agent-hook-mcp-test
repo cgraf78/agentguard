@@ -108,6 +108,14 @@ _assert_not_contains "with path: no warning" "WARNING" "$HOOK_STDERR"
 _run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__knowledge_filtered_search","tool_input":{"query":"test"}}'
 _assert_not_contains "non-search tool: no search warning" "search_files" "$HOOK_STDERR"
 
+# Only the leaf MCP tool name should trigger this guard. Server names and other
+# tool names that merely contain the same text are unrelated machine values.
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__search_files_proxy__lookup","tool_input":{"query":"test"}}'
+_assert_not_contains "server-name search_files substring: no warning" "search_files called without a path filter" "$HOOK_STDERR"
+
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__not_search_files","tool_input":{"query":"test"}}'
+_assert_not_contains "leaf suffix search_files substring: no warning" "search_files called without a path filter" "$HOOK_STDERR"
+
 # ---------------------------------------------------------------------------
 # Tests: agent-hook-pre-mcp — knowledge_load warn-once
 # ---------------------------------------------------------------------------
@@ -133,6 +141,11 @@ if [ -f "$TEST_TMPDIR/hook-state/$TEST_SID/knowledge-load-warned" ]; then
 else
   _fail "warn-once: flag file created"
 fi
+
+# Server names that contain knowledge_load are not the expensive load tool.
+_reset_state
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__knowledge_load_cache__lookup","tool_input":{"url":"https://example.com"}}'
+_assert_not_contains "server-name knowledge_load substring: no warning" "knowledge_load can consume" "$HOOK_STDERR"
 
 # ---------------------------------------------------------------------------
 # Tests: agent-hook-pre-mcp — local `-work` variant delegation

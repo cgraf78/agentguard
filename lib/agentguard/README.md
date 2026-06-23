@@ -19,7 +19,8 @@ another tool that follows the same hook protocol.
 - `detect.sh` is internal to those public entry points.
 - `agent-hook-pre-edit` warns after `AGENTGUARD_EDIT_CHURN_WARN` edits to a
   file and blocks after `AGENTGUARD_EDIT_CHURN_BLOCK` edits. Defaults are `5`
-  and `10`.
+  and `10`. Set `AGENTGUARD_EDIT_CHURN_BYPASS=1` to bypass the churn warning
+  and block for a deliberate edit pass.
 - `agent-hook-pre-bash` can guard a broad bare-Git work tree when an integration
   sets `AGENTGUARD_PROTECTED_BARE_GIT_DIR`. Optional companion settings are
   `AGENTGUARD_PROTECTED_BARE_GIT_WORK_TREE` (defaults to `$HOME`),
@@ -95,6 +96,7 @@ Each hook emits one JSON response through `_hook_finish`.
 - Hive Memory adapters: `_hook_hm_session_start`, `_hook_hm_prompt_submit`,
   `_hook_hm_tool_complete`, `_hook_hm_stop`
 - prompt-cycle state: `_hook_prompt_cycle_reset`, `_hook_once_per_prompt`
+- edit-churn state: `_hook_edit_churn_file`
 - target directory setup: `_hook_cd_to_target`
 - extension loading: `_hook_source_agent`, `_hook_source_work`
 - final JSON emission: `_hook_finish`
@@ -111,67 +113,12 @@ Launchers should set `AGENTGUARD_NAME` with `AGENTGUARD_SESSION_ID` when they kn
 the concrete agent. `AGENTGUARD_SESSION_ID` alone falls back to the generic
 `agent` identity.
 
-## Adding an Agent
+## Policy Reference
 
-To add a new managed agent runtime:
-
-- add a consumer-owned config generator or source layer that emits the agent's
-  native config format
-- make every managed hook command set `AGENTGUARD_NAME=<agent>` and
-  `AGENTGUARD_SESSION_ID=<stable-id-or-empty>`
-- map the agent's hook payload schema into the shared `agent-hook-*` scripts
-  instead of adding policy directly to the agent config
-- add `-<agent>` extension scripts only for behavior that is truly
-  runtime-specific
-- update `detect.sh` only when the runtime exposes reliable process or
-  environment signals
-- add tests that verify hook env injection, session identity, payload parsing,
-  and Hive Memory attribution
-- if the agent supports skills or extensions, update the gstack registration
-  helper or document why it is unsupported
-
-## Base Hook Policy
-
-- `agent-hook-pre-bash` blocks destructive `rm -rf` targets, warns on other
-  `rm -rf` usage, and reminds agents to run a review/simplify pass and inspect
-  the final diff before Git/Sapling commit-class commands. Metadata-only,
-  abort, dry-run, and no-commit Sapling operations skip the commit reminder.
-- `agent-hook-post-bash` scans command stdout for high-confidence credential
-  patterns. Stdout extraction is centralized so agent-specific payload names do
-  not leak into the base hook.
-- `agent-hook-pre-edit` parses edited paths, reminds once per user prompt on
-  code/config edits to apply AGENTS.md design/workflow guidance, and leaves
-  room for environment-specific generated-file or readonly-file guards.
-- `agent-hook-post-edit` formats changed files through
-  `sley hook format-file`. Broader lint and verification policy stays in the
-  commit gate.
-- `agent-hook-pre-mcp` guards MCP calls: it blocks a server after repeated
-  failures, warns on broad `search_files` calls without a path filter, and
-  warns on `knowledge_load` because large docs can consume significant context.
-- `agent-hook-post-mcp` tracks MCP failure streaks for that circuit breaker.
-- `agent-hook-session-start` detects repo type in `sl`, `git`, then `jj` order,
-  reports uncommitted changes, warns on high disk usage, and injects Hive Memory
-  startup context when `hm` is installed and configured.
-- `agent-hook-session-end` parses session metadata for agent-specific naming or
-  sync extensions.
-- `agent-hook-prompt-submit` lets `hm hook prompt-submit` handle memory-intent
-  reminders and context refresh decisions, then resets prompt-cycle state used
-  by once-per-prompt guidance.
-- `agent-hook-stop` asks Hive Memory for any pending-memory reminder, then plays
-  terminal notifications. `agent-hook-notification` only plays notifications.
-
-Hive Memory integration is deliberately centralized behind `hm hook <event>`.
-The shell hooks pass only event facts: agent id, session id, and the best
-available active path. Store affinity, project resolution, context freshness,
-and refresh policy live in `hm`, so agent-specific or local extension files
-do not need to duplicate memory policy.
-When an agent session is launched from `$HOME`, AgentGuard treats that as "no
-active project" rather than passing home as a project hint. Explicit file paths
-under `$HOME` still pass through, so one long-lived session can work across many
-projects without collapsing context onto the home directory itself.
-
-Claude-specific extensions auto-name untitled sessions and run the daily
-`claude-templates update` refresh in the background.
+The root [README](../../README.md) is the canonical policy reference for adding
+agents and for base hook behavior. Keep this library README focused on
+sourceable APIs and lifecycle details so hook policy does not drift across two
+documents.
 
 ## Script Notes
 

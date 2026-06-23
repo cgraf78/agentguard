@@ -116,35 +116,42 @@ echo "=== edit churn: tracking and guard ==="
 
 POST_EDIT="$BIN_DIR/agent-hook-post-edit"
 
-# Map a file path to its churn state key (matches the hook logic)
-_churn_key() { printf '%s' "$1" | cksum | cut -d' ' -f1; }
+_churn_file() {
+  AGENTGUARD_SESSION_ID="$TEST_SID" \
+    AGENTGUARD_NAME="agent" \
+    TMPDIR="$TEST_TMPDIR" \
+    CODEX_THREAD_ID="" \
+    bash -c 'source "$1"; _hook_edit_churn_file "$2"' _ "$HELPERS" "$1"
+}
+
+_churn_key() { basename "$(_churn_file "$1")"; }
 
 _reset_state
 
 # Counter increments on each edit
 _run_hook "$POST_EDIT" '{"tool_input":{"file_path":"/tmp/test/foo.py"}}'
 _assert_file_content "churn: first edit count is 1" "1" \
-  "$TEST_TMPDIR/hook-state/$TEST_SID/edit-churn/$(_churn_key "/tmp/test/foo.py")"
+  "$(_churn_file "/tmp/test/foo.py")"
 
 _run_hook "$POST_EDIT" '{"tool_input":{"file_path":"/tmp/test/foo.py"}}'
 _assert_file_content "churn: second edit count is 2" "2" \
-  "$TEST_TMPDIR/hook-state/$TEST_SID/edit-churn/$(_churn_key "/tmp/test/foo.py")"
+  "$(_churn_file "/tmp/test/foo.py")"
 
 # Independent files tracked separately
 _run_hook "$POST_EDIT" '{"tool_input":{"file_path":"/tmp/test/bar.py"}}'
 _assert_file_content "churn: bar.py count is 1" "1" \
-  "$TEST_TMPDIR/hook-state/$TEST_SID/edit-churn/$(_churn_key "/tmp/test/bar.py")"
+  "$(_churn_file "/tmp/test/bar.py")"
 _assert_file_content "churn: foo.py still 2" "2" \
-  "$TEST_TMPDIR/hook-state/$TEST_SID/edit-churn/$(_churn_key "/tmp/test/foo.py")"
+  "$(_churn_file "/tmp/test/foo.py")"
 
 # apply_patch payloads can touch multiple files; post-edit should track each.
 _run_hook "$POST_EDIT" "$_apply_patch_json"
 _assert_file_content "churn: apply_patch a.py count is 1" "1" \
-  "$TEST_TMPDIR/hook-state/$TEST_SID/edit-churn/$(_churn_key "/tmp/test/a.py")"
+  "$(_churn_file "/tmp/test/a.py")"
 _assert_file_content "churn: apply_patch b.py count is 1" "1" \
-  "$TEST_TMPDIR/hook-state/$TEST_SID/edit-churn/$(_churn_key "/tmp/test/b.py")"
+  "$(_churn_file "/tmp/test/b.py")"
 _assert_file_content "churn: apply_patch c.py count is 1" "1" \
-  "$TEST_TMPDIR/hook-state/$TEST_SID/edit-churn/$(_churn_key "/tmp/test/c.py")"
+  "$(_churn_file "/tmp/test/c.py")"
 
 echo "=== edit churn: below threshold ==="
 
@@ -181,6 +188,24 @@ _assert_eq "churn 10: exit 2 (blocked)" "2" "$HOOK_EXIT"
 _assert_contains "churn 10: BLOCKED in stderr" "BLOCKED" "$HOOK_STDERR"
 _assert_contains "churn 10: mentions count" "10 times" "$HOOK_STDERR"
 _assert_contains "churn 10: shows filename" "f.py" "$HOOK_STDERR"
+
+echo "=== edit churn: bypass ==="
+
+HOOK_EXIT=0
+out_file=$(mktemp "$TEST_TMPDIR/out.XXXXXX")
+err_file=$(mktemp "$TEST_TMPDIR/err.XXXXXX")
+printf '%s' '{"tool_input":{"file_path":"/tmp/test/f.py"}}' |
+  AGENTGUARD_SESSION_ID="$TEST_SID" \
+    AGENTGUARD_NAME="agent" \
+    TMPDIR="$TEST_TMPDIR" \
+    CODEX_THREAD_ID="" \
+    AGENTGUARD_EDIT_CHURN_BYPASS=1 \
+    "$PRE_EDIT" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
+HOOK_STDERR=$(cat "$err_file")
+rm -f "$out_file" "$err_file"
+_assert_eq "churn bypass: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "churn bypass: no warning" "WARNING" "$HOOK_STDERR"
+_assert_not_contains "churn bypass: no block" "BLOCKED" "$HOOK_STDERR"
 
 echo "=== edit churn: first edit has no warning ==="
 
@@ -260,15 +285,15 @@ else
   _fail "churn hash: /a/b_c and /a_b/c collided (key=$key_a)"
 fi
 _assert_file_content "churn hash: /a/b_c count is 1" "1" \
-  "$TEST_TMPDIR/hook-state/$TEST_SID/edit-churn/$key_a"
+  "$(_churn_file "/a/b_c")"
 _assert_file_content "churn hash: /a_b/c count is 1" "1" \
-  "$TEST_TMPDIR/hook-state/$TEST_SID/edit-churn/$key_b"
+  "$(_churn_file "/a_b/c")"
 
 # Long paths don't exceed NAME_MAX
 long_path="/$(printf '%0.sdir/' {1..60})/file.cpp"
 _run_hook "$POST_EDIT" "{\"tool_input\":{\"file_path\":\"$long_path\"}}"
 _assert_file_exists "churn hash: long path file created" \
-  "$TEST_TMPDIR/hook-state/$TEST_SID/edit-churn/$(_churn_key "$long_path")"
+  "$(_churn_file "$long_path")"
 
 echo "=== post-edit: formats files through sley ==="
 
@@ -344,7 +369,7 @@ _assert_contains "post-edit sley delegation: formats through CLI from file repo"
 _assert_not_contains "post-edit sley delegation: defers lint to commit gate" \
   "lint:claude:$repo/edited.py" "$(cat "$SLEY_HOOK_LOG" 2>/dev/null)"
 _assert_file_content "post-edit sley delegation: churn still tracked" "1" \
-  "$TEST_TMPDIR/hook-state/$TEST_SID/edit-churn/$(_churn_key "$repo/edited.py")"
+  "$(_churn_file "$repo/edited.py")"
 
 echo "=== post-edit: missing sley is a broken install ==="
 

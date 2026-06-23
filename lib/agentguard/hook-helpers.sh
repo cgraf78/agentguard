@@ -35,6 +35,13 @@ export PATH
 
 _AGENTGUARD_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Resolve sibling helpers from this dependency directory. Hook tests commonly
+# mock HOME, but helper-to-helper dependencies should follow the library file
+# that was actually sourced so partial test homes do not need a second copy.
+# shellcheck source=detect.sh
+# shellcheck disable=SC1091 # sibling module resolved from this file's dir.
+source "$_AGENTGUARD_LIB_DIR/detect.sh"
+
 # Return a stable Codex session key when Codex does not hand hooks a runtime
 # session id. Codex launches hook scripts as short-lived child processes, so $$
 # changes on every hook and is not suitable for per-session state such as
@@ -52,24 +59,8 @@ _hook_codex_process_key() {
       ;;
   esac
 
-  local pid parent comm saw_codex=''
-  pid="$$"
-  while [ -n "$pid" ] && [ "$pid" != "0" ]; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//') || break
-    # Match the executable NAME only, never argv. detect.sh hardened _agent_name
-    # against exactly this: an ancestor whose argv merely contains "codex"
-    # (a commit message, `hm remember … codex …`, an editor opening /path/codex)
-    # must not be misattributed to Codex and corrupt the per-session state key.
-    case "$(basename "$comm" 2>/dev/null)" in
-      codex)
-        saw_codex="$pid"
-        ;;
-    esac
-
-    parent=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ "$parent" != "$pid" ] || break
-    pid="$parent"
-  done
+  local saw_codex=''
+  saw_codex=$(_agent_codex_process_pid 2>/dev/null || true)
 
   if [ -n "$saw_codex" ]; then
     printf 'codex-%s\n' "$saw_codex"
@@ -169,6 +160,19 @@ _hook_once_per_prompt() {
   mkdir -p "$dir" 2>/dev/null || return 0
   : >"$marker" 2>/dev/null || true
   return 0
+}
+
+_hook_flag_enabled() {
+  case "${1:-}" in
+    1 | true | TRUE | yes | YES | on | ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_hook_edit_churn_file() {
+  local path="$1" key
+  key=$(printf '%s' "$path" | cksum | cut -d' ' -f1)
+  printf '%s/edit-churn/%s\n' "$_HOOK_STATE_DIR" "$key"
 }
 
 _hook_require_sley() {
@@ -315,18 +319,25 @@ _hook_parse_edit_files() {
   export AGENTGUARD_EDIT_FILES AGENTGUARD_EDIT_FILE
 }
 
-# Parses MCP tool info from hook JSON input. Sets _HOOK_INPUT (full JSON
-# for downstream field extraction), _HOOK_MCP_SERVER, and _HOOK_MCP_FAIL_FILE.
-# Exits early if the tool name or server can't be extracted.
+# Parses MCP tool info from hook JSON input. Sets _HOOK_INPUT (full JSON for
+# downstream field extraction), _HOOK_MCP_SERVER, _HOOK_MCP_TOOL_NAME, and
+# _HOOK_MCP_FAIL_FILE. Exits early if the tool name or server can't be
+# extracted.
 _hook_parse_mcp() {
   _hook_read_input || exit 0
-  local tool_name
+  local tool_name remainder
   tool_name=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_name // empty')
   [ -z "$tool_name" ] && exit 0
+  case "$tool_name" in
+    mcp__*__*) ;;
+    *) exit 0 ;;
+  esac
 
-  # Extract server name: mcp__my_server__some_tool → my_server
-  _HOOK_MCP_SERVER=$(printf '%s' "$tool_name" | sed 's/^mcp__//; s/__[^_].*$//')
+  remainder="${tool_name#mcp__}"
+  _HOOK_MCP_SERVER="${remainder%__*}"
   [ -z "$_HOOK_MCP_SERVER" ] && exit 0
+  _HOOK_MCP_TOOL_NAME="${remainder##*__}"
+  [ -z "$_HOOK_MCP_TOOL_NAME" ] && exit 0
 
   _HOOK_MCP_TOOL="$tool_name"
   _HOOK_MCP_FAIL_FILE="$_HOOK_STATE_DIR/mcp-failures-$_HOOK_MCP_SERVER"
@@ -341,6 +352,7 @@ _hook_cd_to_target() {
 
   if [ "$(type -t _hook_command_fragments)" != "function" ]; then
     # shellcheck source=hook-command-classifier.sh
+    # shellcheck disable=SC1091 # sibling module resolved from this file's dir.
     source "$_AGENTGUARD_LIB_DIR/hook-command-classifier.sh" || return 0
   fi
 
@@ -601,13 +613,6 @@ _hook_hm_stop() {
 }
 
 # --- Agent identification ---
-
-# Resolve sibling helpers from this dependency directory. Hook tests commonly
-# mock HOME, but helper-to-helper dependencies should follow the library file
-# that was actually sourced so partial test homes do not need a second copy.
-# shellcheck source=detect.sh
-# shellcheck disable=SC1091 # sibling module resolved from this file's dir.
-source "$_AGENTGUARD_LIB_DIR/detect.sh"
 
 # Returns the name of the running agent. Delegates to the shared
 # `_agent_name` detection and falls back to "agent" (not "unknown")
