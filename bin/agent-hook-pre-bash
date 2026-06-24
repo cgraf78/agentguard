@@ -638,6 +638,7 @@ esac
 [ "$_GUARD_SL_COMMIT" -eq 1 ] && _commit_review_nudge
 
 if [ "$_GUARD_GIT_COMMIT" -eq 1 ]; then
+  _hook_remind 'This command is authoring a Git commit message. Apply agent-rule-id: git-commit-message-format.'
   _hook_remind 'If this commit targets a public repo, verify no private or environment-specific details leak into staged code, comments, tests, generated files, docs, or the commit message.'
 fi
 
