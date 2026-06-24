@@ -269,6 +269,77 @@ _commit_review_nudge() {
   _hook_remind 'Consider running /review or /simplify on your changes before committing. Review the final diff for correctness, scope, stale docs/tests, edge cases, and accidental unrelated changes.'
 }
 
+_vcs_authoring_fragment() {
+  local fragment="$1" cw
+
+  cw=$(_fragment_command_word "$fragment") || return 1
+  case "$cw" in
+    git | */git)
+      _git_subcommand_is "$fragment" "commit"
+      ;;
+    sl | */sl)
+      _sl_rewrites_commit_fragment "$fragment"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+_vcs_authoring_in_executable_text() {
+  local text="$1" depth="${2:-0}" fragment
+
+  while IFS= read -r fragment; do
+    _vcs_authoring_fragment "$fragment" && return 0
+  done < <(_hook_executable_fragments "$text" "$depth")
+
+  return 1
+}
+
+_vcs_authoring_in_shell_expansions() {
+  local text="$1" depth="${2:-0}" command fragment payload
+
+  [ "$depth" -lt 2 ] || return 1
+
+  while IFS= read -r -d '' command; do
+    while IFS= read -r -d '' payload; do
+      _vcs_authoring_in_executable_text "$payload" $((depth + 1)) &&
+        return 0
+    done < <(_executable_expansion_payloads "$command")
+
+    while IFS= read -r fragment; do
+      while IFS= read -r payload; do
+        _vcs_authoring_in_shell_expansions "$payload" $((depth + 1)) &&
+          return 0
+      done < <(_structural_shell_payloads "$fragment")
+      while IFS= read -r payload; do
+        _vcs_authoring_in_shell_expansions "$payload" $((depth + 1)) &&
+          return 0
+      done < <(_nested_shell_payloads "$fragment")
+      while IFS= read -r payload; do
+        _vcs_authoring_in_shell_expansions "$payload" $((depth + 1)) &&
+          return 0
+      done < <(_env_split_payloads "$fragment")
+    done < <(_split_command_fragments "${command//$'\n'/ }")
+  done < <(_hook_command_lines "$text")
+
+  while IFS= read -r -d '' payload; do
+    _vcs_authoring_in_executable_text "$payload" $((depth + 1)) &&
+      return 0
+  done < <(_active_heredoc_payloads "$text")
+
+  return 1
+}
+
+_command_text_has_shell_expansion() {
+  case "$1" in
+    *\$\(* | *\`* | *\<\(* | *\>\(* | *\<\<*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 # --- Bulk guard classification ---
 # Performance optimization: the original code ran 13+ independent guard
 # functions, each iterating all cached fragments and calling
@@ -308,6 +379,7 @@ _hook_run_guards() {
   _GUARD_TTY_REQUIRED=0
   _GUARD_GIT_COMMIT=0
   _GUARD_SL_COMMIT=0
+  _GUARD_VCS_AUTHORING_IN_EXPANSION=0
   _GUARD_RM_RF=""
   _GUARD_KILL=""
   _GUARD_CHMOD=""
@@ -589,6 +661,11 @@ _hook_run_guards() {
         ;;
     esac
   done <<<"$_HOOK_EXECUTABLE_FRAGMENTS_CACHE_VALUE"
+
+  if _command_text_has_shell_expansion "$AGENTGUARD_CMD_TRIMMED" &&
+    _vcs_authoring_in_shell_expansions "$AGENTGUARD_CMD_TRIMMED"; then
+    _GUARD_VCS_AUTHORING_IN_EXPANSION=1
+  fi
 }
 
 _hook_run_guards
@@ -636,6 +713,10 @@ esac
 # run the same commit path. Agentguard only keeps the review nudge here.
 [ "$_GUARD_GIT_COMMIT" -eq 1 ] && _commit_review_nudge
 [ "$_GUARD_SL_COMMIT" -eq 1 ] && _commit_review_nudge
+
+if [ "$_GUARD_VCS_AUTHORING_IN_EXPANSION" -eq 1 ]; then
+  _hook_block 'VCS commit-authoring commands inside command substitutions are not allowed. Put literal backticks in single-quoted data, or assign the title/body in a safely quoted script variable before invoking the outer command.'
+fi
 
 if [ "$_GUARD_GIT_COMMIT" -eq 1 ]; then
   _hook_remind 'This command is authoring a Git commit message. Apply agent-rule-id: git-commit-message-format.'

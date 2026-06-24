@@ -61,6 +61,16 @@ _assert_not_contains "echo git commit: no public leak reminder" \
 _assert_not_contains "echo git commit: no git commit rule id" \
   "agent-rule-id: git-commit-message-format" "$HOOK_STDERR"
 
+_run_commit_hook "gh pr create --title \"Reference \`git commit\` rule ID from hooks\""
+_assert_eq "backtick git commit in PR title: blocked" "2" "$HOOK_EXIT"
+_assert_contains "backtick git commit in PR title: explains substitution risk" \
+  "command substitution" "$HOOK_STDERR"
+
+_run_commit_hook "title='Reference \`git commit\` rule ID from hooks'; printf '%s\n' \"\$title\""
+_assert_eq "single-quoted git commit text: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "single-quoted git commit text: no substitution block" \
+  "command substitution" "$HOOK_STDERR"
+
 _run_commit_hook "sl amend"
 _assert_eq "sl amend: hook exits 0" "0" "$HOOK_EXIT"
 _assert_no_sley_gate "sl amend"
