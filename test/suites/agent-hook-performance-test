@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# agent-hook-performance-test - gross latency budgets for cheap hook paths.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+_assert_hook_median_under() {
+  local desc="$1" hook="$2" input="$3"
+  local max_ms="${4:-${AGENTGUARD_PERF_MAX_MEDIAN_MS:-250}}"
+  local output status
+
+  output=$(
+    python3 - "$hook" "$input" "$max_ms" "$TEST_TMPDIR" "$TEST_SID" <<'PY'
+import os
+import statistics
+import subprocess
+import sys
+import time
+
+hook, hook_input, max_ms_arg, tmpdir, sid = sys.argv[1:]
+max_ms = float(max_ms_arg)
+iterations = int(os.environ.get("AGENTGUARD_PERF_ITERATIONS", "9"))
+timeout = float(os.environ.get("AGENTGUARD_PERF_TIMEOUT_SEC", "2"))
+
+env = os.environ.copy()
+env.update({
+    "AGENTGUARD_SESSION_ID": sid,
+    "TMPDIR": tmpdir,
+    "AGENTGUARD_NAME": "agent",
+    "CODEX_THREAD_ID": "",
+    "NO_COLOR": "1",
+    "AGENTGUARD_HIVE_MEMORY_HOOKS": "0",
+    "AGENTGUARD_PROCESS_DETECT": "0",
+})
+for key in (
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CURRENT_SESSION_ID",
+    "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+    "GEMINI_PROJECT_DIR",
+    "AGENTGUARD_PROTECTED_BARE_GIT_DIR",
+    "AGENTGUARD_PROTECTED_BARE_GIT_WORK_TREE",
+    "AGENTGUARD_PROTECTED_BARE_GIT_ALIASES",
+    "AGENTGUARD_PROTECTED_BARE_GIT_LAUNCHER",
+):
+    env.pop(key, None)
+
+cwd = os.environ.get("AGENTGUARD_ROOT")
+samples = []
+payload = hook_input.encode()
+
+def run_once():
+    started = time.perf_counter()
+    try:
+        completed = subprocess.run(
+            [hook],
+            input=payload,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        print(f"timed out after {timeout:.1f}s")
+        sys.exit(2)
+
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    if completed.returncode != 0:
+        print(f"hook exited {completed.returncode} after {elapsed_ms:.1f}ms")
+        sys.exit(2)
+    return elapsed_ms
+
+for _ in range(2):
+    run_once()
+
+for _ in range(iterations):
+    samples.append(run_once())
+
+median_ms = statistics.median(samples)
+max_sample_ms = max(samples)
+summary = (
+    f"median {median_ms:.1f}ms <= {max_ms:.1f}ms "
+    f"(max sample {max_sample_ms:.1f}ms, n={iterations})"
+)
+print(summary)
+sys.exit(0 if median_ms <= max_ms else 1)
+PY
+  )
+  status=$?
+
+  if [[ "$status" -eq 0 ]]; then
+    _pass "$desc: $output"
+  else
+    _fail "$desc: $output"
+  fi
+}
+
+echo ""
+echo "=== hook performance: cheap paths ==="
+
+_assert_hook_median_under \
+  "pre-bash true stays fast" \
+  "$PRE_BASH" \
+  '{"tool_input":{"command":"true"}}'
+
+_assert_hook_median_under \
+  "pre-bash git status fast path stays fast" \
+  "$PRE_BASH" \
+  '{"tool_input":{"command":"git status --short"}}'
+
+_assert_hook_median_under \
+  "pre-edit empty payload stays fast" \
+  "$PRE_EDIT" \
+  '{"tool_input":{}}'
+
+_assert_hook_median_under \
+  "pre-mcp benign payload stays fast" \
+  "$PRE_MCP" \
+  '{"tool_name":"functions.exec_command","tool_input":{"cmd":"true"}}'
+
+_test_summary
