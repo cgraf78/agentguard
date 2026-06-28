@@ -46,7 +46,7 @@ _run_hook_trace "$PRE_BASH" '{"tool_input":{"command":"git status --untracked-fi
 _assert_eq "git status --untracked-files=all outside protected bare repo: allowed" "0" "$HOOK_EXIT"
 _assert_contains \
   "git status --untracked-files=all: delegates to dependency hook" \
-  "agentguard/bin/agent-hook-pre-bash" \
+  "hook-command-classifier.sh" \
   "$HOOK_STDERR"
 _assert_not_contains \
   "git status --untracked-files=all outside protected bare repo: no protected bare-Git scan block" \

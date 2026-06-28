@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# agent-command-classifier-test — public command classification contract.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+CLASSIFY_COMMAND="$BIN_DIR/agentguard-classify-command"
+
+_classify_basenames() {
+  "$CLASSIFY_COMMAND" --json -- "$1" | jq -r '.commands[].basename'
+}
+
+echo ""
+echo "=== agentguard-classify-command: public JSON contract ==="
+
+json=$("$CLASSIFY_COMMAND" --json -- "env -u GIT_DIR ruff check .")
+_assert_eq "classifier JSON: top-level object has commands array" "array" "$(jq -r '.commands | type' <<<"$json")"
+_assert_eq "classifier JSON: unwraps env command basename" "ruff" "$(jq -r '.commands[0].basename' <<<"$json")"
+_assert_eq "classifier JSON: preserves executable fragment" "env -u GIT_DIR ruff check ." "$(jq -r '.commands[0].fragment' <<<"$json")"
+
+json=$("$CLASSIFY_COMMAND" --json -- 'printf "a\tb"')
+_assert_eq "classifier JSON: escapes quoted fragment text" 'printf "a\tb"' "$(jq -r '.commands[0].fragment' <<<"$json")"
+
+basenames=$(_classify_basenames "if ! prettier --check .; then echo fail; fi")
+_assert_contains "classifier JSON: recognizes command behind if/negation" "prettier" "$basenames"
+_assert_contains "classifier JSON: keeps later executable fragments" "echo" "$basenames"
+_assert_not_contains "classifier JSON: omits shell terminators" "fi" "$basenames"
+
+basenames=$(_classify_basenames "for f in a; do prettier --check \"\$f\"; done")
+_assert_contains "classifier JSON: keeps loop body executable" "prettier" "$basenames"
+_assert_not_contains "classifier JSON: omits loop header" "for" "$basenames"
+_assert_not_contains "classifier JSON: omits loop terminator" "done" "$basenames"
+
+basenames=$(_classify_basenames "{ xargs -r -n 1 prettier --check; }")
+_assert_contains "classifier JSON: unwraps xargs payload command" "prettier" "$basenames"
+
+basenames=$(_classify_basenames 'env -S "ruff check ."')
+_assert_contains "classifier JSON: scans env split-string payload" "ruff" "$basenames"
+
+basenames=$(_classify_basenames 'bash -lc "ruff check ."')
+_assert_contains "classifier JSON: keeps shell wrapper command" "bash" "$basenames"
+_assert_contains "classifier JSON: scans nested shell payload" "ruff" "$basenames"
+
+stdin_json=$(printf '%s' 'command ./bin/checkrun lint' | "$CLASSIFY_COMMAND")
+_assert_eq "classifier JSON: reads stdin without --json" "checkrun" "$(jq -r '.commands[0].basename' <<<"$stdin_json")"
+
+jsonl=$(printf '%s\n' 'env -u FOO ruff check .' 'xargs -r -n 1 prettier --check' | "$CLASSIFY_COMMAND" --json-lines)
+_assert_eq "classifier JSONL: emits one record per input line" "2" "$(jq -s 'length' <<<"$jsonl")"
+_assert_eq "classifier JSONL: preserves input text" "env -u FOO ruff check ." "$(jq -r -s '.[0].input' <<<"$jsonl")"
+_assert_eq "classifier JSONL: classifies second input" "prettier" "$(jq -r -s '.[1].commands[0].basename' <<<"$jsonl")"
+
+_test_summary

@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# agentguard-classify-command — emit conservative command facts as JSON.
+
+# macOS can resolve `/usr/bin/env bash` to Bash 3 when launchers provide a
+# minimal PATH. The classifier uses Bash 4+ arrays, so mirror the hook re-exec
+# behavior for this public command instead of giving consumers a platform trap.
+if [ -n "${BASH_VERSION:-}" ] && [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] &&
+  [ -z "${AGENTGUARD_CLASSIFY_COMMAND_REEXEC:-}" ]; then
+  for _agentguard_bash in "$HOME/.local/bin/bash" /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    if [ -x "$_agentguard_bash" ]; then
+      AGENTGUARD_CLASSIFY_COMMAND_REEXEC=1 exec "$_agentguard_bash" "$0" "$@"
+    fi
+  done
+fi
+
+set -euo pipefail
+
+_usage() {
+  cat <<'EOF'
+usage: agentguard-classify-command [--json] [--json-lines] [--] [command...]
+
+Classify executable command words from Bash-like command text and print JSON:
+  {"commands":[{"fragment":"...","command":"...","basename":"..."}]}
+
+With no command argument, command text is read from stdin.
+With --json-lines, read one command per stdin line and print one JSON object
+per line: {"input":"...","commands":[...]}.
+EOF
+}
+
+_script_parent() {
+  case "$1" in
+    */*) printf '%s\n' "${1%/*}" ;;
+    *) printf '.\n' ;;
+  esac
+}
+
+_script_dir() {
+  local path="$1" dir target
+  while [[ -L "$path" ]]; do
+    dir=$(cd -P -- "$(_script_parent "$path")" && pwd) || return 1
+    target=$(readlink "$path") || return 1
+    [[ "$target" == /* ]] || target="$dir/$target"
+    path="$target"
+  done
+  cd -P -- "$(_script_parent "$path")" && pwd
+}
+
+_json_lines=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --json)
+      shift
+      ;;
+    --json-lines)
+      _json_lines=1
+      shift
+      ;;
+    -h | --help)
+      _usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      printf 'agentguard-classify-command: unknown option: %s\n' "$1" >&2
+      _usage >&2
+      exit 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+_bin_dir=$(_script_dir "${BASH_SOURCE[0]}") || {
+  echo "agentguard-classify-command: cannot resolve executable path" >&2
+  exit 2
+}
+
+# shellcheck source=../lib/agentguard/hook-command-classifier.sh
+# shellcheck disable=SC1091 # sibling module resolved from this script's dir.
+source "$_bin_dir/../lib/agentguard/hook-command-classifier.sh"
+
+if [ "$_json_lines" -eq 1 ]; then
+  if [ "$#" -gt 0 ]; then
+    printf 'agentguard-classify-command: --json-lines reads commands from stdin\n' >&2
+    exit 2
+  fi
+  while IFS= read -r _command_text || [ -n "$_command_text" ]; do
+    agentguard_classify_command_record_json "$_command_text"
+  done
+  exit 0
+fi
+
+if [ "$#" -gt 0 ]; then
+  _command_text="$*"
+else
+  _command_text="$(cat)"
+fi
+
+agentguard_classify_command_json "$_command_text"
