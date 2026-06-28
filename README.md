@@ -14,6 +14,8 @@ another tool that follows the same hook protocol.
 ## Public API
 
 - `bin/agent-hook-*` files are the PATH-visible hook entry points.
+- `bin/agentguard-classify-command` emits JSON command facts for non-hook
+  policy audits that need AgentGuard's conservative shell command-word model.
 - `bin/claude-session-name` names Claude transcript sessions for
   `agent-hook-session-end-claude` and for manual transcript backfills.
 - `lib/agentguard/agentguard.sh` is the sourceable detection API for non-hook
@@ -66,7 +68,9 @@ command is installed.
 Run `test/agentguard-test` to execute repo-owned hook suites. Behavioral
 coverage for hook entry points lives here, including the protected bare-Git
 guard that the command classifier exercises. Downstream consumers should keep
-only install and wiring smoke tests.
+only install and wiring smoke tests. Consumers that need command detection
+should call `agentguard-classify-command` rather than sourcing private
+`_hook_*` classifier helpers.
 
 ## Lifecycle
 

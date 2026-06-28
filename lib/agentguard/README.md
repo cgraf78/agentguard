@@ -9,6 +9,8 @@ another tool that follows the same hook protocol.
 
 - `agentguard.sh` is the sourceable detection API for scripts outside the hook
   runtime.
+- `agentguard-classify-command` is the supported command-line API for non-hook
+  consumers that need AgentGuard's command classifier output as structured JSON.
 - `claude-session-name` is a PATH-visible helper used by
   `agent-hook-session-end-claude` to name Claude transcript sessions.
 - `hook-helpers.sh` is the hook-runtime API for `agent-hook-*` entry points and

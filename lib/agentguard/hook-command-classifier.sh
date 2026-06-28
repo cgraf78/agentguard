@@ -1008,6 +1008,184 @@ _hook_cache_executable_fragments() {
   _HOOK_EXECUTABLE_FRAGMENTS_CACHE_VALUE="$(_hook_executable_fragments_uncached "$text" 0)"
 }
 
+_agentguard_command_fact_is_executable() {
+  local command="$1"
+
+  # Hook guards match the command names they care about, so harmless control
+  # fragments like `fi` and `done` can flow through internally. Public consumers
+  # need a cleaner fact stream that contains executable command words only.
+  case "$command" in
+    */*) return 0 ;;
+  esac
+  case "$command" in
+    "" | "!" | "{" | "}" | "case" | "coproc" | "do" | "done" | "elif" | \
+      "else" | "esac" | "fi" | "for" | "function" | "if" | "in" | \
+      "select" | "then" | "time" | "until" | "while")
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+_agentguard_json_string() {
+  local value="$1" out="" ch ord escaped
+  local i
+
+  for ((i = 0; i < ${#value}; i++)); do
+    ch="${value:i:1}"
+    case "$ch" in
+      '"') out+="\\\"" ;;
+      \\) out+="\\\\" ;;
+      $'\b') out+='\\b' ;;
+      $'\f') out+='\\f' ;;
+      $'\n') out+='\\n' ;;
+      $'\r') out+='\\r' ;;
+      $'\t') out+='\\t' ;;
+      *)
+        printf -v ord '%d' "'$ch"
+        if [ "$ord" -lt 32 ]; then
+          printf -v escaped '\\u%04x' "$ord"
+          out+="$escaped"
+        else
+          out+="$ch"
+        fi
+        ;;
+    esac
+  done
+
+  printf '"%s"' "$out"
+}
+
+_agentguard_command_text_is_simple_fragment() {
+  local text="$1"
+
+  # Public JSONL callers often classify many already-filtered one-line command
+  # candidates. Avoid the full recursive scanner when there is no syntax that
+  # can introduce additional executable fragments.
+  [[ "$text" == *$'\n'* ]] && return 1
+  [[ "$text" == *";"* ]] && return 1
+  [[ "$text" == *"|"* ]] && return 1
+  [[ "$text" == *"&"* ]] && return 1
+  [[ "$text" == *"<"* ]] && return 1
+  [[ "$text" == *">"* ]] && return 1
+  [[ "$text" == *"("* ]] && return 1
+  [[ "$text" == *")"* ]] && return 1
+  [[ "$text" == *"{"* ]] && return 1
+  [[ "$text" == *"}"* ]] && return 1
+  [[ "$text" == *"\`"* ]] && return 1
+  [[ "$text" == *"\$("* ]] && return 1
+  [[ "$text" == *\\* ]] && return 1
+  return 0
+}
+
+_agentguard_command_text_is_plain_fragment() {
+  local text="$1"
+
+  _agentguard_command_text_is_simple_fragment "$text" || return 1
+  [[ "$text" == *"'"* ]] && return 1
+  [[ "$text" == *'"'* ]] && return 1
+  return 0
+}
+
+_agentguard_plain_fragment_command_word() {
+  local text="$1" i=0 word base
+  local -a words=()
+
+  read -r -a words <<<"$text"
+  [ "${#words[@]}" -gt 0 ] || return 1
+
+  while [ "$i" -lt "${#words[@]}" ]; do
+    word="${words[$i]}"
+    base="${word##*/}"
+    case "$word" in
+      [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
+        ((i++))
+        continue
+        ;;
+    esac
+    case "$base" in
+      "" | "!" | if | then | elif | while | until | do | else | coproc | command | builtin | exec | time | noglob)
+        ((i++))
+        continue
+        ;;
+      env | sudo | doas | nohup | nice | timeout | xargs)
+        return 1
+        ;;
+      bash | sh | zsh | fish | eval)
+        return 1
+        ;;
+      *)
+        printf '%s' "$word"
+        return 0
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+_agentguard_command_fact_json() {
+  local fragment="$1" command="$2" basename
+  basename="${command##*/}"
+
+  printf '{"fragment":'
+  _agentguard_json_string "$fragment"
+  printf ',"command":'
+  _agentguard_json_string "$command"
+  printf ',"basename":'
+  _agentguard_json_string "$basename"
+  printf '}'
+}
+
+_agentguard_command_facts_array_json() {
+  local text="$1" fragment command first=1
+
+  printf '['
+
+  if _agentguard_command_text_is_plain_fragment "$text"; then
+    command="$(_agentguard_plain_fragment_command_word "$text")" || command=""
+    if [ -n "$command" ] && _agentguard_command_fact_is_executable "$command"; then
+      _agentguard_command_fact_json "$text" "$command"
+      printf ']'
+      return 0
+    fi
+  fi
+
+  while IFS= read -r fragment; do
+    command="$(_fragment_command_word "$fragment")" || continue
+    _agentguard_command_fact_is_executable "$command" || continue
+    [ -n "$command" ] || continue
+    if [ "$first" -eq 1 ]; then
+      first=0
+    else
+      printf ','
+    fi
+    _agentguard_command_fact_json "$fragment" "$command"
+  done < <(_hook_executable_fragments "$text")
+  printf ']'
+}
+
+# Public classifier API for non-hook consumers. Keep this wrapper thin so
+# AgentGuard's hook guards and policy-audit callers share one command-word
+# model, while the hook-specific block/warn decisions stay owned by hooks.
+agentguard_classify_command_json() {
+  local text="$1"
+
+  printf '{"commands":'
+  _agentguard_command_facts_array_json "$text"
+  printf '}\n'
+}
+
+agentguard_classify_command_record_json() {
+  local text="$1"
+
+  printf '{"input":'
+  _agentguard_json_string "$text"
+  printf ',"commands":'
+  _agentguard_command_facts_array_json "$text"
+  printf '}\n'
+}
+
 # Tokenize one command fragment into shell words, preserving quoted whitespace
 # as part of the word. This is still a shallow lexer: it strips quotes and
 # backslash escapes, but it does not evaluate expansions or substitutions.
@@ -2075,15 +2253,10 @@ _protected_bare_git_context() {
   return 1
 }
 
-_fragment_command_index() {
-  local fragment="$1" word
+_fragment_command_index_from_words() {
   local i=0 next_i
-  local -a words=()
-
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
-  [ "${#words[@]}" -gt 0 ] || return 1
+  local word
+  local -a words=("$@")
 
   while [ "$i" -lt "${#words[@]}" ]; do
     word="$(_clean_command_word "${words[$i]}")"
@@ -2115,6 +2288,17 @@ _fragment_command_index() {
   done
 
   return 1
+}
+
+_fragment_command_index() {
+  local fragment="$1" word
+  local -a words=()
+
+  while IFS= read -r word; do
+    words+=("$word")
+  done < <(_fragment_tokens "$fragment")
+  [ "${#words[@]}" -gt 0 ] || return 1
+  _fragment_command_index_from_words "${words[@]}"
 }
 
 # Match a command word by basename. This keeps `/bin/rm`, `./git`, and `sl`
