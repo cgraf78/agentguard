@@ -34,10 +34,19 @@ _pre_edit_code_file() {
   local fp="$1" base
   base="$(basename "$fp")"
   case "$base" in
-    Makefile | Dockerfile | Containerfile | Rakefile | Gemfile | Brewfile | justfile | Justfile)
+    AGENTS.md | CLAUDE.md | GEMINI.md | \
+      Makefile | Dockerfile | Containerfile | Rakefile | Gemfile | Brewfile | justfile | Justfile)
       return 0
       ;;
   esac
+  case "$fp" in
+    */.config/agent-rules/*.md)
+      return 0
+      ;;
+  esac
+  # Keep this list as a cheap hook-side reminder trigger. Agent rule loading
+  # owns the exact fragment set; the pre-edit hook only decides whether an edit
+  # is likely to need the global/code/language policy reminder.
   case "$fp" in
     *.c | *.cc | *.cpp | *.cxx | *.h | *.hh | *.hpp | *.hxx | \
       *.m | *.mm | *.rs | *.go | *.zig | *.java | *.kt | *.kts | *.scala | \
@@ -53,7 +62,7 @@ _pre_edit_code_file() {
 
 _pre_edit_comment_reminder() {
   local fp reminder
-  reminder="Code edit: apply AGENTS.md > Design Principles and Engineering Workflow before editing. Keep ownership clear, scope tight, and use small code/test/review/fix cycles. Add comments for why: invariants, tradeoffs, edge cases, and cross-system assumptions; avoid comments that restate obvious code."
+  reminder="Code edit: apply AGENTS.md > Design Principles, Engineering Workflow, Code Style, and any loaded language-specific rule fragments before editing. Keep ownership clear, scope tight, and use small code/test/review/fix cycles. Add comments for why: invariants, tradeoffs, edge cases, and cross-system assumptions; avoid comments that restate obvious code."
   while IFS= read -r fp; do
     [ -n "$fp" ] || continue
     _pre_edit_code_file "$fp" || continue
