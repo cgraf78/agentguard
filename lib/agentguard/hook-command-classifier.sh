@@ -3077,10 +3077,51 @@ _command_subcommand_has_option() {
   return 1
 }
 
+# Drop trailing group-close characters (`)` / `}`) that have no matching opener
+# within the token. When a subshell or brace group wraps the command —
+# `(rm -rf /)`, `( (rm -rf /) )` — the tokenizer glues the closer onto the final
+# operand (`/)`, `~)`, `$HOME)`, `${HOME})`), which would otherwise hide a
+# catastrophic target from the dangerous-path patterns below. Balanced groupers
+# are preserved, so `${HOME}` (one `{`, one `}`) survives intact; this is why the
+# rm target is passed in raw rather than through `_clean_command_word`, which
+# would strip `${HOME}`'s closing brace unconditionally.
+#
+# Counts are taken once and decremented as closers are peeled, so this stays
+# O(n) even for adversarial tokens with many trailing closers (a per-iteration
+# rescan would be O(n^2) and could stall the pre-bash gate).
+_strip_unbalanced_trailing_groupers() {
+  local s="$1" ch tmp paren_open paren_close brace_open brace_close
+  tmp="${s//[!(]/}"
+  paren_open=${#tmp}
+  tmp="${s//[!)]/}"
+  paren_close=${#tmp}
+  tmp="${s//[!{]/}"
+  brace_open=${#tmp}
+  tmp="${s//[!\}]/}"
+  brace_close=${#tmp}
+  while [ -n "$s" ]; do
+    ch="${s: -1}"
+    case "$ch" in
+      ')')
+        [ "$paren_close" -gt "$paren_open" ] || break
+        paren_close=$((paren_close - 1))
+        ;;
+      '}')
+        [ "$brace_close" -gt "$brace_open" ] || break
+        brace_close=$((brace_close - 1))
+        ;;
+      *) break ;;
+    esac
+    s="${s%?}"
+  done
+  printf '%s' "$s"
+}
+
 _rm_target_is_dangerous() {
   local target="$1" home_var="\$HOME" home_brace="\${HOME}" tilde expanded norm home_parent
   tilde=$(printf '\176')
   target="$(_shell_word_token "$target")"
+  target="$(_strip_unbalanced_trailing_groupers "$target")"
 
   # Literal catastrophic forms, including globs that wipe a whole tree (these
   # don't normalize to a bare dir, so keep matching them directly).
