@@ -178,6 +178,41 @@ _output_process_sub_json=$(jq -nc --arg c 'cat >(rm -rf /)' '{"tool_input":{"com
 _run_hook "$PRE_BASH" "$_output_process_sub_json"
 _assert_eq "output process substitution rm -rf /: exit 2" "2" "$HOOK_EXIT"
 
+# Bare subshell groups: the tokenizer glues the closing `)` onto the final
+# operand (`/)`, `~)`, `$HOME)`, `${HOME})`), which previously hid the
+# catastrophic target and downgraded the block to a warning. All must block.
+_subshell_root_json=$(jq -nc --arg c '(rm -rf /)' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_subshell_root_json"
+_assert_eq "subshell rm -rf /: exit 2" "2" "$HOOK_EXIT"
+_assert_contains "subshell rm -rf /: BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_subshell_tilde_json=$(jq -nc --arg c '(rm -rf ~)' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_subshell_tilde_json"
+_assert_eq "subshell rm -rf ~: exit 2" "2" "$HOOK_EXIT"
+
+_subshell_home_json=$(jq -nc --arg c '(rm -rf $HOME)' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_subshell_home_json"
+_assert_eq "subshell rm -rf \$HOME: exit 2" "2" "$HOOK_EXIT"
+
+_subshell_home_brace_json=$(jq -nc --arg c '(rm -rf ${HOME})' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_subshell_home_brace_json"
+_assert_eq "subshell rm -rf \${HOME}: exit 2" "2" "$HOOK_EXIT"
+
+_subshell_glob_json=$(jq -nc --arg c '(rm -rf /*)' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_subshell_glob_json"
+_assert_eq "subshell rm -rf /*: exit 2" "2" "$HOOK_EXIT"
+
+_nested_subshell_json=$(jq -nc --arg c '( (rm -rf /) )' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_nested_subshell_json"
+_assert_eq "nested subshell rm -rf /: exit 2" "2" "$HOOK_EXIT"
+
+# Stripping the stray closer must not over-block a non-catastrophic subshell
+# target: balanced `${HOME}` is preserved, but `./build` is safe and only warns.
+_subshell_safe_json=$(jq -nc --arg c '(rm -rf ./build)' '{"tool_input":{"command":$c}}')
+_run_hook "$PRE_BASH" "$_subshell_safe_json"
+_assert_eq "subshell rm -rf ./build: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "subshell rm -rf ./build: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
 _heredoc_cmd_sub_json=$(jq -nc --arg c $'cat <<EOF\n$(rm -rf /)\nEOF' '{"tool_input":{"command":$c}}')
 _run_hook "$PRE_BASH" "$_heredoc_cmd_sub_json"
 _assert_eq "active heredoc command substitution rm -rf /: exit 2" "2" "$HOOK_EXIT"
