@@ -1,0 +1,19 @@
+.TH AGENT-HOOK-SESSION-END-CLAUDE 1 "2026-06-30" "agentguard" "User Commands"
+.SH NAME
+agent-hook-session-end-claude \- Claude-specific session-end maintenance
+.SH SYNOPSIS
+.B agent-hook-session-end-claude
+.SH DESCRIPTION
+.B agent-hook-session-end-claude
+is the Claude-facing session-end entry point. It can name untitled Claude
+sessions through
+.BR claude-session-name (1)
+and runs Claude-specific extension maintenance while preserving AgentGuard's
+shared hook response contract.
+.SH EXIT STATUS
+.TP
+.B 0
+Claude session-end maintenance completed.
+.SH SEE ALSO
+.BR claude-session-name (1),
+.BR agent-hook-session-end (1)

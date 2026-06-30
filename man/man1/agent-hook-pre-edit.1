@@ -1,0 +1,28 @@
+.TH AGENT-HOOK-PRE-EDIT 1 "2026-06-30" "agentguard" "User Commands"
+.SH NAME
+agent-hook-pre-edit \- guard agent file edits before they are applied
+.SH SYNOPSIS
+.B agent-hook-pre-edit
+.SH DESCRIPTION
+.B agent-hook-pre-edit
+reads an agent edit hook JSON payload from standard input, extracts target
+paths, blocks edits to secret-like files, tracks repeated edit churn, and
+reminds the agent to apply the loaded design, workflow, code-style, and
+language-specific rule fragments before changing code or configuration.
+.PP
+The churn guard warns at
+.B AGENTGUARD_EDIT_CHURN_WARN
+edits to one file and blocks at
+.B AGENTGUARD_EDIT_CHURN_BLOCK .
+Set
+.B AGENTGUARD_EDIT_CHURN_BYPASS=1
+for a deliberate repeated-edit pass.
+.SH EXIT STATUS
+.TP
+.B 0
+The edit is allowed, possibly with warnings or reminders.
+.TP
+.B 2
+The edit is blocked.
+.SH SEE ALSO
+.BR agent-hook-post-edit (1)

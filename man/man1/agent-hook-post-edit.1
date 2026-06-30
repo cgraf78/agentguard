@@ -1,0 +1,26 @@
+.TH AGENT-HOOK-POST-EDIT 1 "2026-06-30" "agentguard" "User Commands"
+.SH NAME
+agent-hook-post-edit \- format edited files through Sley
+.SH SYNOPSIS
+.B agent-hook-post-edit
+.SH DESCRIPTION
+.B agent-hook-post-edit
+reads an agent edit hook JSON payload from standard input and delegates changed
+files to
+.BR "sley hook format-file" .
+Broader lint and verification remain native commit-hook responsibilities so
+human and agent commit workflows share the same readiness path.
+.SH EXIT STATUS
+.TP
+.B 0
+Formatting completed or no format target was selected.
+.TP
+.B 1
+Formatting failed.
+.TP
+.B 2
+The local install is missing required dependencies such as
+.BR sley .
+.SH SEE ALSO
+.BR agent-hook-pre-edit (1),
+.BR sley (1)

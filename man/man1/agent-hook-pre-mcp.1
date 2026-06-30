@@ -1,0 +1,25 @@
+.TH AGENT-HOOK-PRE-MCP 1 "2026-06-30" "agentguard" "User Commands"
+.SH NAME
+agent-hook-pre-mcp \- guard agent MCP tool calls before execution
+.SH SYNOPSIS
+.B agent-hook-pre-mcp
+.SH DESCRIPTION
+.B agent-hook-pre-mcp
+reads an MCP hook JSON payload from standard input. It blocks MCP servers after
+repeated failures, warns on expensive or under-scoped MCP calls, and then lets
+local extensions add environment-specific MCP policy.
+.PP
+The base policy warns on exact
+.B search_files
+leaf-tool calls without a path filter and warns once on exact
+.B knowledge_load
+leaf-tool calls because large documents can consume significant context.
+.SH EXIT STATUS
+.TP
+.B 0
+The MCP call is allowed, possibly with warnings.
+.TP
+.B 2
+The MCP call is blocked.
+.SH SEE ALSO
+.BR agent-hook-post-mcp (1)

@@ -1,0 +1,17 @@
+.TH AGENT-HOOK-SESSION-START-CLAUDE 1 "2026-06-30" "agentguard" "User Commands"
+.SH NAME
+agent-hook-session-start-claude \- Claude-specific session-start adapter
+.SH SYNOPSIS
+.B agent-hook-session-start-claude
+.SH DESCRIPTION
+.B agent-hook-session-start-claude
+is the Claude-facing session-start entry point. It maps Claude's hook runtime
+identity into AgentGuard's shared session-start behavior and emits the same
+JSON response contract as
+.BR agent-hook-session-start (1).
+.SH EXIT STATUS
+.TP
+.B 0
+Startup context was emitted or no context was available.
+.SH SEE ALSO
+.BR agent-hook-session-start (1)

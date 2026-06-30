@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Verify that human-facing PATH commands have manual pages.
+
+set -o pipefail
+export NO_COLOR=1
+
+AGENTGUARD_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+AGENTGUARD_REPO_ROOT="$(cd -- "$AGENTGUARD_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$AGENTGUARD_TEST_DIR/helpers.sh"
+
+echo "=== agentguard: manpages ==="
+
+while IFS= read -r command; do
+  page="$AGENTGUARD_REPO_ROOT/man/man1/$command.1"
+  _assert_file_exists "manpage exists: $command" "$page"
+  content=$(cat "$page")
+  _assert_contains "manpage NAME section: $command" ".SH NAME" "$content"
+  _assert_contains "manpage names command: $command" "$command \\" "$content"
+done < <(
+  git -C "$AGENTGUARD_REPO_ROOT" ls-files -- 'bin/*' |
+    xargs -n 1 basename |
+    grep -v '^README.md$' |
+    sort
+)
+
+_test_summary

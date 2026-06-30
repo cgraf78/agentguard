@@ -1,0 +1,31 @@
+.TH AGENT-HOOK-PRE-BASH 1 "2026-06-30" "agentguard" "User Commands"
+.SH NAME
+agent-hook-pre-bash \- guard agent shell commands before execution
+.SH SYNOPSIS
+.B agent-hook-pre-bash
+.SH DESCRIPTION
+.B agent-hook-pre-bash
+reads an agent hook JSON payload from standard input and emits a hook JSON
+response. It blocks or warns on risky shell commands such as broad destructive
+removal, unsafe Git operations, unscoped recursive search, protected bare-Git
+untracked scans, TTY-only commands, and other command patterns that should not
+run unattended.
+.PP
+The hook is agent-agnostic. Launchers identify the concrete runtime with
+.B AGENTGUARD_NAME
+and
+.BR AGENTGUARD_SESSION_ID .
+.SH EXTENSIONS
+After base policy runs, AgentGuard sources matching extension files through
+its hook helper API. Extensions can add warnings, blocks, or context while the
+base hook keeps ownership of the protocol response.
+.SH EXIT STATUS
+.TP
+.B 0
+The command is allowed, possibly with warnings or reminders.
+.TP
+.B 2
+The command is blocked.
+.SH SEE ALSO
+.BR agentguard-classify-command (1),
+.BR agent-hook-post-bash (1)

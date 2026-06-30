@@ -1,0 +1,22 @@
+.TH AGENT-HOOK-STOP 1 "2026-06-30" "agentguard" "User Commands"
+.SH NAME
+agent-hook-stop \- run end-of-turn agent checks and notifications
+.SH SYNOPSIS
+.B agent-hook-stop
+.SH DESCRIPTION
+.B agent-hook-stop
+reads a stop hook JSON payload from standard input, asks Hive Memory for any
+pending-memory reminder, and plays terminal notifications. On Codex, only
+explicit reminders or blocks continue the turn; ordinary warnings do not trap
+shutdown.
+.SH EXIT STATUS
+.TP
+.B 0
+The turn may stop normally.
+.TP
+.B 2
+The hook asks the agent runtime to continue because a block or explicit
+reminder must be surfaced.
+.SH SEE ALSO
+.BR agent-hook-notification (1),
+.BR hm (1)
