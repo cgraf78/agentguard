@@ -165,10 +165,10 @@ To add a new managed agent runtime:
   patterns. Stdout extraction is centralized so agent-specific payload names do
   not leak into the base hook.
 - `agent-hook-pre-edit` parses edited paths, reminds once per user prompt on
-  code/config edits to apply AGENTS.md design/workflow guidance, warns or
-  blocks repeated edits to the same file unless `AGENTGUARD_EDIT_CHURN_BYPASS`
-  is enabled, and leaves room for environment-specific generated-file or
-  readonly-file guards.
+  code/config edits to apply AGENTS.md design/workflow/code-style guidance plus
+  any loaded language-specific rule fragments, warns or blocks repeated edits to
+  the same file unless `AGENTGUARD_EDIT_CHURN_BYPASS` is enabled, and leaves
+  room for environment-specific generated-file or readonly-file guards.
 - `agent-hook-post-edit` formats changed files through
   `sley hook format-file`. Broader lint and verification policy stays in the
   native commit hooks.
