@@ -13,10 +13,8 @@ human and agent commit workflows share the same readiness path.
 .SH EXIT STATUS
 .TP
 .B 0
-Formatting completed or no format target was selected.
-.TP
-.B 1
-Formatting failed.
+Formatting completed, selected formatter failures were ignored after Sley
+surfaced them, or no format target was selected.
 .TP
 .B 2
 The local install is missing required dependencies such as
