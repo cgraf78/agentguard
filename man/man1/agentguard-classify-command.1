@@ -1,0 +1,53 @@
+.TH AGENTGUARD-CLASSIFY-COMMAND 1 "2026-06-30" "agentguard" "User Commands"
+.SH NAME
+agentguard-classify-command \- classify executable command words as JSON
+.SH SYNOPSIS
+.B agentguard-classify-command
+.RB [ --json ]
+.RB [ --json-lines ]
+.RB [ -- ]
+.RI [ command ...]
+.SH DESCRIPTION
+.B agentguard-classify-command
+emits conservative command facts from Bash-like command text. It is the public
+API for consumers that need AgentGuard's command-word model without sourcing
+private hook helpers.
+.PP
+With command arguments, the arguments are joined with spaces and classified as
+one command text. With no command arguments, input is read from standard input.
+.SH OPTIONS
+.TP
+.B --json
+Accepted for explicitness; JSON is the default output format.
+.TP
+.B --json-lines
+Read one command per input line and print one JSON object per line containing
+the original input and its classified command records.
+.TP
+.B --
+Stop option parsing.
+.TP
+.BR -h ", " --help
+Show usage.
+.SH OUTPUT
+Normal output has this shape:
+.PP
+.RS
+.nf
+{"commands":[{"fragment":"...","command":"...","basename":"..."}]}
+.fi
+.RE
+.PP
+.B --json-lines
+adds the original
+.B input
+field to each line.
+.SH EXIT STATUS
+.TP
+.B 0
+Classification completed.
+.TP
+.B 2
+Usage error.
+.SH SEE ALSO
+.BR claude-session-name (1)

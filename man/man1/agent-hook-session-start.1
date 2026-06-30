@@ -1,0 +1,24 @@
+.TH AGENT-HOOK-SESSION-START 1 "2026-06-30" "agentguard" "User Commands"
+.SH NAME
+agent-hook-session-start \- emit startup context for an agent session
+.SH SYNOPSIS
+.B agent-hook-session-start
+.SH DESCRIPTION
+.B agent-hook-session-start
+reads a session-start hook JSON payload from standard input, reports repository
+context, warns on local environment issues such as high disk usage, and asks
+Hive Memory for startup context when
+.BR hm (1)
+is installed and configured.
+.PP
+When a session is launched from
+.BR $HOME ,
+AgentGuard treats that as no active project instead of passing the home
+directory as a project hint.
+.SH EXIT STATUS
+.TP
+.B 0
+Startup context was emitted or no context was available.
+.SH SEE ALSO
+.BR agent-hook-prompt-submit (1),
+.BR hm (1)

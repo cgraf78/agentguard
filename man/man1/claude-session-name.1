@@ -1,0 +1,32 @@
+.TH CLAUDE-SESSION-NAME 1 "2026-06-30" "agentguard" "User Commands"
+.SH NAME
+claude-session-name \- generate a short name for a Claude transcript
+.SH SYNOPSIS
+.B claude-session-name
+.I transcript_path
+.SH DESCRIPTION
+.B claude-session-name
+reads a Claude JSONL transcript, extracts recent user messages, and asks the
+Claude CLI for a lowercase dash-separated session name. It is used by
+AgentGuard's Claude session-end integration and can also be run manually for
+transcript backfills.
+.PP
+System reminders and slash commands are ignored before naming. If there is no
+usable transcript content or naming fails, the command exits silently.
+.SH DEPENDENCIES
+.TP
+.B jq
+Required to parse transcript JSON lines.
+.TP
+.B claude
+Required to generate the name.
+.SH EXIT STATUS
+.TP
+.B 0
+A name was printed, or naming was skipped because no usable name could be
+generated.
+.TP
+.B 1
+The transcript path was missing or not a regular file.
+.SH SEE ALSO
+.BR agentguard-classify-command (1)

@@ -1,0 +1,21 @@
+.TH AGENT-HOOK-SESSION-START-CLAUDE 1 "2026-06-30" "agentguard" "User Commands"
+.SH NAME
+agent-hook-session-start-claude \- Claude-specific session-start extension
+.SH SYNOPSIS
+.B agent-hook-session-start-claude
+.SH DESCRIPTION
+.B agent-hook-session-start-claude
+is sourced by
+.BR agent-hook-session-start (1)
+when the active runtime is Claude. It is not a standalone hook adapter and
+should not be configured directly as the session-start command.
+.PP
+The extension runs Claude-specific startup maintenance, such as the quiet daily
+Claude template refresh, while the generic hook owns stdin parsing, repository
+context, Hive Memory context, extension loading, and final JSON emission.
+.SH EXIT STATUS
+.TP
+.B 0
+The extension completed or had no Claude-specific work to do.
+.SH SEE ALSO
+.BR agent-hook-session-start (1)

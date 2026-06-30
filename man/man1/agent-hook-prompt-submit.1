@@ -1,0 +1,25 @@
+.TH AGENT-HOOK-PROMPT-SUBMIT 1 "2026-06-30" "agentguard" "User Commands"
+.SH NAME
+agent-hook-prompt-submit \- handle prompt-time agent context refresh
+.SH SYNOPSIS
+.B agent-hook-prompt-submit
+.SH DESCRIPTION
+.B agent-hook-prompt-submit
+reads a prompt-submit hook JSON payload from standard input and delegates
+memory-intent reminders and prompt-time context refresh policy to
+.BR "hm hook prompt-submit" .
+It then resets once-per-prompt AgentGuard state used by edit and command
+guidance.
+.SH ENVIRONMENT
+.TP
+.B AGENTGUARD_HIVE_MEMORY_HOOKS
+Set to
+.B 0
+to disable Hive Memory hook integration.
+.SH EXIT STATUS
+.TP
+.B 0
+Prompt handling completed.
+.SH SEE ALSO
+.BR hm (1),
+.BR agent-hook-session-start (1)

@@ -1,0 +1,16 @@
+.TH AGENT-HOOK-SESSION-END 1 "2026-06-30" "agentguard" "User Commands"
+.SH NAME
+agent-hook-session-end \- run generic agent session-end maintenance
+.SH SYNOPSIS
+.B agent-hook-session-end
+.SH DESCRIPTION
+.B agent-hook-session-end
+reads a session-end hook JSON payload from standard input, refreshes shared
+session metadata, and gives extensions a final chance to run agent or
+environment-specific maintenance.
+.SH EXIT STATUS
+.TP
+.B 0
+Session-end maintenance completed.
+.SH SEE ALSO
+.BR agent-hook-session-end-claude (1)

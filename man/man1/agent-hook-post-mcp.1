@@ -1,0 +1,16 @@
+.TH AGENT-HOOK-POST-MCP 1 "2026-06-30" "agentguard" "User Commands"
+.SH NAME
+agent-hook-post-mcp \- track MCP tool failure streaks
+.SH SYNOPSIS
+.B agent-hook-post-mcp
+.SH DESCRIPTION
+.B agent-hook-post-mcp
+reads an MCP hook JSON payload from standard input and records success or
+failure for the target MCP server. The pre-MCP hook uses those counters as a
+circuit breaker after repeated failures.
+.SH EXIT STATUS
+.TP
+.B 0
+Failure tracking completed.
+.SH SEE ALSO
+.BR agent-hook-pre-mcp (1)

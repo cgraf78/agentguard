@@ -1,0 +1,23 @@
+.TH AGENT-HOOK-SESSION-END-CLAUDE 1 "2026-06-30" "agentguard" "User Commands"
+.SH NAME
+agent-hook-session-end-claude \- Claude-specific session-end maintenance
+.SH SYNOPSIS
+.B agent-hook-session-end-claude
+.SH DESCRIPTION
+.B agent-hook-session-end-claude
+is sourced by
+.BR agent-hook-session-end (1)
+when the active runtime is Claude. It is not a standalone hook adapter and
+should not be configured directly as the session-end command.
+.PP
+The extension can name untitled Claude sessions through
+.BR claude-session-name (1)
+while the generic hook owns stdin parsing, extension loading, and final JSON
+emission.
+.SH EXIT STATUS
+.TP
+.B 0
+The extension completed or had no Claude-specific work to do.
+.SH SEE ALSO
+.BR claude-session-name (1),
+.BR agent-hook-session-end (1)

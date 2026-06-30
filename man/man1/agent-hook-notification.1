@@ -1,0 +1,16 @@
+.TH AGENT-HOOK-NOTIFICATION 1 "2026-06-30" "agentguard" "User Commands"
+.SH NAME
+agent-hook-notification \- play terminal notifications for agent events
+.SH SYNOPSIS
+.B agent-hook-notification
+.SH DESCRIPTION
+.B agent-hook-notification
+reads an agent notification hook payload from standard input and plays the
+configured terminal notification sound. It does not add workflow warnings or
+blocks.
+.SH EXIT STATUS
+.TP
+.B 0
+The notification was emitted or skipped by best-effort terminal handling.
+.SH SEE ALSO
+.BR agent-hook-stop (1)
