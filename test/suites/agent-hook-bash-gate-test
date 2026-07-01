@@ -36,6 +36,8 @@ _assert_eq "git commit: hook exits 0" "0" "$HOOK_EXIT"
 _assert_no_sley_gate "git commit"
 _assert_contains "git commit: review nudge still fires" \
   "/review or /simplify" "$HOOK_STDERR"
+_assert_contains "git commit: review nudge references fresh-eyes rule" \
+  "agent-rule-id: review-adversarial-fresh-eyes" "$HOOK_STDERR"
 _assert_contains "git commit: public leak reminder still fires" \
   "private or environment-specific details" "$HOOK_STDERR"
 _assert_contains "git commit: emits git commit rule id" \
@@ -46,6 +48,8 @@ _assert_eq "if git commit: hook exits 0" "0" "$HOOK_EXIT"
 _assert_no_sley_gate "if git commit"
 _assert_contains "if git commit: review nudge still fires" \
   "/review or /simplify" "$HOOK_STDERR"
+_assert_contains "if git commit: review nudge references fresh-eyes rule" \
+  "agent-rule-id: review-adversarial-fresh-eyes" "$HOOK_STDERR"
 _assert_contains "if git commit: public leak reminder still fires" \
   "private or environment-specific details" "$HOOK_STDERR"
 _assert_contains "if git commit: emits git commit rule id" \
@@ -56,6 +60,8 @@ _assert_eq "echo git commit: not a commit command" "0" "$HOOK_EXIT"
 _assert_no_sley_gate "echo git commit"
 _assert_not_contains "echo git commit: no review nudge" \
   "/review or /simplify" "$HOOK_STDERR"
+_assert_not_contains "echo git commit: no fresh-eyes rule nudge" \
+  "agent-rule-id: review-adversarial-fresh-eyes" "$HOOK_STDERR"
 _assert_not_contains "echo git commit: no public leak reminder" \
   "private or environment-specific details" "$HOOK_STDERR"
 _assert_not_contains "echo git commit: no git commit rule id" \
@@ -76,6 +82,8 @@ _assert_eq "sl amend: hook exits 0" "0" "$HOOK_EXIT"
 _assert_no_sley_gate "sl amend"
 _assert_contains "sl amend: review nudge still fires" \
   "/review or /simplify" "$HOOK_STDERR"
+_assert_contains "sl amend: review nudge references fresh-eyes rule" \
+  "agent-rule-id: review-adversarial-fresh-eyes" "$HOOK_STDERR"
 _assert_not_contains "sl amend: no git commit rule id" \
   "agent-rule-id: git-commit-message-format" "$HOOK_STDERR"
 
@@ -84,6 +92,8 @@ _assert_eq "sl absorb: hook exits 0" "0" "$HOOK_EXIT"
 _assert_no_sley_gate "sl absorb"
 _assert_contains "sl absorb: review nudge still fires" \
   "/review or /simplify" "$HOOK_STDERR"
+_assert_contains "sl absorb: review nudge references fresh-eyes rule" \
+  "agent-rule-id: review-adversarial-fresh-eyes" "$HOOK_STDERR"
 
 _run_commit_hook "sl amend -m metadata"
 _assert_eq "sl amend -m: metadata only" "0" "$HOOK_EXIT"

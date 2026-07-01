@@ -266,7 +266,7 @@ _sl_rewrites_commit_fragment() {
 }
 
 _commit_review_nudge() {
-  _hook_remind 'Consider running /review or /simplify on your changes before committing. Review the final diff for correctness, scope, stale docs/tests, edge cases, and accidental unrelated changes.'
+  _hook_remind 'Consider running /review or /simplify on your changes before committing, and apply agent-rule-id: review-adversarial-fresh-eyes for non-trivial work. Review the final diff for correctness, scope, stale docs/tests, edge cases, and accidental unrelated changes.'
 }
 
 _vcs_authoring_fragment() {
