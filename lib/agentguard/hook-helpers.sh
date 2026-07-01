@@ -290,8 +290,36 @@ _hook_read_input() {
 # command.
 _hook_parse_command() {
   _hook_read_input || exit 0
+  # A payload is present (genuinely empty stdin already returned above). If we
+  # cannot parse it, a PRE-execution hook must FAIL CLOSED: the agent harness
+  # parses the payload with its own (non-jq) reader and can still run
+  # .tool_input.command, so a guard that treated an unreadable payload as "empty
+  # command" would let the command run completely uninspected. A PostToolUse
+  # hook can't prevent anything (the command already ran), so it stays a no-op
+  # on parse failure rather than emitting a misleading block.
+  #
+  # `_hook_event_name` is derived from the hook's own filename (no jq), and for
+  # this no-context hook `_hook_finish` just emits `{}` and exits 2 — so the
+  # fail-closed block works even when jq is the thing that's missing.
+  local _can_block=0
+  [ "$(_hook_event_name)" = "PreToolUse" ] && _can_block=1
+  if ! command -v jq >/dev/null 2>&1; then
+    if [ "$_can_block" = 1 ]; then
+      _hook_block 'cannot inspect the command: jq is not on PATH. Install jq; refusing to run the tool call unguarded.'
+      _hook_finish
+    fi
+    exit 0
+  fi
+  if ! printf '%s' "$_HOOK_INPUT" | jq empty >/dev/null 2>&1; then
+    if [ "$_can_block" = 1 ]; then
+      _hook_block 'cannot inspect the command: the tool payload is not valid JSON. Refusing to run it unguarded.'
+      _hook_finish
+    fi
+    exit 0
+  fi
   local cmd
-  cmd=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_input.command // .tool_input.cmd // empty')
+  cmd=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_input.command // .tool_input.cmd // empty' 2>/dev/null)
+  # Valid JSON but no command field: there is nothing to run, so nothing to guard.
   [ -z "$cmd" ] && exit 0
   AGENTGUARD_CMD_TRIMMED=$(printf '%s' "$cmd" | sed 's/^[[:space:]]*//')
   # First line only — heredoc bodies (commit messages, etc.) start on
