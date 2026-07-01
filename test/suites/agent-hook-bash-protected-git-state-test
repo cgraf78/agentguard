@@ -15,6 +15,99 @@ _assert_eq "/usr/bin/env split-string git with trailing status args: blocked" "2
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"env -S '\''git status'\'' --untracked-files=all"}}'
 _assert_eq "env split-string git status with trailing untracked arg: blocked" "2" "$HOOK_EXIT"
 
+_probe_bin=$(_mock_bin)
+_probe_log="$TEST_TMPDIR/protected-root-probes.log"
+cat >"$_probe_bin/git" <<'EOF'
+#!/usr/bin/env bash
+printf 'git:%s\n' "$*" >>"$PROTECTED_ROOT_PROBE_LOG"
+exit 1
+EOF
+cat >"$_probe_bin/sl" <<'EOF'
+#!/usr/bin/env bash
+printf 'sl:%s\n' "$*" >>"$PROTECTED_ROOT_PROBE_LOG"
+printf '%s\n' "$PWD"
+EOF
+chmod +x "$_probe_bin/git" "$_probe_bin/sl"
+_old_path="$PATH"
+export PATH="$_probe_bin:$PATH"
+PROTECTED_ROOT_PROBE_LOG="$_probe_log" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked-files=all"}}'
+export PATH="$_old_path"
+_assert_eq "protected launcher root git status -uall: blocked" "2" "$HOOK_EXIT"
+_assert_not_contains "protected launcher root: skips real git ownership probe" \
+  "git:-C $HOME rev-parse --show-toplevel" "$(cat "$_probe_log" 2>/dev/null || true)"
+_assert_not_contains "protected launcher root: skips Sapling ownership probe" \
+  "sl:root --config ui.color=never" "$(cat "$_probe_log" 2>/dev/null || true)"
+
+_nested_probe_bin=$(_mock_bin)
+_nested_probe_log="$TEST_TMPDIR/protected-nested-probes.log"
+_nested_probe_root="$HOME/nested-worktree"
+_nested_probe_subdir="$_nested_probe_root/project"
+mkdir -p "$_nested_probe_root/.sl" "$_nested_probe_subdir"
+cat >"$_nested_probe_bin/git" <<'EOF'
+#!/usr/bin/env bash
+printf 'git:%s\n' "$*" >>"$PROTECTED_NESTED_PROBE_LOG"
+exit 1
+EOF
+cat >"$_nested_probe_bin/sl" <<'EOF'
+#!/usr/bin/env bash
+printf 'sl:%s\n' "$*" >>"$PROTECTED_NESTED_PROBE_LOG"
+printf '%s\n' "$PROTECTED_NESTED_PROBE_ROOT"
+EOF
+chmod +x "$_nested_probe_bin/git" "$_nested_probe_bin/sl"
+_old_path="$PATH"
+export PATH="$_nested_probe_bin:$PATH"
+_old_pwd="$PWD"
+cd "$_nested_probe_subdir" || exit 1
+PROTECTED_NESTED_PROBE_LOG="$_nested_probe_log" \
+  PROTECTED_NESTED_PROBE_ROOT="$_nested_probe_root" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked-files=all"}}'
+cd "$_old_pwd" || exit 1
+_assert_eq "nested Sapling repo git status -uall: allowed first run" "0" "$HOOK_EXIT"
+
+cd "$_nested_probe_subdir" || exit 1
+PROTECTED_NESTED_PROBE_LOG="$_nested_probe_log" \
+  PROTECTED_NESTED_PROBE_ROOT="$_nested_probe_root" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked-files=all"}}'
+cd "$_old_pwd" || exit 1
+_assert_eq "nested Sapling repo git status -uall: allowed cached run" "0" "$HOOK_EXIT"
+
+rm -rf "$_nested_probe_root/.sl"
+cd "$_nested_probe_subdir" || exit 1
+PROTECTED_NESTED_PROBE_LOG="$_nested_probe_log" \
+  PROTECTED_NESTED_PROBE_ROOT="$_nested_probe_root" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked-files=all"}}'
+cd "$_old_pwd" || exit 1
+_assert_eq "nested Sapling repo stale cache: blocks after root removal" "2" "$HOOK_EXIT"
+export PATH="$_old_path"
+_nested_sl_count=$(grep -c 'sl:root --config ui.color=never' "$_nested_probe_log" 2>/dev/null || true)
+_assert_eq "nested Sapling repo: Sapling ownership probe reruns after invalidation" "3" "$_nested_sl_count"
+
+_semantic_probe_log="$TEST_TMPDIR/protected-nested-semantic-probes.log"
+_semantic_outer_root="$HOME/stale-outer-worktree"
+_semantic_inner_root="$_semantic_outer_root/project"
+_semantic_leaf="$_semantic_inner_root/src"
+mkdir -p "$_semantic_outer_root/.sl" "$_semantic_leaf"
+_old_path="$PATH"
+export PATH="$_nested_probe_bin:$PATH"
+cd "$_semantic_leaf" || exit 1
+PROTECTED_NESTED_PROBE_LOG="$_semantic_probe_log" \
+  PROTECTED_NESTED_PROBE_ROOT="$_semantic_outer_root" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked-files=all"}}'
+cd "$_old_pwd" || exit 1
+_assert_eq "nested Sapling repo semantic cache: allowed first broad root" "0" "$HOOK_EXIT"
+
+mkdir -p "$_semantic_inner_root/.sl"
+cd "$_semantic_leaf" || exit 1
+PROTECTED_NESTED_PROBE_LOG="$_semantic_probe_log" \
+  PROTECTED_NESTED_PROBE_ROOT="$_semantic_inner_root" \
+  _run_hook "$PRE_BASH" '{"tool_input":{"command":"git status --untracked-files=all"}}'
+cd "$_old_pwd" || exit 1
+_assert_eq "nested Sapling repo semantic cache: allowed nearer root" "0" "$HOOK_EXIT"
+export PATH="$_old_path"
+_semantic_sl_count=$(grep -c 'sl:root --config ui.color=never' "$_semantic_probe_log" 2>/dev/null || true)
+_assert_eq "nested Sapling repo semantic cache: reprobes when nearer marker appears" "2" "$_semantic_sl_count"
+
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"/usr/bin/env bash -lc '\''git status --untracked-files=all'\''"}}'
 _assert_eq "/usr/bin/env bash nested git status untracked: blocked" "2" "$HOOK_EXIT"
 
