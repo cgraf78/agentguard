@@ -2085,6 +2085,126 @@ _hook_resolve_dir_lexically() {
   printf '%s' "$path"
 }
 
+_protected_bare_nested_cache_file() {
+  local work_tree="$1" base="${XDG_CACHE_HOME:-}" scope
+  if [ -z "$base" ]; then
+    [ -n "${HOME:-}" ] || return 1
+    base="$HOME/.cache"
+  fi
+  scope="${work_tree//\//%}"
+  printf '%s/agentguard/protected-bare-nested-roots-%s\n' "$base" "$scope"
+}
+
+_PROTECTED_BARE_NESTED_CACHE_LIMIT=64
+
+_protected_bare_nested_root_exists() {
+  local root="$1"
+  [ -e "$root/.git" ] || [ -d "$root/.sl" ] || [ -d "$root/.hg" ]
+}
+
+_protected_bare_closest_marker_root() {
+  local dir="$1" stop="$2"
+  while [ "$dir" != "/" ]; do
+    if _protected_bare_nested_root_exists "$dir"; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+    [ "$dir" = "$stop" ] && break
+    dir="${dir%/*}"
+    [ -n "$dir" ] || dir="/"
+  done
+  return 1
+}
+
+_protected_bare_dir_under_root() {
+  local dir="$1" root="$2"
+  [ -n "$root" ] || return 1
+  case "$dir" in
+    "$root" | "$root"/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_protected_bare_cached_nested_worktree() {
+  local dir="$1" work_tree="$2" cache line root type actual marker real_git tmp tmp_count=0 tmp_dir hit=0
+  cache=$(_protected_bare_nested_cache_file "$work_tree") || return 1
+  [ -r "$cache" ] || return 1
+  tmp="${cache}.$$"
+
+  while IFS= read -r line; do
+    case "$line" in
+      git$'\t'*)
+        type="git"
+        root="${line#*$'\t'}"
+        ;;
+      sl$'\t'*)
+        type="sl"
+        root="${line#*$'\t'}"
+        ;;
+      *)
+        continue
+        ;;
+    esac
+    _protected_bare_nested_root_exists "$root" || continue
+    if [ "$tmp_count" -lt "$_PROTECTED_BARE_NESTED_CACHE_LIMIT" ]; then
+      printf '%s\n' "$line" >>"$tmp" 2>/dev/null || true
+      tmp_count=$((tmp_count + 1))
+    fi
+    _protected_bare_dir_under_root "$dir" "$root" || continue
+    case "$type" in
+      git)
+        real_git="$(_protected_bare_real_git)" || continue
+        actual=$("$real_git" -C "$dir" rev-parse --show-toplevel 2>/dev/null) ||
+          continue
+        actual=$(_hook_resolve_dir "$PWD" "$actual") || continue
+        if [ "$actual" = "$root" ]; then
+          hit=1
+          break
+        fi
+        ;;
+      sl)
+        command -v sl >/dev/null 2>&1 || continue
+        marker=$(_protected_bare_closest_marker_root "$dir" "$root") || continue
+        if [ "$marker" = "$root" ]; then
+          hit=1
+          break
+        fi
+        ;;
+    esac
+  done <"$cache"
+
+  tmp_dir="${cache%/*}"
+  if [ -d "$tmp_dir" ] && [ -f "$tmp" ]; then
+    mv -f -- "$tmp" "$cache" 2>/dev/null || rm -f -- "$tmp"
+  else
+    rm -f -- "$tmp"
+  fi
+
+  [ "$hit" -eq 1 ] && return 0
+  return 1
+}
+
+_protected_bare_cache_nested_root() {
+  local type="$1" root="$2" work_tree="$3" cache dir cached entry tmp tmp_count=1
+  [ -n "$root" ] || return 0
+  _protected_bare_nested_root_exists "$root" || return 0
+  cache=$(_protected_bare_nested_cache_file "$work_tree") || return 0
+  entry="${type}"$'\t'"$root"
+  dir="${cache%/*}"
+  mkdir -p -- "$dir" 2>/dev/null || return 0
+  tmp="${cache}.$$"
+  printf '%s\n' "$entry" >"$tmp" 2>/dev/null || return 0
+  if [ -r "$cache" ]; then
+    while IFS= read -r cached; do
+      [ "$cached" = "$entry" ] && continue
+      [ "$tmp_count" -ge "$_PROTECTED_BARE_NESTED_CACHE_LIMIT" ] && break
+      printf '%s\n' "$cached" >>"$tmp" 2>/dev/null || true
+      tmp_count=$((tmp_count + 1))
+    done <"$cache"
+  fi
+  mv -f -- "$tmp" "$cache" 2>/dev/null || rm -f -- "$tmp"
+}
+
 _protected_bare_git_launcher_dir_context() {
   local dir="$1" dir_phys work_tree_phys root real_git
   _protected_bare_git_configured || return 1
@@ -2096,16 +2216,32 @@ _protected_bare_git_launcher_dir_context() {
     *) return 1 ;;
   esac
 
+  # The protected work-tree root itself is ambient protected-bare context. Only
+  # descendants can be owned by nested Git/Sapling repos that should override
+  # the protected launcher, so avoid spawning repository probes for root-level
+  # hook checks.
+  [ "$dir_phys" = "$work_tree_phys" ] && return 0
+
+  _protected_bare_cached_nested_worktree "$dir_phys" "$work_tree_phys" && return 1
+
   # Probe normal repos with a non-launcher Git. The launcher may report the
   # protected bare repo, but the question is whether plain `git` will be
   # intercepted because no normal repo owns the target directory.
   if real_git="$(_protected_bare_real_git)"; then
-    "$real_git" -C "$dir_phys" rev-parse --show-toplevel >/dev/null 2>&1 &&
+    root=$("$real_git" -C "$dir_phys" rev-parse --show-toplevel 2>/dev/null) || root=""
+    if [ -n "$root" ]; then
+      root=$(_hook_resolve_dir "$PWD" "$root") || return 1
+      _protected_bare_cache_nested_root git "$root" "$work_tree_phys"
       return 1
+    fi
   fi
   if command -v sl >/dev/null 2>&1; then
     root=$(cd -- "$dir_phys" 2>/dev/null && sl root --config ui.color=never 2>/dev/null) || root=""
-    [ -n "$root" ] && { [ -d "$root/.sl" ] || [ -d "$root/.hg" ]; } && return 1
+    if [ -n "$root" ] && { [ -d "$root/.sl" ] || [ -d "$root/.hg" ]; }; then
+      root=$(_hook_resolve_dir "$PWD" "$root") || return 1
+      _protected_bare_cache_nested_root sl "$root" "$work_tree_phys"
+      return 1
+    fi
   fi
   return 0
 }
