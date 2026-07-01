@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# agent-hook-bash-parse-test — payload-parse fail-closed behavior.
+#
+# A PRE-execution guard (pre-bash) must FAIL CLOSED (block) when it cannot parse
+# the tool payload: the agent harness parses the payload with its own reader and
+# can still run the command, so a guard that silently treated an unreadable
+# payload as "no command" would let the command run completely uninspected. This
+# must hold regardless of agent (Claude vs Codex), including when jq itself is
+# what's missing. Two things must NOT fail closed: genuinely empty stdin (no
+# tool call), and PostToolUse (post-bash) — the command has already run there,
+# so a block would be both useless and misleadingly worded.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+POST_BASH="$BIN_DIR/agent-hook-post-bash"
+
+# Run a hook as Codex (agent name + thread id) instead of the default agent.
+_run_hook_codex() {
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    AGENTGUARD_SESSION_ID="$TEST_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="codex"
+    CODEX_THREAD_ID="parse-test-thread"
+  )
+  _run_hook_env "$@"
+}
+
+# PATH sandbox with every real executable EXCEPT jq, so `command -v jq` fails
+# inside the hook while it stays otherwise runnable.
+_nojq_bin="$TEST_TMPDIR/nojq-bin"
+mkdir -p "$_nojq_bin"
+_saved_ifs=$IFS
+IFS=:
+for _path_dir in $PATH; do
+  IFS=$_saved_ifs
+  [ -d "$_path_dir" ] || continue
+  for _exe in "$_path_dir"/*; do
+    _exe_name=${_exe##*/}
+    [ "$_exe_name" = jq ] && continue
+    [ -x "$_exe" ] || continue
+    [ -e "$_nojq_bin/$_exe_name" ] || ln -s "$_exe" "$_nojq_bin/$_exe_name" 2>/dev/null || true
+  done
+done
+IFS=$_saved_ifs
+[ ! -e "$_nojq_bin/jq" ] || _fail "test setup: nojq sandbox still exposes jq"
+
+# Run a hook with jq removed from PATH. First arg is the agent name.
+_run_hook_nojq() {
+  local agent="$1"
+  shift
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    AGENTGUARD_SESSION_ID="$TEST_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="$agent"
+    CODEX_THREAD_ID="parse-test-thread"
+    PATH="$_nojq_bin"
+  )
+  _run_hook_env "$@"
+}
+
+echo ""
+echo "=== pre-bash: fail closed on unparsable payload (agent) ==="
+
+# Malformed JSON, payload present → BLOCK.
+_run_hook "$PRE_BASH" '{ this is not valid json'
+_assert_eq "malformed JSON: exit 2" "2" "$HOOK_EXIT"
+_assert_contains "malformed JSON: BLOCKED" "BLOCKED" "$HOOK_STDERR"
+_assert_contains "malformed JSON: names the reason" "not valid JSON" "$HOOK_STDERR"
+
+# jq missing while a payload is present → BLOCK.
+_run_hook_nojq agent "$PRE_BASH" '{"tool_input":{"command":"echo hi"}}'
+_assert_eq "missing jq: exit 2" "2" "$HOOK_EXIT"
+_assert_contains "missing jq: BLOCKED" "BLOCKED" "$HOOK_STDERR"
+_assert_contains "missing jq: names jq" "jq is not on PATH" "$HOOK_STDERR"
+
+echo ""
+echo "=== pre-bash: fail closed on unparsable payload (codex) ==="
+
+# The codex path is the one that would break if _hook_finish ever needed jq
+# before the terminal branch — guard it explicitly.
+_run_hook_codex "$PRE_BASH" '{ this is not valid json'
+_assert_eq "codex malformed JSON: exit 2" "2" "$HOOK_EXIT"
+_assert_contains "codex malformed JSON: BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook_nojq codex "$PRE_BASH" '{"tool_input":{"cmd":"echo hi"}}'
+_assert_eq "codex missing jq: exit 2" "2" "$HOOK_EXIT"
+_assert_contains "codex missing jq: BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+echo ""
+echo "=== pre-bash: do NOT over-block ==="
+
+# Valid JSON with no command field → ALLOW (nothing to run, nothing to guard).
+_run_hook "$PRE_BASH" '{"tool_input":{}}'
+_assert_eq "valid JSON, no command: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "valid JSON, no command: not blocked" "BLOCKED" "$HOOK_STDERR"
+
+# Genuinely empty stdin (not a tool call) → ALLOW (no-op).
+_run_hook "$PRE_BASH" ''
+_assert_eq "empty stdin: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "empty stdin: not blocked" "BLOCKED" "$HOOK_STDERR"
+
+# Valid-but-non-object JSON: allowed, and no raw jq error leaks to stderr.
+_run_hook "$PRE_BASH" '[]'
+_assert_eq "non-object JSON: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "non-object JSON: not blocked" "BLOCKED" "$HOOK_STDERR"
+_assert_not_contains "non-object JSON: no raw jq error on stderr" "jq: error" "$HOOK_STDERR"
+
+echo ""
+echo "=== post-bash: parse failure is a no-op, never a block ==="
+
+# PostToolUse runs after the command; it cannot prevent anything, so a parse
+# failure must stay a silent no-op (exit 0), not emit a misleading block.
+_run_hook "$POST_BASH" '{ this is not valid json'
+_assert_eq "post-bash malformed JSON: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "post-bash malformed JSON: not blocked" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook_nojq agent "$POST_BASH" '{"tool_input":{"command":"echo hi"}}'
+_assert_eq "post-bash missing jq: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "post-bash missing jq: not blocked" "BLOCKED" "$HOOK_STDERR"
+
+_test_summary
