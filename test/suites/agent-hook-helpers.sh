@@ -16,11 +16,12 @@ export AGENTGUARD_PROCESS_DETECT=0
 # it explicitly in their own subshell.
 unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID \
   CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR
-# The hook state root resolves from XDG_RUNTIME_DIR/XDG_STATE_HOME. Scrub the
-# ambient values (devservers set XDG_RUNTIME_DIR=/run/user/<uid>) so nothing
-# leaks into the real per-user state; the harness re-points XDG_RUNTIME_DIR at
-# the test tmpdir once TEST_TMPDIR exists (see below).
-unset XDG_RUNTIME_DIR XDG_STATE_HOME
+# The hook state root resolves from XDG_RUNTIME_DIR/XDG_STATE_HOME, and the
+# protected-bare classifier cache resolves from XDG_CACHE_HOME. Scrub the ambient
+# values (devservers set XDG_RUNTIME_DIR=/run/user/<uid>) so nothing leaks into
+# the real per-user state or cache; the harness re-points them at the test tmpdir
+# once TEST_TMPDIR exists (see below).
+unset XDG_RUNTIME_DIR XDG_STATE_HOME XDG_CACHE_HOME
 # Dotfiles and other consumers may tune or bypass edit-churn globally. Test
 # default behavior against repo defaults; individual tests set custom values
 # where that contract is under test.
@@ -54,10 +55,11 @@ HELPERS="$AGENTGUARD_ROOT/lib/agentguard/hook-helpers.sh"
 TEST_TMPDIR=$(_tmpdir)
 TEST_SID="agent-hook-test-$$"
 
-# Point the hook state root at the test tmpdir for every fixture and child
-# process (hooks resolve state from XDG_RUNTIME_DIR first). Exporting once here
-# keeps both spawned hooks and the test process's own _hook_* helpers hermetic,
-# so nothing writes into the real ~/.local/state.
+# Point the hook state root and the classifier cache at the test tmpdir for every
+# fixture and child process (hooks resolve state from XDG_RUNTIME_DIR first; the
+# protected-bare classifier cache resolves from XDG_CACHE_HOME). Exporting once
+# here keeps both spawned hooks and the test process's own _hook_* helpers
+# hermetic, so nothing writes into the real ~/.local/state or ~/.cache.
 #
 # Hermeticity contract for new fixtures: rely on this inherited export. A fixture
 # that unsets/overrides XDG_RUNTIME_DIR (e.g. to exercise a fallback tier) must
@@ -65,6 +67,7 @@ TEST_SID="agent-hook-test-$$"
 # temp dir (`_mock_home`) so a resolved ~/.local/state still can't reach the real
 # home. Never run a hook that writes state with the ambient HOME and no XDG root.
 export XDG_RUNTIME_DIR="$TEST_TMPDIR"
+export XDG_CACHE_HOME="$TEST_TMPDIR"
 
 PRE_MCP="$BIN_DIR/agent-hook-pre-mcp"
 POST_MCP="$BIN_DIR/agent-hook-post-mcp"
