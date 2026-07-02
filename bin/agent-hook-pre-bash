@@ -513,6 +513,13 @@ _hook_run_guards() {
                 _GUARD_GIT_PUSH_FORCE=1
                 break
               } ;;
+              +?*)
+                # A refspec that leads with `+` (e.g. `+main`, `+HEAD:main`,
+                # `+refs/heads/x:y`) forces the push without `--force`/`-f`, so it
+                # must be caught too. --force-with-lease stays allowed above.
+                _GUARD_GIT_PUSH_FORCE=1
+                break
+                ;;
             esac
             ((i++))
           done

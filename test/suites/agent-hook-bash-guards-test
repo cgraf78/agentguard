@@ -150,10 +150,26 @@ _assert_not_contains "git push --force-with-lease=ref: no BLOCKED" "BLOCKED" "$H
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"git -C /tmp/repo push -f"}}'
 _assert_eq "git -C push -f: blocked" "2" "$HOOK_EXIT"
 
+# `+<refspec>` forces the push without --force/-f and must also be blocked.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git push origin +main"}}'
+_assert_eq "git push origin +main: blocked" "2" "$HOOK_EXIT"
+_assert_contains "git push origin +main: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git push origin +HEAD:main"}}'
+_assert_eq "git push origin +HEAD:main: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git push origin +refs/heads/x:refs/heads/y"}}'
+_assert_eq "git push origin +refspec: blocked" "2" "$HOOK_EXIT"
+
 # normal push is fine
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"git push origin main"}}'
 _assert_eq "git push (no force): allowed" "0" "$HOOK_EXIT"
 _assert_not_contains "git push (no force): no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# a non-force src:dst refspec (no leading +) must NOT be flagged as force
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git push origin HEAD:main"}}'
+_assert_eq "git push src:dst (no force): allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "git push src:dst: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
 
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"git push -u origin feat/foo"}}'
 _assert_eq "git push -u: allowed" "0" "$HOOK_EXIT"
