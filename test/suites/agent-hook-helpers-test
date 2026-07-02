@@ -197,9 +197,9 @@ _assert_contains "hook PATH fallback: empty PATH keeps system tools" \
   AGENTGUARD_SESSION_ID="neutral-session"
   CODEX_THREAD_ID="codex-thread-123"
   CLAUDE_CODE_CURRENT_SESSION_ID="test123"
-  TMPDIR="/tmp/test"
+  XDG_RUNTIME_DIR="/tmp/test"
   source "$HELPERS"
-  if [ "$_HOOK_STATE_DIR" = "/tmp/test/hook-state/neutral-session" ]; then
+  if [ "$_HOOK_STATE_DIR" = "/tmp/test/agentguard/hook-state/neutral-session" ]; then
     echo "PASS"
   else
     echo "FAIL: $_HOOK_STATE_DIR"
@@ -212,9 +212,9 @@ _assert_eq "state_dir: neutral session id wins" "0" "$?"
 (
   unset CODEX_THREAD_ID 2>/dev/null
   CLAUDE_CODE_CURRENT_SESSION_ID="test123"
-  TMPDIR="/tmp/test"
+  XDG_RUNTIME_DIR="/tmp/test"
   source "$HELPERS"
-  [ "$_HOOK_STATE_DIR" = "/tmp/test/hook-state/test123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+  [ "$_HOOK_STATE_DIR" = "/tmp/test/agentguard/hook-state/test123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
 ) | _stdin_contains PASS
 _assert_eq "state_dir: claude env vars" "0" "$?"
 
@@ -225,9 +225,9 @@ _assert_eq "state_dir: claude env vars" "0" "$?"
 (
   CODEX_THREAD_ID="codex-thread-123"
   CLAUDE_CODE_CURRENT_SESSION_ID="test123"
-  TMPDIR="/tmp/test"
+  XDG_RUNTIME_DIR="/tmp/test"
   source "$HELPERS"
-  [ "$_HOOK_STATE_DIR" = "/tmp/test/hook-state/codex-thread-123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+  [ "$_HOOK_STATE_DIR" = "/tmp/test/agentguard/hook-state/codex-thread-123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
 ) | _stdin_contains PASS
 _assert_eq "state_dir: codex thread id wins over claude env" "0" "$?"
 
@@ -238,10 +238,10 @@ _assert_eq "state_dir: codex thread id wins over claude env" "0" "$?"
   env -u CODEX_THREAD_ID -u CLAUDE_CODE_CURRENT_SESSION_ID \
     AGENTGUARD_NAME="codex" \
     AGENTGUARD_PROCESS_DETECT=0 \
-    TMPDIR="/tmp/codex-process-test" \
+    XDG_RUNTIME_DIR="/tmp/codex-process-test" \
     bash -c '
     source "$1"
-    [[ "$_HOOK_STATE_DIR" == "/tmp/codex-process-test/hook-state/codex-"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+    [[ "$_HOOK_STATE_DIR" == "/tmp/codex-process-test/agentguard/hook-state/codex-"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
   ' _ "$HELPERS"
 ) | _stdin_contains PASS
 _assert_eq "state_dir: codex process key fallback" "0" "$?"
@@ -302,10 +302,10 @@ _assert_eq "codex_process_key: argv mention is not misattributed to codex" "0" "
 (
   unset CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID 2>/dev/null
   AGENTGUARD_NAME="codex"
-  TMPDIR="/tmp/codex-json-test"
+  XDG_RUNTIME_DIR="/tmp/codex-json-test"
   _HOOK_INPUT='{"session_id":"codex-json-session"}'
   source "$HELPERS"
-  [ "$_HOOK_STATE_DIR" = "/tmp/codex-json-test/hook-state/codex-json-session" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+  [ "$_HOOK_STATE_DIR" = "/tmp/codex-json-test/agentguard/hook-state/codex-json-session" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
 ) | _stdin_contains PASS
 _assert_eq "state_dir: codex JSON session id wins over process fallback" "0" "$?"
 
@@ -316,32 +316,59 @@ _assert_eq "state_dir: codex JSON session id wins over process fallback" "0" "$?
   AGENTGUARD_NAME="codex"
   AGENTGUARD_SESSION_ID="outer-session"
   CODEX_THREAD_ID="outer-session"
-  TMPDIR="/tmp/codex-nested-test"
+  XDG_RUNTIME_DIR="/tmp/codex-nested-test"
   _HOOK_INPUT='{"session_id":"inner-session"}'
   source "$HELPERS"
-  [ "$_HOOK_STATE_DIR" = "/tmp/codex-nested-test/hook-state/inner-session" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+  [ "$_HOOK_STATE_DIR" = "/tmp/codex-nested-test/agentguard/hook-state/inner-session" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
 ) | _stdin_contains PASS
 _assert_eq "state_dir: codex JSON session id beats inherited env ids" "0" "$?"
 
-# _HOOK_STATE_DIR uses TMPDIR for the tmp root
+# _hook_state_root cascade: XDG_RUNTIME_DIR is preferred as the per-user,
+# system-cleaned root for ephemeral session state, so it wins over XDG_STATE_HOME.
 # shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
 (
   unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
     CLAUDE_CODE_CURRENT_SESSION_ID 2>/dev/null
-  TMPDIR="/tmp/custom"
+  XDG_RUNTIME_DIR="/tmp/runtime"
+  XDG_STATE_HOME="/tmp/state"
   source "$HELPERS"
-  [[ "$_HOOK_STATE_DIR" == "/tmp/custom/hook-state/"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+  [[ "$_HOOK_STATE_DIR" == "/tmp/runtime/agentguard/hook-state/"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
 ) | _stdin_contains PASS
-_assert_eq "state_dir: TMPDIR fallback" "0" "$?"
+_assert_eq "state_dir: XDG_RUNTIME_DIR wins" "0" "$?"
 
-# _HOOK_STATE_DIR falls back to /tmp and PID when no env vars set
+# Falls back to XDG_STATE_HOME when no runtime dir is available (macOS, cron).
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
 (
   unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
-    CLAUDE_CODE_CURRENT_SESSION_ID TMPDIR 2>/dev/null
+    CLAUDE_CODE_CURRENT_SESSION_ID XDG_RUNTIME_DIR 2>/dev/null
+  XDG_STATE_HOME="/tmp/state"
   source "$HELPERS"
-  [[ "$_HOOK_STATE_DIR" == "/tmp/hook-state/"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+  [[ "$_HOOK_STATE_DIR" == "/tmp/state/agentguard/hook-state/"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
 ) | _stdin_contains PASS
-_assert_eq "state_dir: falls back to /tmp and PID" "0" "$?"
+_assert_eq "state_dir: XDG_STATE_HOME fallback" "0" "$?"
+
+# Falls back to ~/.local/state when neither XDG var is set but HOME is.
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID XDG_RUNTIME_DIR XDG_STATE_HOME 2>/dev/null
+  HOME="/tmp/fakehome"
+  source "$HELPERS"
+  [[ "$_HOOK_STATE_DIR" == "/tmp/fakehome/.local/state/agentguard/hook-state/"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | _stdin_contains PASS
+_assert_eq "state_dir: ~/.local/state fallback" "0" "$?"
+
+# Last resort: a uid-scoped tmp path when no runtime dir, XDG state, or HOME is
+# available, so hooks never hard-fail. The uid suffix avoids a shared /tmp name.
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID XDG_RUNTIME_DIR XDG_STATE_HOME HOME 2>/dev/null
+  TMPDIR="/tmp/custom"
+  source "$HELPERS"
+  [[ "$_HOOK_STATE_DIR" == "/tmp/custom/agentguard-hook-state-$(id -u)/"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | _stdin_contains PASS
+_assert_eq "state_dir: uid-scoped tmp last resort" "0" "$?"
 
 # _HOOK_STATE_DIR uses gemini-$PPID when GEMINI_PROJECT_DIR is set
 # shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
@@ -349,9 +376,9 @@ _assert_eq "state_dir: falls back to /tmp and PID" "0" "$?"
   unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
     CLAUDE_CODE_CURRENT_SESSION_ID 2>/dev/null
   GEMINI_PROJECT_DIR="/tmp/project"
-  TMPDIR="/tmp/gemtest"
+  XDG_RUNTIME_DIR="/tmp/gemtest"
   source "$HELPERS"
-  [[ "$_HOOK_STATE_DIR" == "/tmp/gemtest/hook-state/gemini-"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+  [[ "$_HOOK_STATE_DIR" == "/tmp/gemtest/agentguard/hook-state/gemini-"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
 ) | _stdin_contains PASS
 _assert_eq "state_dir: gemini uses PPID-based key" "0" "$?"
 
@@ -360,10 +387,10 @@ _assert_eq "state_dir: gemini uses PPID-based key" "0" "$?"
 (
   unset CODEX_THREAD_ID 2>/dev/null
   CLAUDE_CODE_CURRENT_SESSION_ID="test123"
-  TMPDIR="/tmp/test"
+  XDG_RUNTIME_DIR="/tmp/test"
   GEMINI_PROJECT_DIR="/tmp/project"
   source "$HELPERS"
-  [ "$_HOOK_STATE_DIR" = "/tmp/test/hook-state/test123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+  [ "$_HOOK_STATE_DIR" = "/tmp/test/agentguard/hook-state/test123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
 ) | _stdin_contains PASS
 _assert_eq "state_dir: claude session ID wins over gemini" "0" "$?"
 
@@ -371,11 +398,11 @@ _assert_eq "state_dir: claude session ID wins over gemini" "0" "$?"
 # vars provide a stable session key.
 (
   unset CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID GEMINI_PROJECT_DIR 2>/dev/null
-  TMPDIR="/tmp/json-session-test"
+  XDG_RUNTIME_DIR="/tmp/json-session-test"
   source "$HELPERS"
   _HOOK_INPUT='{"session_id":"json-session-123"}'
   _hook_refresh_state_dir
-  [ "$_HOOK_STATE_DIR" = "/tmp/json-session-test/hook-state/json-session-123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+  [ "$_HOOK_STATE_DIR" = "/tmp/json-session-test/agentguard/hook-state/json-session-123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
 ) | _stdin_contains PASS
 _assert_eq "state_dir: refresh uses input session_id" "0" "$?"
 
@@ -384,23 +411,24 @@ _assert_eq "state_dir: refresh uses input session_id" "0" "$?"
 (
   unset CODEX_THREAD_ID 2>/dev/null
   CLAUDE_CODE_CURRENT_SESSION_ID="test123"
-  TMPDIR="/tmp/test"
+  XDG_RUNTIME_DIR="/tmp/test"
   source "$HELPERS"
   _HOOK_INPUT='{"session_id":"json-session-123"}'
   _hook_refresh_state_dir
-  [ "$_HOOK_STATE_DIR" = "/tmp/test/hook-state/test123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+  [ "$_HOOK_STATE_DIR" = "/tmp/test/agentguard/hook-state/test123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
 ) | _stdin_contains PASS
 _assert_eq "state_dir: claude env wins over input session_id" "0" "$?"
 
 # Parsing command JSON refreshes state from session_id for agents without env
 # session IDs.
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
 (
   unset CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID GEMINI_PROJECT_DIR 2>/dev/null
-  TMPDIR="/tmp/parse-session-test"
+  XDG_RUNTIME_DIR="/tmp/parse-session-test"
   source "$HELPERS"
   _HOOK_INPUT='{"session_id":"parse-session-123","tool_input":{"command":"echo ok"}}'
   _hook_parse_command 2>/dev/null </dev/null
-  [ "$_HOOK_STATE_DIR" = "/tmp/parse-session-test/hook-state/parse-session-123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+  [ "$_HOOK_STATE_DIR" = "/tmp/parse-session-test/agentguard/hook-state/parse-session-123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
 ) | _stdin_contains PASS
 _assert_eq "state_dir: parse_command refreshes input session_id" "0" "$?"
 

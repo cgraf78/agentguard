@@ -308,7 +308,7 @@ _reset_state
 
 # Post-edit with no file_path should not create churn state
 _run_hook "$POST_EDIT" '{"tool_input":{}}'
-churn_dir="$TEST_TMPDIR/hook-state/$TEST_SID/edit-churn"
+churn_dir="$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/edit-churn"
 if [ -d "$churn_dir" ] && [ -n "$(ls -A "$churn_dir" 2>/dev/null)" ]; then
   _fail "churn empty AGENTGUARD_EDIT_FILE: no churn files should exist"
 else

@@ -20,30 +20,30 @@ _assert_eq "no failures: no stderr" "" "$HOOK_STDERR"
 
 # 2 failures → still passes
 _reset_state
-mkdir -p "$TEST_TMPDIR/hook-state/$TEST_SID"
-echo 2 >"$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv"
+mkdir -p "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID"
+echo 2 >"$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv"
 _run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__tool","tool_input":{}}'
 _assert_eq "2 failures: exit 0" "0" "$HOOK_EXIT"
 
 # 3 failures → blocks
-echo 3 >"$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv"
+echo 3 >"$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv"
 _run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__tool","tool_input":{}}'
 _assert_eq "3 failures: exit 2" "2" "$HOOK_EXIT"
 _assert_contains "3 failures: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
 
 # 5 failures → still blocks
-echo 5 >"$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv"
+echo 5 >"$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv"
 _run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__tool","tool_input":{}}'
 _assert_eq "5 failures: exit 2" "2" "$HOOK_EXIT"
 
 # Empty fail file → does not crash (treated as 0)
-: >"$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv"
+: >"$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv"
 _run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__tool","tool_input":{}}'
 _assert_eq "empty file: exit 0" "0" "$HOOK_EXIT"
 _assert_not_contains "empty file: no error" "integer expression" "$HOOK_STDERR"
 
 # Non-numeric fail file → does not crash
-echo "garbage" >"$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv"
+echo "garbage" >"$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv"
 _run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__tool","tool_input":{}}'
 _assert_eq "garbage file: exit 0" "0" "$HOOK_EXIT"
 
@@ -56,15 +56,15 @@ echo "=== pre-mcp: server name extraction ==="
 
 # Multi-segment server name (plugin_mux_alpha)
 _reset_state
-mkdir -p "$TEST_TMPDIR/hook-state/$TEST_SID"
-echo 3 >"$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-plugin_mux_alpha"
+mkdir -p "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID"
+echo 3 >"$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-plugin_mux_alpha"
 _run_hook "$PRE_MCP" '{"tool_name":"mcp__plugin_mux_alpha__search_files","tool_input":{}}'
 _assert_eq "multi-segment server: blocked" "2" "$HOOK_EXIT"
 
 # Single-segment server name
 _reset_state
-mkdir -p "$TEST_TMPDIR/hook-state/$TEST_SID"
-echo 3 >"$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-github"
+mkdir -p "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID"
+echo 3 >"$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-github"
 _run_hook "$PRE_MCP" '{"tool_name":"mcp__github__create_issue","tool_input":{}}'
 _assert_eq "single-segment server: blocked" "2" "$HOOK_EXIT"
 
@@ -136,7 +136,7 @@ _run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__knowledge_load","tool_input":{"url
 _assert_not_contains "second call: no warning" "WARNING" "$HOOK_STDERR"
 
 # Flag file exists
-if [ -f "$TEST_TMPDIR/hook-state/$TEST_SID/knowledge-load-warned" ]; then
+if [ -f "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/knowledge-load-warned" ]; then
   _pass "warn-once: flag file created"
 else
   _fail "warn-once: flag file created"
@@ -229,7 +229,7 @@ _reset_state
 
 # Successful call → no fail file
 _run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":false}'
-if [ ! -f "$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv" ]; then
+if [ ! -f "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv" ]; then
   _pass "success: no fail file"
 else
   _fail "success: no fail file"
@@ -237,8 +237,8 @@ fi
 
 # Failed call → fail file with count 1
 _run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":true}'
-if [ -f "$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv" ]; then
-  count=$(cat "$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv")
+if [ -f "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv" ]; then
+  count=$(cat "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv")
   _assert_eq "first failure: count 1" "1" "$count"
 else
   _fail "first failure: fail file created"
@@ -246,12 +246,12 @@ fi
 
 # Second failure → count 2
 _run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":true}'
-count=$(cat "$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv")
+count=$(cat "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv")
 _assert_eq "second failure: count 2" "2" "$count"
 
 # Success after failures → resets counter
 _run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":false}'
-if [ ! -f "$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-srv" ]; then
+if [ ! -f "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv" ]; then
   _pass "success resets: fail file removed"
 else
   _fail "success resets: fail file removed"
@@ -261,8 +261,8 @@ fi
 _run_hook "$POST_MCP" '{"tool_name":"mcp__alpha__tool","tool_result_is_error":true}'
 _run_hook "$POST_MCP" '{"tool_name":"mcp__beta__tool","tool_result_is_error":true}'
 _run_hook "$POST_MCP" '{"tool_name":"mcp__alpha__tool","tool_result_is_error":true}'
-count_a=$(cat "$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-alpha")
-count_b=$(cat "$TEST_TMPDIR/hook-state/$TEST_SID/mcp-failures-beta")
+count_a=$(cat "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-alpha")
+count_b=$(cat "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-beta")
 _assert_eq "independent servers: alpha=2" "2" "$count_a"
 _assert_eq "independent servers: beta=1" "1" "$count_b"
 
