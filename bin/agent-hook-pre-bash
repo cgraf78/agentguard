@@ -377,6 +377,7 @@ _hook_run_guards() {
   _GUARD_GIT_CLEAN_FORCE=0
   _GUARD_GIT_PUSH_FORCE=0
   _GUARD_GIT_PUSH_MIRROR=0
+  _GUARD_GIT_PUSH_PRUNE=0
   _GUARD_TTY_REQUIRED=0
   _GUARD_GIT_COMMIT=0
   _GUARD_SL_COMMIT=0
@@ -513,6 +514,13 @@ _hook_run_guards() {
                 # --mirror force-overwrites AND prunes every remote ref, so it is
                 # remote-destructive even without --force.
                 _GUARD_GIT_PUSH_MIRROR=1
+                break
+                ;;
+              --prune)
+                # --prune deletes remote refs that have no local counterpart.
+                # (Bare --all is NOT guarded: it only pushes branches and is
+                # destructive only with --force, which is already caught above.)
+                _GUARD_GIT_PUSH_PRUNE=1
                 break
                 ;;
               --*) ;;
@@ -756,6 +764,10 @@ fi
 # Block git push --mirror — force-overwrites and prunes every remote ref.
 [ "$_GUARD_GIT_PUSH_MIRROR" -eq 1 ] &&
   _hook_block 'git push --mirror force-overwrites and prunes every remote ref. Run it manually if a full mirror is truly intended.'
+
+# Block git push --prune — deletes remote refs with no local counterpart.
+[ "$_GUARD_GIT_PUSH_PRUNE" -eq 1 ] &&
+  _hook_block 'git push --prune deletes remote refs that have no local branch. Run it manually if the remote deletion is intended.'
 
 # Block interactive TTY commands — they will silently hang the agent turn.
 [ "$_GUARD_TTY_REQUIRED" -eq 1 ] &&

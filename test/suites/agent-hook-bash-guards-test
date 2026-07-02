@@ -187,6 +187,17 @@ _assert_eq "git push --mirror origin: blocked" "2" "$HOOK_EXIT"
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"git -C /tmp/repo push --mirror"}}'
 _assert_eq "git -C push --mirror: blocked" "2" "$HOOK_EXIT"
 
+# --prune deletes remote refs with no local counterpart — blocked with its own message.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git push --prune origin refs/heads/*"}}'
+_assert_eq "git push --prune: blocked" "2" "$HOOK_EXIT"
+_assert_contains "git push --prune: prune-specific message" "--prune deletes remote refs" "$HOOK_STDERR"
+
+# Bare --all only pushes branches (destructive only with --force, already caught),
+# so it must NOT be blocked on its own.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git push --all origin"}}'
+_assert_eq "git push --all: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "git push --all: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
 # echo of git push --force is prose
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"echo git push --force"}}'
 _assert_eq "echo git push --force: allowed" "0" "$HOOK_EXIT"
