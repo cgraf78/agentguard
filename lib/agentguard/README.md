@@ -113,6 +113,12 @@ available, because nested Codex launches can inherit an outer
 process key, Claude uses `CLAUDE_CODE_CURRENT_SESSION_ID`, Gemini uses
 `gemini-$PPID`, and unknown agents fall back to `$$`.
 
+The state root itself is per-user, never a shared, predictable `/tmp`
+directory: `$XDG_RUNTIME_DIR/agentguard/hook-state` when available (a per-user
+directory the system clears on logout), falling back to `$XDG_STATE_HOME`, then
+`~/.local/state`, and finally a uid-scoped tmp path only when neither a runtime
+dir nor `HOME` is set.
+
 Launchers should set `AGENTGUARD_NAME` with `AGENTGUARD_SESSION_ID` when they know
 the concrete agent. `AGENTGUARD_SESSION_ID` alone falls back to the generic
 `agent` identity.

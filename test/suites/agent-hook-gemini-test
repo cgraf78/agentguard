@@ -42,8 +42,8 @@ _assert_eq "gemini: session-start emits Gemini additionalContext" "0" "$?"
 # MCP circuit breaker works under Gemini env (PPID-based state dir)
 # Clean any leftover Gemini state from prior tests. The PPID inside the
 # hook child is the test runner's PID ($$), so the state dir is
-# $TEST_TMPDIR/hook-state/gemini-$$. Clean it before the test.
-rm -rf "$TEST_TMPDIR/hook-state/gemini-$$"
+# $TEST_TMPDIR/agentguard/hook-state/gemini-$$. Clean it before the test.
+rm -rf "$TEST_TMPDIR/agentguard/hook-state/gemini-$$"
 
 # Accumulate 3 failures via post-mcp under Gemini env
 _run_hook_gemini "$POST_MCP" '{"tool_name":"mcp__gsrv__tool","tool_result_is_error":true}'
@@ -60,7 +60,7 @@ _run_hook_gemini "$PRE_MCP" '{"tool_name":"mcp__gsrv__tool","tool_input":{}}'
 _assert_eq "gemini: circuit breaker resets after success" "0" "$HOOK_EXIT"
 
 # knowledge_load warn-once works under Gemini env
-rm -rf "$TEST_TMPDIR/hook-state/gemini-$$"
+rm -rf "$TEST_TMPDIR/agentguard/hook-state/gemini-$$"
 _run_hook_gemini "$PRE_MCP" '{"tool_name":"mcp__gsrv__knowledge_load","tool_input":{"url":"https://example.com"}}'
 _assert_contains "gemini: knowledge_load first call warns" "WARNING" "$HOOK_STDERR"
 _run_hook_gemini "$PRE_MCP" '{"tool_name":"mcp__gsrv__knowledge_load","tool_input":{"url":"https://other.com"}}'

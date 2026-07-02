@@ -75,6 +75,38 @@ _hook_codex_process_key() {
   fi
 }
 
+# Per-user root for hook session state. Session markers, counters, and edit
+# churn tracking are ephemeral and per-user; they must never live under a
+# shared, predictable /tmp path. A fixed name like /tmp/hook-state lets another
+# user on a shared host pre-create it (as a dir they own, or a symlink) and then
+# tamper with another session's guard state, deny writes, or redirect them into
+# a victim's tree (CWE-377/CWE-59). Prefer XDG_RUNTIME_DIR: a per-user 0700
+# directory the system wipes on logout, which is the canonical home for
+# ephemeral runtime state and keeps stale per-session dirs from accumulating.
+# Fall back to XDG_STATE_HOME, then ~/.local/state, and only to a uid-scoped tmp
+# path when neither a runtime dir nor HOME is available, so hooks never
+# hard-fail.
+_hook_state_root() {
+  local base="${XDG_RUNTIME_DIR:-}"
+  [ -n "$base" ] || base="${XDG_STATE_HOME:-}"
+  [ -n "$base" ] || { [ -n "${HOME:-}" ] && base="$HOME/.local/state"; }
+  if [ -n "$base" ]; then
+    printf '%s/agentguard/hook-state' "$base"
+  else
+    printf '%s/agentguard-hook-state-%s' "${TMPDIR:-/tmp}" "$(id -u 2>/dev/null || echo 0)"
+  fi
+}
+
+# Create a hook state directory (and parents) privately. XDG_RUNTIME_DIR is
+# already 0700, but the XDG_STATE_HOME/~/.local/state fallbacks inherit the
+# caller's umask (typically 0755), which would let another user on a shared host
+# read a session's activity metadata (which MCP servers failed, per-file edit
+# churn). Creating under `umask 077` keeps every tier's state dirs 0700 to match
+# the privacy the runtime tier gives for free. The subshell contains the umask.
+_hook_mkstate() {
+  (umask 077 && mkdir -p "$1") 2>/dev/null
+}
+
 # Session key for state directory isolation. Prefer stable runtime ids. Codex
 # hook commands can inherit CODEX_THREAD_ID from an outer Codex process when a
 # user launches nested Codex, so once Codex JSON has been read its session_id is
@@ -111,7 +143,7 @@ _hook_refresh_state_dir() {
 
   [ -n "$session_key" ] || session_key="$$"
   _HOOK_SESSION_KEY="$session_key"
-  _HOOK_STATE_DIR="${TMPDIR:-/tmp}/hook-state/$_HOOK_SESSION_KEY"
+  _HOOK_STATE_DIR="$(_hook_state_root)/$_HOOK_SESSION_KEY"
 }
 
 _hook_refresh_state_dir
@@ -156,7 +188,7 @@ _hook_mark_once() {
   # If state cannot be written, fail open and show the reminder or warning.
   # Missing a de-duplication marker is less harmful than silently dropping
   # behavioral steer.
-  mkdir -p "$dir" 2>/dev/null || return 0
+  _hook_mkstate "$dir" || return 0
   : >"$marker" 2>/dev/null || true
   return 0
 }
@@ -197,7 +229,7 @@ _hook_counter_increment() {
   local file="$1" dir count
   dir="${file%/*}"
   if [ "$dir" != "$file" ]; then
-    mkdir -p "$dir" 2>/dev/null || return 0
+    _hook_mkstate "$dir" || return 0
   fi
   count=$(_hook_counter_read "$file")
   printf '%s\n' "$((count + 1))" >"$file" 2>/dev/null || true
@@ -640,7 +672,7 @@ _hook_hm_session_start() {
     # _hook_hm_event also reads stdin for callers that did not already do so,
     # so derive the marker path from the post-event state as a final guard.
     marker="$_HOOK_STATE_DIR/hm-session-start-context-emitted"
-    mkdir -p "$_HOOK_STATE_DIR" 2>/dev/null || return 0
+    _hook_mkstate "$_HOOK_STATE_DIR" || return 0
     : >"$marker" 2>/dev/null || true
   fi
 }
