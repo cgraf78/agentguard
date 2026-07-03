@@ -585,19 +585,51 @@ _hook_hm_warn_once() {
   _hook_once_per_session "hm-warn-$key" && _hook_warn "$message"
 }
 
+# Inline `bash -c` script backing _hook_timeout_prefix's fallback when
+# neither `timeout` nor `gtimeout` is on PATH — confirmed missing on stock
+# macOS (no coreutils) including GitHub's macOS runners. Takes the budget in
+# seconds as $1 and the guarded command as the rest; polls every 0.1s and,
+# past budget, TERMs then KILLs the child and exits 124 to match GNU
+# timeout's convention, which _hook_hm_event already checks for. Must be a
+# real executable (not a shell function) so it works as a plain word in
+# _HOOK_TIMEOUT_PREFIX even when a caller execs it via `env` (env can only
+# exec real binaries, not the calling shell's functions) — `bash` itself is
+# always present since this whole library requires it already, so this adds
+# no new dependency.
+# shellcheck disable=SC2016 # single-quoted on purpose: expands later, inside the bash -c it's passed to.
+_HOOK_PORTABLE_TIMEOUT_SCRIPT='
+  seconds="$1"; shift
+  "$@" &
+  pid=$!
+  waited=0
+  budget=$((seconds * 10))
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$budget" ]; then
+      kill -TERM "$pid" 2>/dev/null
+      sleep 0.1
+      kill -KILL "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      exit 124
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  wait "$pid"
+'
+
 # Best-effort external timeout guard for a slow subprocess, general-purpose
-# (not Hive Memory-specific). Not every platform ships GNU `timeout` — macOS
-# needs `coreutils` from brew for `gtimeout` — so this silently no-ops there
-# rather than ever blocking a caller when neither is present. Sets the
-# _HOOK_TIMEOUT_PREFIX array (0, 1, or 2 words) to prepend to the guarded
-# command; an empty array expands to nothing, leaving the command unguarded.
+# (not Hive Memory-specific). Sets the _HOOK_TIMEOUT_PREFIX array to prepend
+# to the guarded command, preferring a real `timeout`/`gtimeout` binary and
+# falling back to the portable bash implementation above so the guard is
+# never silently absent for want of an external dependency.
 _hook_timeout_prefix() {
   local seconds="$1"
-  _HOOK_TIMEOUT_PREFIX=()
   if command -v timeout >/dev/null 2>&1; then
     _HOOK_TIMEOUT_PREFIX=(timeout "$seconds")
   elif command -v gtimeout >/dev/null 2>&1; then
     _HOOK_TIMEOUT_PREFIX=(gtimeout "$seconds")
+  else
+    _HOOK_TIMEOUT_PREFIX=(bash -c "$_HOOK_PORTABLE_TIMEOUT_SCRIPT" _ "$seconds")
   fi
 }
 

@@ -507,7 +507,13 @@ case "${HM_MODE:-empty}" in
   hang)
     # Simulates a canonical store that never responds (e.g. an unreachable
     # network mount) so the timeout guard has something real to bound.
-    sleep 10
+    # `exec` so this process *becomes* sleep rather than forking a child of
+    # it — the real hm binary is a single process blocked on I/O, not a
+    # shell forking a subprocess, and a forked child here would become an
+    # orphan that outlives a plain `kill` on this script's own PID, keeping
+    # any pipe it inherited (like a caller's stdout capture) open until it
+    # finishes on its own regardless of whether the timeout guard fired.
+    exec sleep 10
     ;;
   *)
     printf '%s\n' '{"warnings":[],"actions":[]}'
@@ -975,22 +981,76 @@ HOME="$HM_HOME" \
 _assert_contains "hm hook: default timeout is 2s when unconfigured" \
   "Hive Memory hook timed out after 2s" "$(cat "$hm_hang_default_err")"
 
-# _hook_timeout_prefix (general-purpose, not Hive Memory-specific): absent
-# timeout/gtimeout means an empty prefix, so a guarded command silently runs
-# unguarded rather than the caller ever blocking on a missing dependency.
-# PATH is narrowed *inside* the sourced script, after `bash` itself has
-# already started with the ambient PATH — narrowing it on the outer `bash -c`
-# invocation instead would make the outer shell unable to find `bash` at all.
-timeout_prefix_absent_len=$(
+# End-to-end proof for the exact scenario that failed on GitHub's macOS CI
+# runners (no timeout, no gtimeout on PATH): going through the real
+# _hook_hm_prompt_submit path — not just the isolated _hook_timeout_prefix
+# unit test below — against a genuinely hung mock hm. The curated PATH omits
+# only timeout/gtimeout, mirroring real stock macOS (which ships dirname,
+# jq, etc. as base OS tools — the only thing actually missing without
+# Homebrew coreutils is a `timeout` binary); everything else hook-helpers.sh
+# and its detect.sh dependency need stays available so this isolates the
+# timeout-specific behavior instead of tripping over unrelated missing tools.
+: >"$HM_LOG"
+NO_TIMEOUT_HM_BIN=$(_tmpdir)
+for _no_timeout_tool in bash sleep dirname basename ps sed tr cat jq mktemp; do
+  ln -s "$(command -v "$_no_timeout_tool")" "$NO_TIMEOUT_HM_BIN/$_no_timeout_tool"
+done
+hm_hang_no_timeout_err="$HM_MOCK_ROOT/hang-no-timeout.err"
+hm_hang_no_timeout_start=$SECONDS
+HOME="$HM_HOME" \
+  PATH="$NO_TIMEOUT_HM_BIN:$HM_BIN" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  HM_MODE=hang \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_HIVE_MEMORY_TIMEOUT=1 \
+  AGENTGUARD_NAME=codex \
+  CODEX_THREAD_ID="hm-hang-no-timeout-session" \
   bash -c '
     source "$1"
-    PATH="/nonexistent-agentguard-test-path"
-    _hook_timeout_prefix 5
-    printf "%s" "${#_HOOK_TIMEOUT_PREFIX[@]}"
+    _HOOK_INPUT='"'"'{"prompt":"remember this"}'"'"'
+    _hook_hm_prompt_submit
+  ' _ "$HELPERS" >/dev/null 2>"$hm_hang_no_timeout_err"
+hm_hang_no_timeout_elapsed=$((SECONDS - hm_hang_no_timeout_start))
+if [ "$hm_hang_no_timeout_elapsed" -lt 6 ]; then
+  _pass "hm hook: guard still bounds a hang without any external timeout binary on PATH"
+else
+  _fail "hm hook: guard still bounds a hang without any external timeout binary on PATH"
+fi
+_assert_contains "hm hook: timeout warning still fires without an external timeout binary" \
+  "Hive Memory hook timed out after 1s" "$(cat "$hm_hang_no_timeout_err")"
+
+# _hook_timeout_prefix (general-purpose, not Hive Memory-specific): absent
+# timeout/gtimeout falls back to the portable bash implementation, not to
+# leaving a guarded command unbounded — this is what CI caught missing on
+# GitHub's macOS runners (no coreutils, so neither binary exists there) and
+# what makes clark2 or any other stock-macOS machine in the fleet actually
+# protected. Curate a PATH with only `bash` and `sleep` (both required to
+# even run this test) so timeout/gtimeout are genuinely absent, then confirm
+# the resulting prefix actually cuts off a real 5s sleep near the 1s budget
+# rather than running the full 5s.
+NO_TIMEOUT_BIN=$(_tmpdir)
+ln -s "$(command -v bash)" "$NO_TIMEOUT_BIN/bash"
+ln -s "$(command -v sleep)" "$NO_TIMEOUT_BIN/sleep"
+timeout_prefix_fallback_result=$(
+  PATH="$NO_TIMEOUT_BIN" bash -c '
+    source "$1"
+    _hook_timeout_prefix 1
+    start=$SECONDS
+    "${_HOOK_TIMEOUT_PREFIX[@]}" sleep 5
+    rc=$?
+    printf "%s %s" "$((SECONDS - start))" "$rc"
   ' _ "$HELPERS"
 )
-_assert_eq "hook timeout prefix: no-ops without timeout/gtimeout on PATH" \
-  "0" "$timeout_prefix_absent_len"
+timeout_prefix_fallback_elapsed="${timeout_prefix_fallback_result%% *}"
+timeout_prefix_fallback_rc="${timeout_prefix_fallback_result##* }"
+if [ "$timeout_prefix_fallback_elapsed" -lt 3 ]; then
+  _pass "hook timeout prefix: portable fallback cuts off a hang near the budget, not the full duration"
+else
+  _fail "hook timeout prefix: portable fallback cuts off a hang near the budget, not the full duration"
+fi
+_assert_eq "hook timeout prefix: portable fallback reports 124 like GNU timeout" \
+  "124" "$timeout_prefix_fallback_rc"
 
 FAKE_TIMEOUT_BIN=$(_tmpdir)
 cat >"$FAKE_TIMEOUT_BIN/timeout" <<'SCRIPT'
