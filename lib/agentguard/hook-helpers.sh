@@ -585,6 +585,22 @@ _hook_hm_warn_once() {
   _hook_once_per_session "hm-warn-$key" && _hook_warn "$message"
 }
 
+# Best-effort external timeout guard for a slow subprocess, general-purpose
+# (not Hive Memory-specific). Not every platform ships GNU `timeout` — macOS
+# needs `coreutils` from brew for `gtimeout` — so this silently no-ops there
+# rather than ever blocking a caller when neither is present. Sets the
+# _HOOK_TIMEOUT_PREFIX array (0, 1, or 2 words) to prepend to the guarded
+# command; an empty array expands to nothing, leaving the command unguarded.
+_hook_timeout_prefix() {
+  local seconds="$1"
+  _HOOK_TIMEOUT_PREFIX=()
+  if command -v timeout >/dev/null 2>&1; then
+    _HOOK_TIMEOUT_PREFIX=(timeout "$seconds")
+  elif command -v gtimeout >/dev/null 2>&1; then
+    _HOOK_TIMEOUT_PREFIX=(gtimeout "$seconds")
+  fi
+}
+
 _hook_hm_event() {
   _hook_hm_available || return 0
 
@@ -617,6 +633,15 @@ _hook_hm_event() {
       ;;
   esac
   hm_args+=(--json "$@")
+
+  # `hm`'s canonical store for a given alias can be a network-backed mount
+  # (e.g. an rclone/cloud-synced Google Drive path) with no latency bound of
+  # its own. Guard the call with a short external timeout so a slow or
+  # unreachable store degrades to "skip memory context this turn" well
+  # inside the hook runner's own timeout budget, instead of risking the
+  # whole hook process getting killed later and its output discarded.
+  _hook_timeout_prefix "${AGENTGUARD_HIVE_MEMORY_TIMEOUT:-2}"
+
   if [ "$project_infer" -eq 0 ]; then
     response=$(
       env -u HIVE_MEMORY_PROJECT \
@@ -624,7 +649,7 @@ _hook_hm_event() {
         HIVE_MEMORY_SESSION_ID="$_HOOK_SESSION_KEY" \
         HIVE_MEMORY_PROJECT_INFER=0 \
         HIVE_MEMORY_HOOK_ACTIVE=1 \
-        hm "${hm_args[@]}" 2>"$err"
+        "${_HOOK_TIMEOUT_PREFIX[@]}" hm "${hm_args[@]}" 2>"$err"
     )
   else
     response=$(
@@ -633,12 +658,14 @@ _hook_hm_event() {
       HIVE_MEMORY_PROJECT="$project" \
       HIVE_MEMORY_PROJECT_INFER="$project_infer" \
       HIVE_MEMORY_HOOK_ACTIVE=1 \
-        hm "${hm_args[@]}" 2>"$err"
+        "${_HOOK_TIMEOUT_PREFIX[@]}" hm "${hm_args[@]}" 2>"$err"
     )
   fi
   rc=$?
   if [ "$rc" -ne 0 ]; then
-    if [ -s "$err" ]; then
+    if [ "$rc" -eq 124 ]; then
+      _hook_hm_warn_once "timeout" "Hive Memory hook timed out after ${AGENTGUARD_HIVE_MEMORY_TIMEOUT:-2}s — skipping memory context this turn"
+    elif [ -s "$err" ]; then
       _hook_hm_warn_once "failed" "Hive Memory hook failed: $(tr '\n' ' ' <"$err")"
     else
       _hook_hm_warn_once "failed" "Hive Memory hook failed with status $rc"
