@@ -504,6 +504,17 @@ case "${HM_MODE:-empty}" in
     printf 'backend offline\n' >&2
     exit 42
     ;;
+  hang)
+    # Simulates a canonical store that never responds (e.g. an unreachable
+    # network mount) so the timeout guard has something real to bound.
+    # `exec` so this process *becomes* sleep rather than forking a child of
+    # it — the real hm binary is a single process blocked on I/O, not a
+    # shell forking a subprocess, and a forked child here would become an
+    # orphan that outlives a plain `kill` on this script's own PID, keeping
+    # any pipe it inherited (like a caller's stdout capture) open until it
+    # finishes on its own regardless of whether the timeout guard fired.
+    exec sleep 10
+    ;;
   *)
     printf '%s\n' '{"warnings":[],"actions":[]}'
     ;;
@@ -886,6 +897,178 @@ HOME="$HM_HOME" \
   ' _ "$HELPERS" >/dev/null 2>"$hm_fail_err"
 hm_fail_count=$(grep -c 'Hive Memory hook failed' "$hm_fail_err" || true)
 _assert_eq "hm hook: repeated failures warn once per session" "1" "$hm_fail_count"
+
+# `hm`'s canonical store can be a network-backed mount with no bound of its
+# own (a real incident: an rclone/cloud-synced Google Drive mount going
+# through a slow revalidation caused prompt-submit to blow past the host
+# agent's own hook timeout). `_hook_hm_event` must guard the call so a
+# hung/unreachable store degrades to "skip memory context this turn" well
+# inside a short, configurable budget instead of running unbounded.
+#
+# _hook_hm_prompt_submit returns early on an empty prompt, before ever
+# calling _hook_hm_event — so, unlike the mocked-response cases above, this
+# needs real prompt text in _HOOK_INPUT to actually reach the guarded `hm`
+# call.
+: >"$HM_LOG"
+hm_hang_err="$HM_MOCK_ROOT/hang.err"
+hm_hang_start=$(date +%s)
+HOME="$HM_HOME" \
+  PATH="$HM_BIN:$PATH" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  HM_MODE=hang \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_HIVE_MEMORY_TIMEOUT=1 \
+  AGENTGUARD_NAME=codex \
+  CODEX_THREAD_ID="hm-hang-session" \
+  bash -c '
+    source "$1"
+    _HOOK_INPUT='"'"'{"prompt":"remember this"}'"'"'
+    _hook_hm_prompt_submit
+  ' _ "$HELPERS" >/dev/null 2>"$hm_hang_err"
+hm_hang_elapsed=$(($(date +%s) - hm_hang_start))
+# The mock sleeps 10s; a working guard returns close to the 1s budget. Bound
+# well below 10s so this only fails if the guard genuinely isn't cutting the
+# call short, not on ordinary CI scheduling jitter around 1s.
+if [ "$hm_hang_elapsed" -lt 6 ]; then
+  _pass "hm hook: a hung store is cut off near the configured timeout, not left to run"
+else
+  _fail "hm hook: a hung store is cut off near the configured timeout, not left to run"
+fi
+_assert_contains "hm hook: a timeout is reported distinctly from a hard failure" \
+  "Hive Memory hook timed out after 1s" "$(cat "$hm_hang_err")"
+
+# The timeout is advisory infrastructure, not a hard failure: the calling
+# hook must still exit cleanly and simply proceed without memory context.
+hm_hang_rc=0
+HOME="$HM_HOME" \
+  PATH="$HM_BIN:$PATH" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  HM_MODE=hang \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_HIVE_MEMORY_TIMEOUT=1 \
+  AGENTGUARD_NAME=codex \
+  CODEX_THREAD_ID="hm-hang-session-2" \
+  bash -c '
+    source "$1"
+    _HOOK_INPUT='"'"'{"prompt":"remember this"}'"'"'
+    _hook_hm_prompt_submit
+  ' _ "$HELPERS" >/dev/null 2>/dev/null || hm_hang_rc=$?
+_assert_eq "hm hook: a timed-out call still returns success to the caller" "0" "$hm_hang_rc"
+
+# Lock in the actual default (AGENTGUARD_HIVE_MEMORY_TIMEOUT unset) rather
+# than only ever exercising it overridden for test speed above — a future
+# change to the hardcoded default in hook-helpers.sh should fail this
+# assertion, not silently drift from what's documented/expected. Costs a
+# real ~2s of wall clock since it deliberately does not override the value.
+: >"$HM_LOG"
+hm_hang_default_err="$HM_MOCK_ROOT/hang-default.err"
+HOME="$HM_HOME" \
+  PATH="$HM_BIN:$PATH" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  HM_MODE=hang \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_NAME=codex \
+  CODEX_THREAD_ID="hm-hang-default-session" \
+  bash -c '
+    unset AGENTGUARD_HIVE_MEMORY_TIMEOUT
+    source "$1"
+    _HOOK_INPUT='"'"'{"prompt":"remember this"}'"'"'
+    _hook_hm_prompt_submit
+  ' _ "$HELPERS" >/dev/null 2>"$hm_hang_default_err"
+_assert_contains "hm hook: default timeout is 2s when unconfigured" \
+  "Hive Memory hook timed out after 2s" "$(cat "$hm_hang_default_err")"
+
+# End-to-end proof for the exact scenario that failed on GitHub's macOS CI
+# runners (no timeout, no gtimeout on PATH): going through the real
+# _hook_hm_prompt_submit path — not just the isolated _hook_timeout_prefix
+# unit test below — against a genuinely hung mock hm. The curated PATH omits
+# only timeout/gtimeout, mirroring real stock macOS (which ships dirname,
+# jq, etc. as base OS tools — the only thing actually missing without
+# Homebrew coreutils is a `timeout` binary); everything else hook-helpers.sh
+# and its detect.sh dependency need stays available so this isolates the
+# timeout-specific behavior instead of tripping over unrelated missing tools.
+: >"$HM_LOG"
+NO_TIMEOUT_HM_BIN=$(_tmpdir)
+for _no_timeout_tool in bash sleep dirname basename ps sed tr cat jq mktemp; do
+  ln -s "$(command -v "$_no_timeout_tool")" "$NO_TIMEOUT_HM_BIN/$_no_timeout_tool"
+done
+hm_hang_no_timeout_err="$HM_MOCK_ROOT/hang-no-timeout.err"
+hm_hang_no_timeout_start=$SECONDS
+HOME="$HM_HOME" \
+  PATH="$NO_TIMEOUT_HM_BIN:$HM_BIN" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  HM_MODE=hang \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_HIVE_MEMORY_TIMEOUT=1 \
+  AGENTGUARD_NAME=codex \
+  CODEX_THREAD_ID="hm-hang-no-timeout-session" \
+  bash -c '
+    source "$1"
+    _HOOK_INPUT='"'"'{"prompt":"remember this"}'"'"'
+    _hook_hm_prompt_submit
+  ' _ "$HELPERS" >/dev/null 2>"$hm_hang_no_timeout_err"
+hm_hang_no_timeout_elapsed=$((SECONDS - hm_hang_no_timeout_start))
+if [ "$hm_hang_no_timeout_elapsed" -lt 6 ]; then
+  _pass "hm hook: guard still bounds a hang without any external timeout binary on PATH"
+else
+  _fail "hm hook: guard still bounds a hang without any external timeout binary on PATH"
+fi
+_assert_contains "hm hook: timeout warning still fires without an external timeout binary" \
+  "Hive Memory hook timed out after 1s" "$(cat "$hm_hang_no_timeout_err")"
+
+# _hook_timeout_prefix (general-purpose, not Hive Memory-specific): absent
+# timeout/gtimeout falls back to the portable bash implementation, not to
+# leaving a guarded command unbounded — this is what CI caught missing on
+# GitHub's macOS runners (no coreutils, so neither binary exists there) and
+# what makes clark2 or any other stock-macOS machine in the fleet actually
+# protected. Curate a PATH with only `bash` and `sleep` (both required to
+# even run this test) so timeout/gtimeout are genuinely absent, then confirm
+# the resulting prefix actually cuts off a real 5s sleep near the 1s budget
+# rather than running the full 5s.
+NO_TIMEOUT_BIN=$(_tmpdir)
+ln -s "$(command -v bash)" "$NO_TIMEOUT_BIN/bash"
+ln -s "$(command -v sleep)" "$NO_TIMEOUT_BIN/sleep"
+timeout_prefix_fallback_result=$(
+  PATH="$NO_TIMEOUT_BIN" bash -c '
+    source "$1"
+    _hook_timeout_prefix 1
+    start=$SECONDS
+    "${_HOOK_TIMEOUT_PREFIX[@]}" sleep 5
+    rc=$?
+    printf "%s %s" "$((SECONDS - start))" "$rc"
+  ' _ "$HELPERS"
+)
+timeout_prefix_fallback_elapsed="${timeout_prefix_fallback_result%% *}"
+timeout_prefix_fallback_rc="${timeout_prefix_fallback_result##* }"
+if [ "$timeout_prefix_fallback_elapsed" -lt 3 ]; then
+  _pass "hook timeout prefix: portable fallback cuts off a hang near the budget, not the full duration"
+else
+  _fail "hook timeout prefix: portable fallback cuts off a hang near the budget, not the full duration"
+fi
+_assert_eq "hook timeout prefix: portable fallback reports 124 like GNU timeout" \
+  "124" "$timeout_prefix_fallback_rc"
+
+FAKE_TIMEOUT_BIN=$(_tmpdir)
+cat >"$FAKE_TIMEOUT_BIN/timeout" <<'SCRIPT'
+#!/usr/bin/env bash
+shift
+exec "$@"
+SCRIPT
+chmod +x "$FAKE_TIMEOUT_BIN/timeout"
+timeout_prefix_present=$(
+  bash -c '
+    source "$1"
+    PATH="$2"
+    _hook_timeout_prefix 5
+    printf "%s\n" "${_HOOK_TIMEOUT_PREFIX[*]}"
+  ' _ "$HELPERS" "$FAKE_TIMEOUT_BIN"
+)
+_assert_eq "hook timeout prefix: prepends the available timeout binary and duration" \
+  "timeout 5" "$timeout_prefix_present"
 
 # _hook_agent_name returns "codex" when CODEX_INTERNAL_ORIGINATOR_OVERRIDE is set
 # shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use

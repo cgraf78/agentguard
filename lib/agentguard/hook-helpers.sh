@@ -585,6 +585,54 @@ _hook_hm_warn_once() {
   _hook_once_per_session "hm-warn-$key" && _hook_warn "$message"
 }
 
+# Inline `bash -c` script backing _hook_timeout_prefix's fallback when
+# neither `timeout` nor `gtimeout` is on PATH — confirmed missing on stock
+# macOS (no coreutils) including GitHub's macOS runners. Takes the budget in
+# seconds as $1 and the guarded command as the rest; polls every 0.1s and,
+# past budget, TERMs then KILLs the child and exits 124 to match GNU
+# timeout's convention, which _hook_hm_event already checks for. Must be a
+# real executable (not a shell function) so it works as a plain word in
+# _HOOK_TIMEOUT_PREFIX even when a caller execs it via `env` (env can only
+# exec real binaries, not the calling shell's functions) — `bash` itself is
+# always present since this whole library requires it already, so this adds
+# no new dependency.
+# shellcheck disable=SC2016 # single-quoted on purpose: expands later, inside the bash -c it's passed to.
+_HOOK_PORTABLE_TIMEOUT_SCRIPT='
+  seconds="$1"; shift
+  "$@" &
+  pid=$!
+  waited=0
+  budget=$((seconds * 10))
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$budget" ]; then
+      kill -TERM "$pid" 2>/dev/null
+      sleep 0.1
+      kill -KILL "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      exit 124
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  wait "$pid"
+'
+
+# Best-effort external timeout guard for a slow subprocess, general-purpose
+# (not Hive Memory-specific). Sets the _HOOK_TIMEOUT_PREFIX array to prepend
+# to the guarded command, preferring a real `timeout`/`gtimeout` binary and
+# falling back to the portable bash implementation above so the guard is
+# never silently absent for want of an external dependency.
+_hook_timeout_prefix() {
+  local seconds="$1"
+  if command -v timeout >/dev/null 2>&1; then
+    _HOOK_TIMEOUT_PREFIX=(timeout "$seconds")
+  elif command -v gtimeout >/dev/null 2>&1; then
+    _HOOK_TIMEOUT_PREFIX=(gtimeout "$seconds")
+  else
+    _HOOK_TIMEOUT_PREFIX=(bash -c "$_HOOK_PORTABLE_TIMEOUT_SCRIPT" _ "$seconds")
+  fi
+}
+
 _hook_hm_event() {
   _hook_hm_available || return 0
 
@@ -617,6 +665,15 @@ _hook_hm_event() {
       ;;
   esac
   hm_args+=(--json "$@")
+
+  # `hm`'s canonical store for a given alias can be a network-backed mount
+  # (e.g. an rclone/cloud-synced Google Drive path) with no latency bound of
+  # its own. Guard the call with a short external timeout so a slow or
+  # unreachable store degrades to "skip memory context this turn" well
+  # inside the hook runner's own timeout budget, instead of risking the
+  # whole hook process getting killed later and its output discarded.
+  _hook_timeout_prefix "${AGENTGUARD_HIVE_MEMORY_TIMEOUT:-2}"
+
   if [ "$project_infer" -eq 0 ]; then
     response=$(
       env -u HIVE_MEMORY_PROJECT \
@@ -624,7 +681,7 @@ _hook_hm_event() {
         HIVE_MEMORY_SESSION_ID="$_HOOK_SESSION_KEY" \
         HIVE_MEMORY_PROJECT_INFER=0 \
         HIVE_MEMORY_HOOK_ACTIVE=1 \
-        hm "${hm_args[@]}" 2>"$err"
+        "${_HOOK_TIMEOUT_PREFIX[@]}" hm "${hm_args[@]}" 2>"$err"
     )
   else
     response=$(
@@ -633,12 +690,14 @@ _hook_hm_event() {
       HIVE_MEMORY_PROJECT="$project" \
       HIVE_MEMORY_PROJECT_INFER="$project_infer" \
       HIVE_MEMORY_HOOK_ACTIVE=1 \
-        hm "${hm_args[@]}" 2>"$err"
+        "${_HOOK_TIMEOUT_PREFIX[@]}" hm "${hm_args[@]}" 2>"$err"
     )
   fi
   rc=$?
   if [ "$rc" -ne 0 ]; then
-    if [ -s "$err" ]; then
+    if [ "$rc" -eq 124 ]; then
+      _hook_hm_warn_once "timeout" "Hive Memory hook timed out after ${AGENTGUARD_HIVE_MEMORY_TIMEOUT:-2}s — skipping memory context this turn"
+    elif [ -s "$err" ]; then
       _hook_hm_warn_once "failed" "Hive Memory hook failed: $(tr '\n' ' ' <"$err")"
     else
       _hook_hm_warn_once "failed" "Hive Memory hook failed with status $rc"
