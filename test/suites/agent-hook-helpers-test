@@ -1052,6 +1052,32 @@ fi
 _assert_eq "hook timeout prefix: portable fallback reports 124 like GNU timeout" \
   "124" "$timeout_prefix_fallback_rc"
 
+# BusyBox `timeout` returns 143 after its TERM signal instead of GNU's 124.
+# Exercise the detected implementation through the selected prefix so Alpine
+# cannot silently change the timeout status contract again.
+BUSYBOX_TIMEOUT_BIN=$(_tmpdir)
+ln -s "$(command -v bash)" "$BUSYBOX_TIMEOUT_BIN/bash"
+ln -s "$(command -v sleep)" "$BUSYBOX_TIMEOUT_BIN/sleep"
+cat >"$BUSYBOX_TIMEOUT_BIN/timeout" <<'SCRIPT'
+#!/usr/bin/env bash
+if [ "${1:-}" = "--help" ]; then
+  echo "BusyBox timeout"
+  exit 0
+fi
+exit 143
+SCRIPT
+chmod +x "$BUSYBOX_TIMEOUT_BIN/timeout"
+busybox_timeout_rc=$(
+  PATH="$BUSYBOX_TIMEOUT_BIN" bash -c '
+    source "$1"
+    _hook_timeout_prefix 1
+    "${_HOOK_TIMEOUT_PREFIX[@]}" sleep 5
+    printf "%s" "$?"
+  ' _ "$HELPERS"
+)
+_assert_eq "hook timeout prefix: normalizes BusyBox timeouts to status 124" \
+  "124" "$busybox_timeout_rc"
+
 FAKE_TIMEOUT_BIN=$(_tmpdir)
 cat >"$FAKE_TIMEOUT_BIN/timeout" <<'SCRIPT'
 #!/usr/bin/env bash

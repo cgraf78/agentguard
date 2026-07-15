@@ -586,8 +586,10 @@ _hook_hm_warn_once() {
 }
 
 # Inline `bash -c` script backing _hook_timeout_prefix's fallback when
-# neither `timeout` nor `gtimeout` is on PATH — confirmed missing on stock
-# macOS (no coreutils) including GitHub's macOS runners. Takes the budget in
+# neither a GNU-compatible `timeout` nor `gtimeout` is on PATH. That includes
+# stock macOS (no coreutils) and BusyBox: BusyBox reports a timed-out child as
+# status 143 instead of GNU's 124, so callers cannot distinguish the timeout
+# from an independently SIGTERM-terminated command. Takes the budget in
 # seconds as $1 and the guarded command as the rest; polls every 0.1s and,
 # past budget, TERMs then KILLs the child and exits 124 to match GNU
 # timeout's convention, which _hook_hm_event already checks for. Must be a
@@ -619,13 +621,18 @@ _HOOK_PORTABLE_TIMEOUT_SCRIPT='
 
 # Best-effort external timeout guard for a slow subprocess, general-purpose
 # (not Hive Memory-specific). Sets the _HOOK_TIMEOUT_PREFIX array to prepend
-# to the guarded command, preferring a real `timeout`/`gtimeout` binary and
-# falling back to the portable bash implementation above so the guard is
-# never silently absent for want of an external dependency.
+# to the guarded command, preferring a GNU-compatible `timeout`/`gtimeout`
+# binary and falling back to the portable bash implementation above so every
+# platform exposes the same status-124 timeout contract.
 _hook_timeout_prefix() {
-  local seconds="$1"
+  local seconds="$1" timeout_help=''
   if command -v timeout >/dev/null 2>&1; then
-    _HOOK_TIMEOUT_PREFIX=(timeout "$seconds")
+    timeout_help=$(timeout --help 2>&1 || true)
+    if [[ "$timeout_help" == *BusyBox* ]]; then
+      _HOOK_TIMEOUT_PREFIX=(bash -c "$_HOOK_PORTABLE_TIMEOUT_SCRIPT" _ "$seconds")
+    else
+      _HOOK_TIMEOUT_PREFIX=(timeout "$seconds")
+    fi
   elif command -v gtimeout >/dev/null 2>&1; then
     _HOOK_TIMEOUT_PREFIX=(gtimeout "$seconds")
   else
