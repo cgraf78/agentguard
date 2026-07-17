@@ -79,18 +79,21 @@ Base hooks follow the same shape:
 ```text
 set -u
 _HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}"
-_HOOK_BIN_DIR=$(_hook_script_dir "${BASH_SOURCE[0]}")
+_HOOK_BIN_DIR=$(_agentguard_script_dir "${BASH_SOURCE[0]}")
 source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
 # parse input and run base logic
 _hook_source_extensions
 _hook_finish
 ```
 
-`_hook_script_dir` (and its `_hook_script_parent` helper) is inlined into each
-hook rather than shared from `lib/` or a PATH-visible command: it is what
-*locates* `lib/`, and launchers sometimes invoke hooks with a minimal PATH (the
-reason `agent-hook-pre-bash` re-execs a modern Bash), so the resolver must stay
-self-contained and depend only on `BASH_SOURCE` + `readlink`.
+`_agentguard_script_dir` (and its `_agentguard_script_parent` helper) is
+generated into each hook and the public classifier from
+`support/script-resolver.sh.template`. It cannot be loaded from `lib/`
+or a PATH-visible command because it is what *locates* `lib/`, and launchers
+sometimes invoke hooks with a minimal PATH (the reason `agent-hook-pre-bash`
+re-execs a modern Bash). Run `support/sync-hook-bootstrap` after editing the
+template; the test entrypoint runs `--check` against the authoritative launcher
+manifest to prevent missing or stale copies.
 
 The split between `_HOOK_SELF` and `_HOOK_BIN_DIR` is intentional: `_HOOK_SELF`
 keeps extension discovery adjacent to the invoked symlink in `~/.local/bin`,

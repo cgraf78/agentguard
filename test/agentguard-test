@@ -4,6 +4,9 @@
 set -euo pipefail
 
 test_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+root="${test_dir%/test}"
+
+"$root/support/sync-hook-bootstrap" --check
 
 for suite in "$test_dir"/suites/*-test; do
   "$suite"

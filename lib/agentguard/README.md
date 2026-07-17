@@ -61,17 +61,19 @@ Base hooks follow the same shape:
 ```text
 set -u
 _HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}"
-_HOOK_BIN_DIR=$(_hook_script_dir "${BASH_SOURCE[0]}")
+_HOOK_BIN_DIR=$(_agentguard_script_dir "${BASH_SOURCE[0]}")
 source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
 # parse input and run base logic
 _hook_source_extensions
 _hook_finish
 ```
 
-`_hook_script_dir`/`_hook_script_parent` are inlined into each hook (not shared
-from `lib/` or a PATH command): they locate `lib/` itself, and launchers may use
-a minimal PATH, so the resolver stays self-contained on `BASH_SOURCE` +
-`readlink`.
+`_agentguard_script_dir`/`_agentguard_script_parent` are generated into each
+hook and the public classifier from `support/script-resolver.sh.template`. They
+cannot be loaded from `lib/` or a PATH command because they locate `lib/`
+itself, and launchers may use a minimal PATH. Run
+`support/sync-hook-bootstrap` after editing the template; the test entrypoint
+uses `--check` against the launcher manifest to prevent drift.
 
 The split between `_HOOK_SELF` and `_HOOK_BIN_DIR` is intentional: `_HOOK_SELF`
 keeps extension discovery adjacent to the invoked symlink in `~/.local/bin`,
