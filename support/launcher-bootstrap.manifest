@@ -1,0 +1,12 @@
+hook bin/agent-hook-notification
+hook bin/agent-hook-post-bash
+hook bin/agent-hook-post-edit
+hook bin/agent-hook-post-mcp
+hook bin/agent-hook-pre-bash
+hook bin/agent-hook-pre-edit
+hook bin/agent-hook-pre-mcp
+hook bin/agent-hook-prompt-submit
+hook bin/agent-hook-session-end
+hook bin/agent-hook-session-start
+hook bin/agent-hook-stop
+classifier bin/agentguard-classify-command
