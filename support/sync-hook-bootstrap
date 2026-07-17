@@ -88,7 +88,11 @@ while read -r kind relative_path; do
     continue
   fi
 
-  if ! cmp -s "$generated" "$launcher"; then
+  generated_contents=''
+  launcher_contents=''
+  IFS= read -r -d '' generated_contents <"$generated" || :
+  IFS= read -r -d '' launcher_contents <"$launcher" || :
+  if [[ "$generated_contents" != "$launcher_contents" ]]; then
     if "$check"; then
       printf '%s\n' "out of date: $relative_path" >&2
       status=1

@@ -19,9 +19,8 @@ _HOOK_STOP_CONTINUE=''
 
 # General non-interactive shells get env.d through BASH_ENV/.zshenv. This is a
 # hook-local fallback for launchers that invoke hook scripts by absolute path
-# with a sparse environment. Do this before the first external command below:
-# empty PATH would otherwise make `dirname` unavailable, and a trailing `:`
-# would add the current directory to command lookup.
+# with a sparse environment. Avoid external commands until PATH is repaired;
+# a trailing `:` would add the current directory to command lookup.
 if [ -n "${PATH:-}" ]; then
   case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
@@ -33,7 +32,13 @@ else
 fi
 export PATH
 
-_AGENTGUARD_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_agentguard_lib_source="${BASH_SOURCE[0]}"
+_AGENTGUARD_LIB_DIR="${_agentguard_lib_source%/*}"
+if [ "$_AGENTGUARD_LIB_DIR" = "$_agentguard_lib_source" ]; then
+  _AGENTGUARD_LIB_DIR='.'
+fi
+_AGENTGUARD_LIB_DIR="$(cd -- "$_AGENTGUARD_LIB_DIR" && pwd -P)"
+unset _agentguard_lib_source
 
 # Resolve sibling helpers from this dependency directory. Hook tests commonly
 # mock HOME, but helper-to-helper dependencies should follow the library file

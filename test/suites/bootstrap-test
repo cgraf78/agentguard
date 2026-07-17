@@ -38,6 +38,12 @@ _assert_exit "bootstrap sync: regeneration is idempotent" 0 "$?"
 _assert_not_contains "bootstrap sync: regeneration removes drift" \
   "deliberate test drift" "$(cat "$fixture/bin/agent-hook-stop")"
 
+launcher_without_newline=$(<"$fixture/bin/agent-hook-stop")
+printf '%s' "$launcher_without_newline" >"$fixture/bin/agent-hook-stop"
+"$fixture/support/sync-hook-bootstrap" --check >/dev/null 2>&1
+_assert_exit "bootstrap sync: a missing final newline fails the check" 1 "$?"
+"$fixture/support/sync-hook-bootstrap" >/dev/null
+
 awk '
   /^# BEGIN GENERATED LAUNCHER BOOTSTRAP$/ { removing = 1 }
   !removing { print }
