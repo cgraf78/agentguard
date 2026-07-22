@@ -59,7 +59,9 @@ dependency manager's contract:
   share one path.
 
 Optional integrations are detected at runtime: `hm` enables Hive Memory hook
-context, `sl`, `git`, and `jj` enable repository status context, and
+context when its config is available through `HIVE_MEMORY_CONFIG`, an absolute
+`XDG_CONFIG_HOME`, or `~/.config`; `sl`, `git`, and `jj` enable repository
+status context, and
 `claude-templates` enables a Claude-specific maintenance hook when that
 command is installed.
 
@@ -136,10 +138,11 @@ process key, Claude uses `CLAUDE_CODE_CURRENT_SESSION_ID`, Gemini uses
 `gemini-$PPID`, and unknown agents fall back to `$$`.
 
 The state root itself is per-user, never a shared, predictable `/tmp`
-directory: `$XDG_RUNTIME_DIR/agentguard/hook-state` when available (a per-user
-directory the system clears on logout), falling back to `$XDG_STATE_HOME`, then
-`~/.local/state`, and finally a uid-scoped tmp path only when neither a runtime
-dir nor `HOME` is set.
+directory: an absolute `$XDG_RUNTIME_DIR/agentguard/hook-state` when available
+(a per-user directory the system clears on logout), falling back to an absolute
+`$XDG_STATE_HOME`, then `~/.local/state`, and finally a uid-scoped tmp path only
+when neither an absolute XDG root nor `HOME` is available. Relative XDG roots
+are ignored as required by the XDG base-directory contract.
 
 Launchers should set `AGENTGUARD_NAME` with `AGENTGUARD_SESSION_ID` when they know
 the concrete agent. `AGENTGUARD_SESSION_ID` alone falls back to the generic

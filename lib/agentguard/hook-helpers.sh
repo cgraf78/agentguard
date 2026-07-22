@@ -16,19 +16,24 @@
 _HOOK_BLOCKED=''
 _HOOK_CTX=''
 _HOOK_STOP_CONTINUE=''
+_HOOK_HM_CONFIG_PATH=''
 
 # General non-interactive shells get env.d through BASH_ENV/.zshenv. This is a
 # hook-local fallback for launchers that invoke hook scripts by absolute path
 # with a sparse environment. Avoid external commands until PATH is repaired;
 # a trailing `:` would add the current directory to command lookup.
 if [ -n "${PATH:-}" ]; then
-  case ":$PATH:" in
-    *":$HOME/.local/bin:"*) ;;
-    *) [ -d "$HOME/.local/bin" ] && PATH="$HOME/.local/bin:$PATH" ;;
-  esac
+  if [ -n "${HOME:-}" ] && [ -d "$HOME/.local/bin" ]; then
+    case ":$PATH:" in
+      *":$HOME/.local/bin:"*) ;;
+      *) PATH="$HOME/.local/bin:$PATH" ;;
+    esac
+  fi
 else
   PATH="/usr/local/bin:/usr/bin:/bin"
-  [ -d "$HOME/.local/bin" ] && PATH="$HOME/.local/bin:$PATH"
+  if [ -n "${HOME:-}" ] && [ -d "$HOME/.local/bin" ]; then
+    PATH="$HOME/.local/bin:$PATH"
+  fi
 fi
 export PATH
 
@@ -85,15 +90,22 @@ _hook_codex_process_key() {
 # shared, predictable /tmp path. A fixed name like /tmp/hook-state lets another
 # user on a shared host pre-create it (as a dir they own, or a symlink) and then
 # tamper with another session's guard state, deny writes, or redirect them into
-# a victim's tree (CWE-377/CWE-59). Prefer XDG_RUNTIME_DIR: a per-user 0700
-# directory the system wipes on logout, which is the canonical home for
-# ephemeral runtime state and keeps stale per-session dirs from accumulating.
-# Fall back to XDG_STATE_HOME, then ~/.local/state, and only to a uid-scoped tmp
-# path when neither a runtime dir nor HOME is available, so hooks never
-# hard-fail.
+# a victim's tree (CWE-377/CWE-59). Prefer an absolute XDG_RUNTIME_DIR: a
+# per-user 0700 directory the system wipes on logout, which is the canonical
+# home for ephemeral runtime state and keeps stale per-session dirs from
+# accumulating. Fall back to an absolute XDG_STATE_HOME, then ~/.local/state,
+# and only to a uid-scoped tmp path when neither an XDG root nor HOME is
+# available, so hooks never hard-fail.
 _hook_state_root() {
-  local base="${XDG_RUNTIME_DIR:-}"
-  [ -n "$base" ] || base="${XDG_STATE_HOME:-}"
+  local base=''
+  case "${XDG_RUNTIME_DIR:-}" in
+    /*) base="$XDG_RUNTIME_DIR" ;;
+  esac
+  if [ -z "$base" ]; then
+    case "${XDG_STATE_HOME:-}" in
+      /*) base="$XDG_STATE_HOME" ;;
+    esac
+  fi
   [ -n "$base" ] || { [ -n "${HOME:-}" ] && base="$HOME/.local/state"; }
   if [ -n "$base" ]; then
     printf '%s/agentguard/hook-state' "$base"
@@ -464,6 +476,28 @@ _hook_cd_to_target() {
 
 # --- Hive Memory integration ---
 
+_hook_hm_resolve_config() {
+  local base
+
+  # Match Hive Memory's own precedence exactly. An explicitly set override is
+  # authoritative even when it is empty or relative, so availability must not
+  # silently fall through to another config. XDG base directories, unlike
+  # tool-specific path overrides, are valid only when absolute.
+  if [ -n "${HIVE_MEMORY_CONFIG+x}" ]; then
+    _HOOK_HM_CONFIG_PATH="$HIVE_MEMORY_CONFIG"
+    return 0
+  fi
+
+  case "${XDG_CONFIG_HOME:-}" in
+    /*) base="${XDG_CONFIG_HOME%/}" ;;
+    *)
+      [ -n "${HOME:-}" ] || return 1
+      base="${HOME%/}/.config"
+      ;;
+  esac
+  _HOOK_HM_CONFIG_PATH="$base/hive-memory/config.toml"
+}
+
 _hook_hm_available() {
   # Tests and emergency debugging can disable Hive Memory without changing the
   # installed hook config. Production defaults to enabled so memory context is
@@ -474,7 +508,9 @@ _hook_hm_available() {
   # recursively call back into Hive Memory.
   [ "${HIVE_MEMORY_HOOK_ACTIVE:-0}" != "1" ] || return 1
   command -v hm >/dev/null 2>&1 || return 1
-  [ -f "$HOME/.config/hive-memory/config.toml" ] || return 1
+  _hook_hm_resolve_config || return 1
+  [ -n "$_HOOK_HM_CONFIG_PATH" ] || return 1
+  [ -f "$_HOOK_HM_CONFIG_PATH" ] || return 1
 }
 
 _hook_hm_read_input() {
@@ -482,7 +518,8 @@ _hook_hm_read_input() {
 }
 
 _hook_hm_project_hint_is_home() {
-  local hint="${1%/}" home="${HOME%/}"
+  local hint="${1%/}" home="${HOME:-}"
+  home="${home%/}"
   [ -n "$home" ] && [ "$hint" = "$home" ]
 }
 
@@ -799,6 +836,7 @@ _hook_hm_event() {
   if [ "$project_infer" -eq 0 ]; then
     response=$(
       env -u HIVE_MEMORY_PROJECT \
+        HIVE_MEMORY_CONFIG="$_HOOK_HM_CONFIG_PATH" \
         HIVE_MEMORY_AGENT_ID="$(_hook_agent_name)" \
         HIVE_MEMORY_SESSION_ID="$_HOOK_SESSION_KEY" \
         HIVE_MEMORY_PROJECT_INFER=0 \
@@ -807,11 +845,12 @@ _hook_hm_event() {
     )
   else
     response=$(
-      HIVE_MEMORY_AGENT_ID="$(_hook_agent_name)" \
-      HIVE_MEMORY_SESSION_ID="$_HOOK_SESSION_KEY" \
-      HIVE_MEMORY_PROJECT="$project" \
-      HIVE_MEMORY_PROJECT_INFER="$project_infer" \
-      HIVE_MEMORY_HOOK_ACTIVE=1 \
+      HIVE_MEMORY_CONFIG="$_HOOK_HM_CONFIG_PATH" \
+        HIVE_MEMORY_AGENT_ID="$(_hook_agent_name)" \
+        HIVE_MEMORY_SESSION_ID="$_HOOK_SESSION_KEY" \
+        HIVE_MEMORY_PROJECT="$project" \
+        HIVE_MEMORY_PROJECT_INFER="$project_infer" \
+        HIVE_MEMORY_HOOK_ACTIVE=1 \
         "${_HOOK_TIMEOUT_PREFIX[@]}" hm "${hm_args[@]}" 2>"$err"
     )
   fi

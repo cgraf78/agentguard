@@ -336,6 +336,47 @@ _assert_eq "state_dir: codex JSON session id beats inherited env ids" "0" "$?"
 ) | _stdin_contains PASS
 _assert_eq "state_dir: XDG_RUNTIME_DIR wins" "0" "$?"
 
+# A relative runtime root is invalid under the XDG contract and must not mask
+# the next valid absolute state tier.
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID 2>/dev/null
+  XDG_RUNTIME_DIR="relative/runtime"
+  XDG_STATE_HOME="/tmp/absolute-state"
+  source "$HELPERS"
+  [[ "$_HOOK_STATE_DIR" == "/tmp/absolute-state/agentguard/hook-state/"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | _stdin_contains PASS
+_assert_eq "state_dir: relative runtime falls through to absolute state" "0" "$?"
+
+# Relative values at both XDG tiers are ignored in favor of the documented
+# HOME fallback.
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID 2>/dev/null
+  XDG_RUNTIME_DIR="relative/runtime"
+  XDG_STATE_HOME="relative/state"
+  HOME="/tmp/relative-xdg-home"
+  source "$HELPERS"
+  [[ "$_HOOK_STATE_DIR" == "/tmp/relative-xdg-home/.local/state/agentguard/hook-state/"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | _stdin_contains PASS
+_assert_eq "state_dir: relative XDG roots fall through to HOME" "0" "$?"
+
+# With no HOME, invalid relative XDG roots reach the existing uid-scoped tmp
+# fallback instead of creating cwd-relative state.
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID HOME 2>/dev/null
+  XDG_RUNTIME_DIR="relative/runtime"
+  XDG_STATE_HOME="relative/state"
+  TMPDIR="/tmp/relative-xdg-tmp"
+  source "$HELPERS"
+  [[ "$_HOOK_STATE_DIR" == "/tmp/relative-xdg-tmp/agentguard-hook-state-$(id -u)/"* ]] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | _stdin_contains PASS
+_assert_eq "state_dir: relative XDG roots fall through to uid tmp" "0" "$?"
+
 # Falls back to XDG_STATE_HOME when no runtime dir is available (macOS, cron).
 # shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
 (
@@ -478,6 +519,12 @@ _assert_eq "parse_edit_files: extracts object patch paths" "0" "$?"
 echo ""
 echo "=== hook-helpers: Hive Memory integration ==="
 
+# The runner may define XDG_CONFIG_HOME. HOME-fallback fixtures must not inherit
+# it, and the original environment must be restored before leaving this section.
+hm_ambient_xdg_set=${XDG_CONFIG_HOME+x}
+hm_ambient_xdg=${XDG_CONFIG_HOME:-}
+unset XDG_CONFIG_HOME
+
 HM_MOCK_ROOT=$(_tmpdir)
 HM_HOME="$HM_MOCK_ROOT/home"
 HM_BIN="$HM_MOCK_ROOT/bin"
@@ -489,6 +536,7 @@ cat >"$HM_BIN/hm" <<'SCRIPT'
 #!/usr/bin/env bash
 {
   printf 'args=%s\n' "$*"
+  printf 'config=%s\n' "${HIVE_MEMORY_CONFIG:-}"
   printf 'agent=%s\n' "${HIVE_MEMORY_AGENT_ID:-}"
   printf 'session=%s\n' "${HIVE_MEMORY_SESSION_ID:-}"
   printf 'project=%s\n' "${HIVE_MEMORY_PROJECT:-}"
@@ -522,6 +570,123 @@ esac
 SCRIPT
 chmod +x "$HM_BIN/hm"
 
+# AgentGuard's availability preflight must select the same config that `hm`
+# will load. Keep path policy assertions separate from hook-event behavior so a
+# producer/consumer mismatch cannot silently disable every memory hook.
+hm_xdg_config="$HM_MOCK_ROOT/xdg-config"
+hm_xdg_home="$HM_MOCK_ROOT/xdg-home"
+hm_explicit_config="$HM_MOCK_ROOT/explicit/config.toml"
+hm_newline_config="$HM_MOCK_ROOT/newline/config.toml"$'\n'
+mkdir -p "$hm_xdg_config/hive-memory" "$hm_xdg_home" "${hm_explicit_config%/*}"
+mkdir -p "${hm_newline_config%/*}"
+touch "$hm_xdg_config/hive-memory/config.toml" "$hm_explicit_config" "$hm_newline_config"
+
+hm_config_path=$(
+  env -u HIVE_MEMORY_CONFIG -u XDG_CONFIG_HOME \
+    HOME="$HM_HOME" bash -c \
+    'source "$1"; _hook_hm_resolve_config; printf "%s" "$_HOOK_HM_CONFIG_PATH"' \
+    _ "$HELPERS"
+)
+_assert_eq "hm config: HOME fallback when XDG is unset" \
+  "$HM_HOME/.config/hive-memory/config.toml" "$hm_config_path"
+
+hm_config_path=$(
+  env -u HIVE_MEMORY_CONFIG \
+    HOME="$HM_HOME" XDG_CONFIG_HOME="$hm_xdg_config/" \
+    bash -c \
+    'source "$1"; _hook_hm_resolve_config; printf "%s" "$_HOOK_HM_CONFIG_PATH"' \
+    _ "$HELPERS"
+)
+_assert_eq "hm config: absolute XDG_CONFIG_HOME wins and joins cleanly" \
+  "$hm_xdg_config/hive-memory/config.toml" "$hm_config_path"
+
+for invalid_xdg in '' relative/config; do
+  invalid_xdg_label=empty
+  [ -n "$invalid_xdg" ] && invalid_xdg_label=relative
+  hm_config_path=$(
+    env -u HIVE_MEMORY_CONFIG \
+      HOME="$HM_HOME" XDG_CONFIG_HOME="$invalid_xdg" \
+      bash -c \
+      'source "$1"; _hook_hm_resolve_config; printf "%s" "$_HOOK_HM_CONFIG_PATH"' \
+      _ "$HELPERS"
+  )
+  _assert_eq "hm config: $invalid_xdg_label XDG_CONFIG_HOME falls back to HOME" \
+    "$HM_HOME/.config/hive-memory/config.toml" "$hm_config_path"
+done
+
+hm_config_path=$(
+  HIVE_MEMORY_CONFIG="relative/config.toml" \
+    HOME="$HM_HOME" XDG_CONFIG_HOME="$hm_xdg_config" \
+    bash -c \
+    'source "$1"; _hook_hm_resolve_config; printf "%s" "$_HOOK_HM_CONFIG_PATH"' \
+    _ "$HELPERS"
+)
+_assert_eq "hm config: explicit override stays authoritative and unchanged" \
+  "relative/config.toml" "$hm_config_path"
+
+env -u HIVE_MEMORY_CONFIG \
+  HOME="$hm_xdg_home" XDG_CONFIG_HOME="$hm_xdg_config" \
+  PATH="$HM_BIN:/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  bash -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
+_assert_eq "hm config: availability accepts the absolute XDG config" "0" "$?"
+
+: >"$HM_LOG"
+HOME="$hm_xdg_home" XDG_CONFIG_HOME="$hm_xdg_config" \
+  PATH="$HM_BIN:/usr/bin:/bin" HM_LOG="$HM_LOG" \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 AGENTGUARD_NAME=codex \
+  CODEX_THREAD_ID="hm-xdg-session" \
+  bash -c '
+    source "$1"
+    _HOOK_INPUT='"'"'{"prompt":"remember this"}'"'"'
+    _hook_hm_prompt_submit
+  ' _ "$HELPERS" >/dev/null 2>/dev/null
+_assert_contains "hm config: XDG path is passed to the Hive subprocess" \
+  "config=$hm_xdg_config/hive-memory/config.toml" "$(cat "$HM_LOG")"
+
+HIVE_MEMORY_CONFIG="$hm_explicit_config" \
+  HOME="$hm_xdg_home" XDG_CONFIG_HOME="$hm_xdg_config" \
+  PATH="$HM_BIN:/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  bash -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
+_assert_eq "hm config: availability accepts an explicit config" "0" "$?"
+
+HIVE_MEMORY_CONFIG="$hm_newline_config" \
+  HOME="$hm_xdg_home" XDG_CONFIG_HOME="$hm_xdg_config" \
+  PATH="$HM_BIN:/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  bash -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
+_assert_eq "hm config: explicit override preserves trailing newlines" "0" "$?"
+
+HIVE_MEMORY_CONFIG="$HM_MOCK_ROOT/missing.toml" \
+  HOME="$HM_HOME" XDG_CONFIG_HOME="$hm_xdg_config" \
+  PATH="$HM_BIN:/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  bash -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
+_assert_eq "hm config: missing explicit override fails closed" "1" "$?"
+
+HIVE_MEMORY_CONFIG='' \
+  HOME="$HM_HOME" XDG_CONFIG_HOME="$hm_xdg_config" \
+  PATH="$HM_BIN:/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  bash -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
+_assert_eq "hm config: empty explicit override does not fall through" "1" "$?"
+
+env -u HIVE_MEMORY_CONFIG -u XDG_CONFIG_HOME -u HOME \
+  PATH="/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  bash -c 'source "$1"; _hook_hm_resolve_config' _ "$HELPERS" >/dev/null 2>&1
+_assert_eq "hm config: no valid config root fails closed" "1" "$?"
+
+: >"$HM_LOG"
+env -u HIVE_MEMORY_CONFIG -u HOME \
+  XDG_CONFIG_HOME="$hm_xdg_config" PATH="$HM_BIN:/usr/bin:/bin" \
+  HM_LOG="$HM_LOG" AGENTGUARD_HIVE_MEMORY_HOOKS=1 AGENTGUARD_NAME=codex \
+  CODEX_THREAD_ID="hm-xdg-no-home-session" \
+  bash -uc '
+    source "$1"
+    _HOOK_INPUT='"'"'{"prompt":"remember this","cwd":"/tmp/project"}'"'"'
+    _hook_hm_prompt_submit
+  ' _ "$HELPERS" >/dev/null 2>/dev/null
+_assert_eq "hm config: nounset event works with XDG config and no HOME" "0" "$?"
+_assert_contains "hm config: HOME-less event passes the XDG path" \
+  "config=$hm_xdg_config/hive-memory/config.toml" "$(cat "$HM_LOG")"
+
+: >"$HM_LOG"
 hm_prompt_err="$HM_MOCK_ROOT/prompt.err"
 hm_prompt_out=$(
   HOME="$HM_HOME" \
@@ -542,6 +707,8 @@ hm_prompt_out=$(
 hm_prompt_log=$(cat "$HM_LOG")
 _assert_contains "hm hook: prompt-submit command includes project and text" \
   "args=hook prompt-submit --project /tmp/project/src/main.rs --json --text remember this" "$hm_prompt_log"
+_assert_contains "hm hook: passes the resolved config path" \
+  "config=$HM_HOME/.config/hive-memory/config.toml" "$hm_prompt_log"
 _assert_contains "hm hook: passes agent identity" "agent=codex" "$hm_prompt_log"
 _assert_contains "hm hook: passes session identity" "session=hm-session" "$hm_prompt_log"
 _assert_contains "hm hook: passes active project env" "project=/tmp/project/src/main.rs" "$hm_prompt_log"
@@ -1024,6 +1191,12 @@ else
 fi
 _assert_contains "hm hook: timeout warning still fires without an external timeout binary" \
   "Hive Memory hook timed out after 1s" "$(cat "$hm_hang_no_timeout_err")"
+
+if [ -n "$hm_ambient_xdg_set" ]; then
+  export XDG_CONFIG_HOME="$hm_ambient_xdg"
+else
+  unset XDG_CONFIG_HOME
+fi
 
 # _hook_timeout_prefix (general-purpose, not Hive Memory-specific): absent
 # timeout/gtimeout falls back to the portable bash implementation, not to

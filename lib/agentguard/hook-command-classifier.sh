@@ -2086,7 +2086,11 @@ _hook_resolve_dir_lexically() {
 }
 
 _protected_bare_nested_cache_file() {
-  local work_tree="$1" base="${XDG_CACHE_HOME:-}" scope
+  local work_tree="$1" base='' scope
+  # A relative XDG base would make cache placement depend on hook cwd.
+  case "${XDG_CACHE_HOME:-}" in
+    /*) base="$XDG_CACHE_HOME" ;;
+  esac
   if [ -z "$base" ]; then
     [ -n "${HOME:-}" ] || return 1
     base="$HOME/.cache"
