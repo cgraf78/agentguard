@@ -609,15 +609,16 @@ _hook_hm_warn_once() {
 _HOOK_PORTABLE_TIMEOUT_SCRIPT='
   seconds="$1"; shift
   target_pid=""
+  target_pgid=""
   watchdog_pid=""
   timed_out=0
   timer_failed=0
 
   stop_target() {
-    [ -n "$target_pid" ] || return 0
-    kill -TERM "$target_pid" 2>/dev/null || return 0
+    [ -n "$target_pgid" ] || return 0
+    kill -TERM -- "-$target_pgid" 2>/dev/null || return 0
     sleep 0.1
-    kill -KILL "$target_pid" 2>/dev/null || true
+    kill -KILL -- "-$target_pgid" 2>/dev/null || true
   }
 
   stop_watchdog() {
@@ -628,7 +629,11 @@ _HOOK_PORTABLE_TIMEOUT_SCRIPT='
   }
 
   cleanup() {
-    trap - EXIT HUP INT QUIT TERM USR1 USR2
+    trap - EXIT
+    # Cleanup is idempotent and owns both child lifecycles. Ignore repeated
+    # signals until they are reaped; restoring defaults here lets a second
+    # signal kill the wrapper between TERM and KILL and strand its children.
+    trap "" HUP INT QUIT TERM USR1 USR2
     stop_watchdog
     stop_target
     [ -n "$target_pid" ] && wait "$target_pid" 2>/dev/null || true
@@ -652,14 +657,21 @@ _HOOK_PORTABLE_TIMEOUT_SCRIPT='
   trap expire USR1
   trap timer_error USR2
 
+  # Monitor mode gives this one asynchronous job a distinct process group on
+  # Bash 3.2 and newer without requiring GNU `setsid`. Descendants inherit that
+  # group, so timeout and interruption cleanup cannot strand grandchildren.
+  set -m
   "$@" &
   target_pid=$!
+  target_pgid=$target_pid
+  set +m
   wrapper_pid=$$
 
   (
     timer_pid=""
     stop_timer() {
-      trap - HUP INT QUIT TERM
+      # As in wrapper cleanup, the first signal owns cleanup to completion.
+      trap "" HUP INT QUIT TERM
       [ -n "$timer_pid" ] && kill -TERM "$timer_pid" 2>/dev/null || true
       [ -n "$timer_pid" ] && wait "$timer_pid" 2>/dev/null || true
       exit 0

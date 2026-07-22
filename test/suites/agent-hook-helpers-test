@@ -1056,6 +1056,34 @@ fi
 _assert_eq "hook timeout prefix: portable fallback reports 124 like GNU timeout" \
   "124" "$timeout_prefix_fallback_rc"
 
+# The target owns a distinct process group, so descendants cannot escape when
+# the direct child exits on TERM. Make the grandchild ignore TERM to prove the
+# wrapper follows with a group-wide KILL rather than only reaping its child.
+timeout_descendant_pid_file="$NO_TIMEOUT_BIN/descendant.pid"
+cat >"$NO_TIMEOUT_BIN/descendant-target" <<'SCRIPT'
+#!/usr/bin/env bash
+bash -c 'trap "" TERM; printf "%s\n" "$$" >"$1"; exec sleep 30' _ "$1" &
+wait
+SCRIPT
+chmod +x "$NO_TIMEOUT_BIN/descendant-target"
+timeout_descendant_rc=$(
+  PATH="$NO_TIMEOUT_BIN" bash -c '
+    source "$1"
+    _hook_timeout_prefix 1
+    "${_HOOK_TIMEOUT_PREFIX[@]}" descendant-target "$2"
+    printf "%s" "$?"
+  ' _ "$HELPERS" "$timeout_descendant_pid_file"
+)
+_assert_eq "hook timeout prefix: descendant timeout reports 124" \
+  "124" "$timeout_descendant_rc"
+timeout_descendant_pid=$(cat "$timeout_descendant_pid_file")
+if ! kill -0 "$timeout_descendant_pid" 2>/dev/null; then
+  _pass "hook timeout prefix: timeout terminates target descendants"
+else
+  _fail "hook timeout prefix: timeout left descendant $timeout_descendant_pid alive"
+  kill -KILL "$timeout_descendant_pid" 2>/dev/null || true
+fi
+
 # A command that exits before its budget owns the result, and stopping the
 # watchdog must also stop and reap its sleeping timer. The mock records the
 # timer PID before execing the real sleep so the assertion catches both a live
@@ -1109,6 +1137,7 @@ PATH="$TIMEOUT_CLEAN_BIN" \
     source "$1"
     _hook_timeout_prefix 5
     exec "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '\''
+      trap "" TERM
       printf "%s\n" "$$" >"$1"
       while [ ! -s "$2" ]; do /bin/sleep 0.01; done
       exec /bin/sleep 30
@@ -1119,18 +1148,21 @@ for _ in {1..250}; do
   [ -s "$timeout_target_pid_file" ] && [ -s "$timeout_watchdog_pid_file" ] && break
   sleep 0.02
 done
-kill -TERM "$timeout_wrapper_pid" 2>/dev/null || true
+for _ in {1..5}; do
+  kill -TERM "$timeout_wrapper_pid" 2>/dev/null || true
+  sleep 0.01
+done
 wait "$timeout_wrapper_pid"
 timeout_interrupt_rc=$?
-_assert_eq "hook timeout prefix: interruption returns shell signal status" \
+_assert_eq "hook timeout prefix: repeated interruption returns the first signal status" \
   "143" "$timeout_interrupt_rc"
 timeout_target_pid=$(cat "$timeout_target_pid_file")
 timeout_watchdog_pid=$(cat "$timeout_watchdog_pid_file")
 if ! kill -0 "$timeout_target_pid" 2>/dev/null &&
   ! kill -0 "$timeout_watchdog_pid" 2>/dev/null; then
-  _pass "hook timeout prefix: interruption reaps the target and watchdog timer"
+  _pass "hook timeout prefix: repeated interruption reaps the target and watchdog timer"
 else
-  _fail "hook timeout prefix: interruption left a child alive (target=$timeout_target_pid, timer=$timeout_watchdog_pid)"
+  _fail "hook timeout prefix: repeated interruption left a child alive (target=$timeout_target_pid, timer=$timeout_watchdog_pid)"
   kill -KILL "$timeout_target_pid" "$timeout_watchdog_pid" 2>/dev/null || true
 fi
 
