@@ -1077,10 +1077,11 @@ timeout_descendant_rc=$(
 _assert_eq "hook timeout prefix: descendant timeout reports 124" \
   "124" "$timeout_descendant_rc"
 timeout_descendant_pid=$(cat "$timeout_descendant_pid_file")
-if ! kill -0 "$timeout_descendant_pid" 2>/dev/null; then
+timeout_descendant_state=$(ps -p "$timeout_descendant_pid" -o stat= 2>/dev/null || true)
+if [ -z "$timeout_descendant_state" ] || [[ "$timeout_descendant_state" == Z* ]]; then
   _pass "hook timeout prefix: timeout terminates target descendants"
 else
-  _fail "hook timeout prefix: timeout left descendant $timeout_descendant_pid alive"
+  _fail "hook timeout prefix: timeout left descendant $timeout_descendant_pid alive ($timeout_descendant_state)"
   kill -KILL "$timeout_descendant_pid" 2>/dev/null || true
 fi
 
