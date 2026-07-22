@@ -16,6 +16,7 @@
 _HOOK_BLOCKED=''
 _HOOK_CTX=''
 _HOOK_STOP_CONTINUE=''
+_HOOK_HM_CONFIG_PATH=''
 
 # General non-interactive shells get env.d through BASH_ENV/.zshenv. This is a
 # hook-local fallback for launchers that invoke hook scripts by absolute path
@@ -464,6 +465,28 @@ _hook_cd_to_target() {
 
 # --- Hive Memory integration ---
 
+_hook_hm_config_path() {
+  local base
+
+  # Match Hive Memory's own precedence exactly. An explicitly set override is
+  # authoritative even when it is empty or relative, so availability must not
+  # silently fall through to another config. XDG base directories, unlike
+  # tool-specific path overrides, are valid only when absolute.
+  if [ -n "${HIVE_MEMORY_CONFIG+x}" ]; then
+    printf '%s\n' "$HIVE_MEMORY_CONFIG"
+    return 0
+  fi
+
+  case "${XDG_CONFIG_HOME:-}" in
+    /*) base="${XDG_CONFIG_HOME%/}" ;;
+    *)
+      [ -n "${HOME:-}" ] || return 1
+      base="${HOME%/}/.config"
+      ;;
+  esac
+  printf '%s/hive-memory/config.toml\n' "$base"
+}
+
 _hook_hm_available() {
   # Tests and emergency debugging can disable Hive Memory without changing the
   # installed hook config. Production defaults to enabled so memory context is
@@ -474,7 +497,9 @@ _hook_hm_available() {
   # recursively call back into Hive Memory.
   [ "${HIVE_MEMORY_HOOK_ACTIVE:-0}" != "1" ] || return 1
   command -v hm >/dev/null 2>&1 || return 1
-  [ -f "$HOME/.config/hive-memory/config.toml" ] || return 1
+  _HOOK_HM_CONFIG_PATH=$(_hook_hm_config_path) || return 1
+  [ -n "$_HOOK_HM_CONFIG_PATH" ] || return 1
+  [ -f "$_HOOK_HM_CONFIG_PATH" ] || return 1
 }
 
 _hook_hm_read_input() {
@@ -799,6 +824,7 @@ _hook_hm_event() {
   if [ "$project_infer" -eq 0 ]; then
     response=$(
       env -u HIVE_MEMORY_PROJECT \
+        HIVE_MEMORY_CONFIG="$_HOOK_HM_CONFIG_PATH" \
         HIVE_MEMORY_AGENT_ID="$(_hook_agent_name)" \
         HIVE_MEMORY_SESSION_ID="$_HOOK_SESSION_KEY" \
         HIVE_MEMORY_PROJECT_INFER=0 \
@@ -807,11 +833,12 @@ _hook_hm_event() {
     )
   else
     response=$(
-      HIVE_MEMORY_AGENT_ID="$(_hook_agent_name)" \
-      HIVE_MEMORY_SESSION_ID="$_HOOK_SESSION_KEY" \
-      HIVE_MEMORY_PROJECT="$project" \
-      HIVE_MEMORY_PROJECT_INFER="$project_infer" \
-      HIVE_MEMORY_HOOK_ACTIVE=1 \
+      HIVE_MEMORY_CONFIG="$_HOOK_HM_CONFIG_PATH" \
+        HIVE_MEMORY_AGENT_ID="$(_hook_agent_name)" \
+        HIVE_MEMORY_SESSION_ID="$_HOOK_SESSION_KEY" \
+        HIVE_MEMORY_PROJECT="$project" \
+        HIVE_MEMORY_PROJECT_INFER="$project_infer" \
+        HIVE_MEMORY_HOOK_ACTIVE=1 \
         "${_HOOK_TIMEOUT_PREFIX[@]}" hm "${hm_args[@]}" 2>"$err"
     )
   fi

@@ -489,6 +489,7 @@ cat >"$HM_BIN/hm" <<'SCRIPT'
 #!/usr/bin/env bash
 {
   printf 'args=%s\n' "$*"
+  printf 'config=%s\n' "${HIVE_MEMORY_CONFIG:-}"
   printf 'agent=%s\n' "${HIVE_MEMORY_AGENT_ID:-}"
   printf 'session=%s\n' "${HIVE_MEMORY_SESSION_ID:-}"
   printf 'project=%s\n' "${HIVE_MEMORY_PROJECT:-}"
@@ -522,6 +523,93 @@ esac
 SCRIPT
 chmod +x "$HM_BIN/hm"
 
+# AgentGuard's availability preflight must select the same config that `hm`
+# will load. Keep path policy assertions separate from hook-event behavior so a
+# producer/consumer mismatch cannot silently disable every memory hook.
+hm_xdg_config="$HM_MOCK_ROOT/xdg-config"
+hm_xdg_home="$HM_MOCK_ROOT/xdg-home"
+hm_explicit_config="$HM_MOCK_ROOT/explicit/config.toml"
+mkdir -p "$hm_xdg_config/hive-memory" "$hm_xdg_home" "${hm_explicit_config%/*}"
+touch "$hm_xdg_config/hive-memory/config.toml" "$hm_explicit_config"
+
+hm_config_path=$(
+  env -u HIVE_MEMORY_CONFIG -u XDG_CONFIG_HOME \
+    HOME="$HM_HOME" bash -c 'source "$1"; _hook_hm_config_path' _ "$HELPERS"
+)
+_assert_eq "hm config: HOME fallback when XDG is unset" \
+  "$HM_HOME/.config/hive-memory/config.toml" "$hm_config_path"
+
+hm_config_path=$(
+  env -u HIVE_MEMORY_CONFIG \
+    HOME="$HM_HOME" XDG_CONFIG_HOME="$hm_xdg_config/" \
+    bash -c 'source "$1"; _hook_hm_config_path' _ "$HELPERS"
+)
+_assert_eq "hm config: absolute XDG_CONFIG_HOME wins and joins cleanly" \
+  "$hm_xdg_config/hive-memory/config.toml" "$hm_config_path"
+
+for invalid_xdg in '' relative/config; do
+  invalid_xdg_label=empty
+  [ -n "$invalid_xdg" ] && invalid_xdg_label=relative
+  hm_config_path=$(
+    env -u HIVE_MEMORY_CONFIG \
+      HOME="$HM_HOME" XDG_CONFIG_HOME="$invalid_xdg" \
+      bash -c 'source "$1"; _hook_hm_config_path' _ "$HELPERS"
+  )
+  _assert_eq "hm config: $invalid_xdg_label XDG_CONFIG_HOME falls back to HOME" \
+    "$HM_HOME/.config/hive-memory/config.toml" "$hm_config_path"
+done
+
+hm_config_path=$(
+  HIVE_MEMORY_CONFIG="relative/config.toml" \
+    HOME="$HM_HOME" XDG_CONFIG_HOME="$hm_xdg_config" \
+    bash -c 'source "$1"; _hook_hm_config_path' _ "$HELPERS"
+)
+_assert_eq "hm config: explicit override stays authoritative and unchanged" \
+  "relative/config.toml" "$hm_config_path"
+
+env -u HIVE_MEMORY_CONFIG \
+  HOME="$hm_xdg_home" XDG_CONFIG_HOME="$hm_xdg_config" \
+  PATH="$HM_BIN:/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  bash -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
+_assert_eq "hm config: availability accepts the absolute XDG config" "0" "$?"
+
+: >"$HM_LOG"
+HOME="$hm_xdg_home" XDG_CONFIG_HOME="$hm_xdg_config" \
+  PATH="$HM_BIN:/usr/bin:/bin" HM_LOG="$HM_LOG" \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 AGENTGUARD_NAME=codex \
+  CODEX_THREAD_ID="hm-xdg-session" \
+  bash -c '
+    source "$1"
+    _HOOK_INPUT='"'"'{"prompt":"remember this"}'"'"'
+    _hook_hm_prompt_submit
+  ' _ "$HELPERS" >/dev/null 2>/dev/null
+_assert_contains "hm config: XDG path is passed to the Hive subprocess" \
+  "config=$hm_xdg_config/hive-memory/config.toml" "$(cat "$HM_LOG")"
+
+HIVE_MEMORY_CONFIG="$hm_explicit_config" \
+  HOME="$hm_xdg_home" XDG_CONFIG_HOME="$hm_xdg_config" \
+  PATH="$HM_BIN:/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  bash -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
+_assert_eq "hm config: availability accepts an explicit config" "0" "$?"
+
+HIVE_MEMORY_CONFIG="$HM_MOCK_ROOT/missing.toml" \
+  HOME="$HM_HOME" XDG_CONFIG_HOME="$hm_xdg_config" \
+  PATH="$HM_BIN:/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  bash -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
+_assert_eq "hm config: missing explicit override fails closed" "1" "$?"
+
+HIVE_MEMORY_CONFIG='' \
+  HOME="$HM_HOME" XDG_CONFIG_HOME="$hm_xdg_config" \
+  PATH="$HM_BIN:/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  bash -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
+_assert_eq "hm config: empty explicit override does not fall through" "1" "$?"
+
+env -u HIVE_MEMORY_CONFIG -u XDG_CONFIG_HOME -u HOME \
+  PATH="/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  bash -c 'source "$1"; _hook_hm_config_path' _ "$HELPERS" >/dev/null 2>&1
+_assert_eq "hm config: no valid config root fails closed" "1" "$?"
+
+: >"$HM_LOG"
 hm_prompt_err="$HM_MOCK_ROOT/prompt.err"
 hm_prompt_out=$(
   HOME="$HM_HOME" \
@@ -542,6 +630,8 @@ hm_prompt_out=$(
 hm_prompt_log=$(cat "$HM_LOG")
 _assert_contains "hm hook: prompt-submit command includes project and text" \
   "args=hook prompt-submit --project /tmp/project/src/main.rs --json --text remember this" "$hm_prompt_log"
+_assert_contains "hm hook: passes the resolved config path" \
+  "config=$HM_HOME/.config/hive-memory/config.toml" "$hm_prompt_log"
 _assert_contains "hm hook: passes agent identity" "agent=codex" "$hm_prompt_log"
 _assert_contains "hm hook: passes session identity" "session=hm-session" "$hm_prompt_log"
 _assert_contains "hm hook: passes active project env" "project=/tmp/project/src/main.rs" "$hm_prompt_log"

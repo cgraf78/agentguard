@@ -50,7 +50,9 @@ Use shdeps to locate sourceable files instead of reconstructing install paths:
   share one path.
 
 Optional integrations are detected at runtime: `hm` enables Hive Memory hook
-context, `sl`, `git`, and `jj` enable repository status context, and
+context when its config is available through `HIVE_MEMORY_CONFIG`, an absolute
+`XDG_CONFIG_HOME`, or `~/.config`; `sl`, `git`, and `jj` enable repository
+status context, and
 `claude-templates` enables a Claude-specific maintenance hook when that
 command is installed.
 
