@@ -621,6 +621,12 @@ _HOOK_PORTABLE_TIMEOUT_SCRIPT='
     exit 125
   fi
 
+  # GNU timeout treats a zero duration as disabling the timeout. Preserve that
+  # contract before creating a process group or watchdog in the fallback.
+  if [[ "$seconds" =~ ^0*([.]0*)?$ ]]; then
+    exec "$@"
+  fi
+
   stop_target() {
     [ -n "$target_pgid" ] || return 0
     kill -TERM -- "-$target_pgid" 2>/dev/null || return 0

@@ -1056,6 +1056,49 @@ fi
 _assert_eq "hook timeout prefix: portable fallback reports 124 like GNU timeout" \
   "124" "$timeout_prefix_fallback_rc"
 
+# Match GNU timeout's zero-duration contract: run the command without a
+# deadline. A recording sleep on PATH proves the fallback never starts its
+# watchdog while the target uses an absolute sleep and preserves status 7.
+ZERO_TIMEOUT_BIN=$(_tmpdir)
+zero_timeout_timer_marker="$ZERO_TIMEOUT_BIN/timer-started"
+ZERO_TIMEOUT_REAL_SLEEP=$(command -v sleep)
+ln -s "$(command -v bash)" "$ZERO_TIMEOUT_BIN/bash"
+cat >"$ZERO_TIMEOUT_BIN/sleep" <<'SCRIPT'
+#!/usr/bin/env bash
+printf '%s\n' started >"$ZERO_TIMEOUT_TIMER_MARKER"
+exec "$ZERO_TIMEOUT_REAL_SLEEP" "$@"
+SCRIPT
+chmod +x "$ZERO_TIMEOUT_BIN/sleep"
+zero_timeout_start=$(_timeout_monotonic_ms)
+zero_timeout_rc=$(ZERO_TIMEOUT_REAL_SLEEP="$ZERO_TIMEOUT_REAL_SLEEP" \
+  ZERO_TIMEOUT_TIMER_MARKER="$zero_timeout_timer_marker" \
+  PATH="$ZERO_TIMEOUT_BIN" bash -c '
+    source "$1"
+    _hook_timeout_prefix 0
+    if "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '\''
+      "$ZERO_TIMEOUT_REAL_SLEEP" 1
+      exit 7
+    '\''; then
+      rc=0
+    else
+      rc=$?
+    fi
+    printf "%s" "$rc"
+  ' _ "$HELPERS")
+zero_timeout_elapsed=$(($(_timeout_monotonic_ms) - zero_timeout_start))
+_assert_eq "hook timeout prefix: zero duration preserves the target status" \
+  "7" "$zero_timeout_rc"
+if [ "$zero_timeout_elapsed" -ge 900 ] && [ "$zero_timeout_elapsed" -lt 2500 ]; then
+  _pass "hook timeout prefix: zero duration lets the target finish"
+else
+  _fail "hook timeout prefix: zero duration changed target runtime (${zero_timeout_elapsed}ms)"
+fi
+if [ ! -e "$zero_timeout_timer_marker" ]; then
+  _pass "hook timeout prefix: zero duration does not start a watchdog"
+else
+  _fail "hook timeout prefix: zero duration started a watchdog"
+fi
+
 # `bash -c` reads BASH_ENV before its command string. The fallback is an
 # executable boundary and must not inherit errexit in a way that bypasses its
 # normalized timeout and timer-failure statuses.
