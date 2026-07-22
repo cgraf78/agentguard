@@ -9,6 +9,26 @@ _mock_protected_bare_git_home
 echo ""
 echo "=== pre-bash: protected bare-Git state guards ==="
 
+CLASSIFIER="$AGENTGUARD_ROOT/lib/agentguard/hook-command-classifier.sh"
+cache_work_tree="/tmp/protected-work-tree"
+absolute_cache_root="$TEST_TMPDIR/absolute-cache"
+absolute_cache_file=$(XDG_CACHE_HOME="$absolute_cache_root" bash -c '
+  source "$1"
+  _protected_bare_nested_cache_file "$2"
+' _ "$CLASSIFIER" "$cache_work_tree")
+_assert_eq "protected bare cache: absolute XDG cache root wins" \
+  "$absolute_cache_root/agentguard/protected-bare-nested-roots-%tmp%protected-work-tree" \
+  "$absolute_cache_file"
+
+cache_home="$TEST_TMPDIR/cache-home"
+relative_cache_file=$(XDG_CACHE_HOME="relative/cache" HOME="$cache_home" bash -c '
+  source "$1"
+  _protected_bare_nested_cache_file "$2"
+' _ "$CLASSIFIER" "$cache_work_tree")
+_assert_eq "protected bare cache: relative XDG cache root falls through to HOME" \
+  "$cache_home/.cache/agentguard/protected-bare-nested-roots-%tmp%protected-work-tree" \
+  "$relative_cache_file"
+
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"/usr/bin/env -S git status --untracked-files=all"}}'
 _assert_eq "/usr/bin/env split-string git with trailing status args: blocked" "2" "$HOOK_EXIT"
 

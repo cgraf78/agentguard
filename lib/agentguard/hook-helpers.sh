@@ -90,15 +90,22 @@ _hook_codex_process_key() {
 # shared, predictable /tmp path. A fixed name like /tmp/hook-state lets another
 # user on a shared host pre-create it (as a dir they own, or a symlink) and then
 # tamper with another session's guard state, deny writes, or redirect them into
-# a victim's tree (CWE-377/CWE-59). Prefer XDG_RUNTIME_DIR: a per-user 0700
-# directory the system wipes on logout, which is the canonical home for
-# ephemeral runtime state and keeps stale per-session dirs from accumulating.
-# Fall back to XDG_STATE_HOME, then ~/.local/state, and only to a uid-scoped tmp
-# path when neither a runtime dir nor HOME is available, so hooks never
-# hard-fail.
+# a victim's tree (CWE-377/CWE-59). Prefer an absolute XDG_RUNTIME_DIR: a
+# per-user 0700 directory the system wipes on logout, which is the canonical
+# home for ephemeral runtime state and keeps stale per-session dirs from
+# accumulating. Fall back to an absolute XDG_STATE_HOME, then ~/.local/state,
+# and only to a uid-scoped tmp path when neither an XDG root nor HOME is
+# available, so hooks never hard-fail.
 _hook_state_root() {
-  local base="${XDG_RUNTIME_DIR:-}"
-  [ -n "$base" ] || base="${XDG_STATE_HOME:-}"
+  local base=''
+  case "${XDG_RUNTIME_DIR:-}" in
+    /*) base="$XDG_RUNTIME_DIR" ;;
+  esac
+  if [ -z "$base" ]; then
+    case "${XDG_STATE_HOME:-}" in
+      /*) base="$XDG_STATE_HOME" ;;
+    esac
+  fi
   [ -n "$base" ] || { [ -n "${HOME:-}" ] && base="$HOME/.local/state"; }
   if [ -n "$base" ]; then
     printf '%s/agentguard/hook-state' "$base"
