@@ -909,9 +909,14 @@ _assert_eq "hm hook: repeated failures warn once per session" "1" "$hm_fail_coun
 # calling _hook_hm_event — so, unlike the mocked-response cases above, this
 # needs real prompt text in _HOOK_INPUT to actually reach the guarded `hm`
 # call.
+TIMEOUT_CLOCK=$(command -v python3)
+_timeout_monotonic_ms() {
+  "$TIMEOUT_CLOCK" -c 'import time; print(time.monotonic_ns() // 1_000_000)'
+}
+
 : >"$HM_LOG"
 hm_hang_err="$HM_MOCK_ROOT/hang.err"
-hm_hang_start=$(date +%s)
+hm_hang_start=$(_timeout_monotonic_ms)
 HOME="$HM_HOME" \
   PATH="$HM_BIN:$PATH" \
   TMPDIR="$HM_TMP" \
@@ -926,14 +931,14 @@ HOME="$HM_HOME" \
     _HOOK_INPUT='"'"'{"prompt":"remember this"}'"'"'
     _hook_hm_prompt_submit
   ' _ "$HELPERS" >/dev/null 2>"$hm_hang_err"
-hm_hang_elapsed=$(($(date +%s) - hm_hang_start))
+hm_hang_elapsed=$(($(_timeout_monotonic_ms) - hm_hang_start))
 # The mock sleeps 10s; a working guard returns close to the 1s budget. Bound
 # well below 10s so this only fails if the guard genuinely isn't cutting the
 # call short, not on ordinary CI scheduling jitter around 1s.
-if [ "$hm_hang_elapsed" -lt 6 ]; then
+if [ "$hm_hang_elapsed" -lt 6000 ]; then
   _pass "hm hook: a hung store is cut off near the configured timeout, not left to run"
 else
-  _fail "hm hook: a hung store is cut off near the configured timeout, not left to run"
+  _fail "hm hook: a hung store is cut off near the configured timeout, not left to run (${hm_hang_elapsed}ms)"
 fi
 _assert_contains "hm hook: a timeout is reported distinctly from a hard failure" \
   "Hive Memory hook timed out after 1s" "$(cat "$hm_hang_err")"
@@ -996,7 +1001,7 @@ for _no_timeout_tool in bash sleep dirname basename ps sed tr cat jq mktemp; do
   ln -s "$(command -v "$_no_timeout_tool")" "$NO_TIMEOUT_HM_BIN/$_no_timeout_tool"
 done
 hm_hang_no_timeout_err="$HM_MOCK_ROOT/hang-no-timeout.err"
-hm_hang_no_timeout_start=$SECONDS
+hm_hang_no_timeout_start=$(_timeout_monotonic_ms)
 HOME="$HM_HOME" \
   PATH="$NO_TIMEOUT_HM_BIN:$HM_BIN" \
   TMPDIR="$HM_TMP" \
@@ -1011,11 +1016,11 @@ HOME="$HM_HOME" \
     _HOOK_INPUT='"'"'{"prompt":"remember this"}'"'"'
     _hook_hm_prompt_submit
   ' _ "$HELPERS" >/dev/null 2>"$hm_hang_no_timeout_err"
-hm_hang_no_timeout_elapsed=$((SECONDS - hm_hang_no_timeout_start))
-if [ "$hm_hang_no_timeout_elapsed" -lt 6 ]; then
+hm_hang_no_timeout_elapsed=$(($(_timeout_monotonic_ms) - hm_hang_no_timeout_start))
+if [ "$hm_hang_no_timeout_elapsed" -lt 6000 ]; then
   _pass "hm hook: guard still bounds a hang without any external timeout binary on PATH"
 else
-  _fail "hm hook: guard still bounds a hang without any external timeout binary on PATH"
+  _fail "hm hook: guard still bounds a hang without any external timeout binary on PATH (${hm_hang_no_timeout_elapsed}ms)"
 fi
 _assert_contains "hm hook: timeout warning still fires without an external timeout binary" \
   "Hive Memory hook timed out after 1s" "$(cat "$hm_hang_no_timeout_err")"
@@ -1032,25 +1037,397 @@ _assert_contains "hm hook: timeout warning still fires without an external timeo
 NO_TIMEOUT_BIN=$(_tmpdir)
 ln -s "$(command -v bash)" "$NO_TIMEOUT_BIN/bash"
 ln -s "$(command -v sleep)" "$NO_TIMEOUT_BIN/sleep"
-timeout_prefix_fallback_result=$(
+timeout_prefix_fallback_start=$(_timeout_monotonic_ms)
+timeout_prefix_fallback_rc=$(
   PATH="$NO_TIMEOUT_BIN" bash -c '
     source "$1"
     _hook_timeout_prefix 1
-    start=$SECONDS
     "${_HOOK_TIMEOUT_PREFIX[@]}" sleep 5
-    rc=$?
-    printf "%s %s" "$((SECONDS - start))" "$rc"
+    printf "%s" "$?"
   ' _ "$HELPERS"
 )
-timeout_prefix_fallback_elapsed="${timeout_prefix_fallback_result%% *}"
-timeout_prefix_fallback_rc="${timeout_prefix_fallback_result##* }"
-if [ "$timeout_prefix_fallback_elapsed" -lt 3 ]; then
+timeout_prefix_fallback_elapsed=$(($(_timeout_monotonic_ms) - timeout_prefix_fallback_start))
+if [ "$timeout_prefix_fallback_elapsed" -ge 900 ] &&
+  [ "$timeout_prefix_fallback_elapsed" -lt 2500 ]; then
   _pass "hook timeout prefix: portable fallback cuts off a hang near the budget, not the full duration"
 else
-  _fail "hook timeout prefix: portable fallback cuts off a hang near the budget, not the full duration"
+  _fail "hook timeout prefix: portable fallback cuts off a hang near the budget, not the full duration (${timeout_prefix_fallback_elapsed}ms)"
 fi
 _assert_eq "hook timeout prefix: portable fallback reports 124 like GNU timeout" \
   "124" "$timeout_prefix_fallback_rc"
+
+# Match GNU timeout's zero-duration contract: run the command without a
+# deadline. A recording sleep on PATH proves the fallback never starts its
+# watchdog while the target uses an absolute sleep and preserves status 7.
+ZERO_TIMEOUT_BIN=$(_tmpdir)
+zero_timeout_timer_marker="$ZERO_TIMEOUT_BIN/timer-started"
+ZERO_TIMEOUT_REAL_SLEEP=$(command -v sleep)
+ln -s "$(command -v bash)" "$ZERO_TIMEOUT_BIN/bash"
+cat >"$ZERO_TIMEOUT_BIN/sleep" <<'SCRIPT'
+#!/usr/bin/env bash
+printf '%s\n' started >"$ZERO_TIMEOUT_TIMER_MARKER"
+exec "$ZERO_TIMEOUT_REAL_SLEEP" "$@"
+SCRIPT
+chmod +x "$ZERO_TIMEOUT_BIN/sleep"
+zero_timeout_start=$(_timeout_monotonic_ms)
+zero_timeout_rc=$(ZERO_TIMEOUT_REAL_SLEEP="$ZERO_TIMEOUT_REAL_SLEEP" \
+  ZERO_TIMEOUT_TIMER_MARKER="$zero_timeout_timer_marker" \
+  PATH="$ZERO_TIMEOUT_BIN" bash -c '
+    source "$1"
+    _hook_timeout_prefix 0
+    if "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '\''
+      "$ZERO_TIMEOUT_REAL_SLEEP" 1
+      exit 7
+    '\''; then
+      rc=0
+    else
+      rc=$?
+    fi
+    printf "%s" "$rc"
+  ' _ "$HELPERS")
+zero_timeout_elapsed=$(($(_timeout_monotonic_ms) - zero_timeout_start))
+_assert_eq "hook timeout prefix: zero duration preserves the target status" \
+  "7" "$zero_timeout_rc"
+if [ "$zero_timeout_elapsed" -ge 900 ] && [ "$zero_timeout_elapsed" -lt 2500 ]; then
+  _pass "hook timeout prefix: zero duration lets the target finish"
+else
+  _fail "hook timeout prefix: zero duration changed target runtime (${zero_timeout_elapsed}ms)"
+fi
+if [ ! -e "$zero_timeout_timer_marker" ]; then
+  _pass "hook timeout prefix: zero duration does not start a watchdog"
+else
+  _fail "hook timeout prefix: zero duration started a watchdog"
+fi
+
+# `bash -c` reads BASH_ENV before its command string. The fallback is an
+# executable boundary and must not inherit errexit in a way that bypasses its
+# normalized timeout and timer-failure statuses.
+timeout_errexit_env="$NO_TIMEOUT_BIN/bash-env"
+printf '%s\n' 'set -e' >"$timeout_errexit_env"
+timeout_errexit_rc=$(BASH_ENV="$timeout_errexit_env" PATH="$NO_TIMEOUT_BIN" bash -c '
+  source "$1"
+  _hook_timeout_prefix 1
+  if "${_HOOK_TIMEOUT_PREFIX[@]}" sleep 5; then
+    rc=0
+  else
+    rc=$?
+  fi
+  printf "%s" "$rc"
+' _ "$HELPERS")
+_assert_eq "hook timeout prefix: inherited errexit preserves timeout status 124" \
+  "124" "$timeout_errexit_rc"
+
+TIMER_FAILURE_BIN=$(_tmpdir)
+timer_failure_target_pid_file="$TIMER_FAILURE_BIN/target.pid"
+TIMER_FAILURE_REAL_BASH=$(command -v bash)
+TIMER_FAILURE_REAL_SLEEP=$(command -v sleep)
+ln -s "$TIMER_FAILURE_REAL_BASH" "$TIMER_FAILURE_BIN/bash"
+cat >"$TIMER_FAILURE_BIN/sleep" <<'SCRIPT'
+#!/usr/bin/env bash
+while [ ! -s "$TIMER_FAILURE_TARGET_PID_FILE" ]; do
+  "$TIMER_FAILURE_REAL_SLEEP" 0.01
+done
+exit 42
+SCRIPT
+chmod +x "$TIMER_FAILURE_BIN/sleep"
+timeout_timer_failure_start=$(_timeout_monotonic_ms)
+timeout_timer_failure_rc=$(BASH_ENV="$timeout_errexit_env" \
+  TIMER_FAILURE_TARGET_PID_FILE="$timer_failure_target_pid_file" \
+  TIMER_FAILURE_REAL_BASH="$TIMER_FAILURE_REAL_BASH" \
+  TIMER_FAILURE_REAL_SLEEP="$TIMER_FAILURE_REAL_SLEEP" \
+  PATH="$TIMER_FAILURE_BIN" bash -c '
+    source "$1"
+    _hook_timeout_prefix 5
+    if "${_HOOK_TIMEOUT_PREFIX[@]}" "$TIMER_FAILURE_REAL_BASH" -c '\''
+      printf "%s\n" "$$" >"$TIMER_FAILURE_TARGET_PID_FILE"
+      exec "$TIMER_FAILURE_REAL_SLEEP" 30
+    '\'' 2>/dev/null; then
+      rc=0
+    else
+      rc=$?
+    fi
+    printf "%s" "$rc"
+  ' _ "$HELPERS")
+timeout_timer_failure_elapsed=$(($(_timeout_monotonic_ms) - timeout_timer_failure_start))
+_assert_eq "hook timeout prefix: inherited errexit preserves timer failure status 125" \
+  "125" "$timeout_timer_failure_rc"
+if [ "$timeout_timer_failure_elapsed" -lt 1500 ]; then
+  _pass "hook timeout prefix: timer failure cuts off the target promptly"
+else
+  _fail "hook timeout prefix: timer failure waited for the target (${timeout_timer_failure_elapsed}ms)"
+fi
+timeout_timer_failure_target_pid=$(cat "$timer_failure_target_pid_file")
+if ! kill -0 "$timeout_timer_failure_target_pid" 2>/dev/null; then
+  _pass "hook timeout prefix: timer failure reaps the target"
+else
+  _fail "hook timeout prefix: timer failure left target $timeout_timer_failure_target_pid alive"
+  kill -KILL "$timeout_timer_failure_target_pid" 2>/dev/null || true
+fi
+
+# Duration validation precedes target creation, so even a command that would
+# finish before a failed `sleep` is scheduled cannot win the status race.
+timeout_invalid_fast_rc=$(BASH_ENV="$timeout_errexit_env" PATH="$NO_TIMEOUT_BIN" bash -c '
+  source "$1"
+  _hook_timeout_prefix not-a-duration
+  if "${_HOOK_TIMEOUT_PREFIX[@]}" true 2>/dev/null; then
+    rc=0
+  else
+    rc=$?
+  fi
+  printf "%s" "$rc"
+' _ "$HELPERS")
+_assert_eq "hook timeout prefix: invalid duration rejects a fast target with status 125" \
+  "125" "$timeout_invalid_fast_rc"
+
+timeout_invalid_side_effect="$NO_TIMEOUT_BIN/invalid-duration-side-effect"
+timeout_invalid_side_effect_rc=$(TIMEOUT_SIDE_EFFECT="$timeout_invalid_side_effect" \
+  PATH="$NO_TIMEOUT_BIN" bash -c '
+    source "$1"
+    _hook_timeout_prefix not-a-duration
+    if "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '\''
+      printf "%s\n" ran >"$TIMEOUT_SIDE_EFFECT"
+    '\'' 2>/dev/null; then
+      rc=0
+    else
+      rc=$?
+    fi
+    printf "%s" "$rc"
+  ' _ "$HELPERS")
+_assert_eq "hook timeout prefix: invalid duration side-effect target returns status 125" \
+  "125" "$timeout_invalid_side_effect_rc"
+if [ ! -e "$timeout_invalid_side_effect" ]; then
+  _pass "hook timeout prefix: invalid duration does not execute the target"
+else
+  _fail "hook timeout prefix: invalid duration executed the target"
+fi
+
+# Reject GNU-only suffixes before backend selection. Both an environment with
+# no timeout binary and one advertising a GNU-compatible timeout must return
+# 125 without executing the backend or target.
+timeout_suffix_portable_side_effect="$NO_TIMEOUT_BIN/suffix-portable-side-effect"
+timeout_suffix_portable_rc=$(TIMEOUT_SIDE_EFFECT="$timeout_suffix_portable_side_effect" \
+  PATH="$NO_TIMEOUT_BIN" bash -c '
+    source "$1"
+    _hook_timeout_prefix 0.1s
+    if "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '\''
+      printf "%s\n" ran >"$TIMEOUT_SIDE_EFFECT"
+    '\''; then
+      rc=0
+    else
+      rc=$?
+    fi
+    printf "%s" "$rc"
+  ' _ "$HELPERS")
+_assert_eq "hook timeout prefix: portable backend rejects duration suffix with status 125" \
+  "125" "$timeout_suffix_portable_rc"
+if [ ! -e "$timeout_suffix_portable_side_effect" ]; then
+  _pass "hook timeout prefix: portable suffix rejection skips the target"
+else
+  _fail "hook timeout prefix: portable suffix rejection executed the target"
+fi
+
+SUFFIX_EXTERNAL_BIN=$(_tmpdir)
+suffix_external_backend_marker="$SUFFIX_EXTERNAL_BIN/backend-invoked"
+suffix_external_side_effect="$SUFFIX_EXTERNAL_BIN/target-ran"
+ln -s "$(command -v bash)" "$SUFFIX_EXTERNAL_BIN/bash"
+cat >"$SUFFIX_EXTERNAL_BIN/timeout" <<'SCRIPT'
+#!/usr/bin/env bash
+printf '%s\n' invoked >"$TIMEOUT_BACKEND_MARKER"
+if [ "${1:-}" = "--help" ]; then
+  printf '%s\n' 'timeout (GNU coreutils)'
+  exit 0
+fi
+shift
+exec "$@"
+SCRIPT
+chmod +x "$SUFFIX_EXTERNAL_BIN/timeout"
+timeout_suffix_external_rc=$(TIMEOUT_BACKEND_MARKER="$suffix_external_backend_marker" \
+  TIMEOUT_SIDE_EFFECT="$suffix_external_side_effect" \
+  PATH="$SUFFIX_EXTERNAL_BIN" bash -c '
+    source "$1"
+    _hook_timeout_prefix 0.1s
+    if "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '\''
+      printf "%s\n" ran >"$TIMEOUT_SIDE_EFFECT"
+    '\''; then
+      rc=0
+    else
+      rc=$?
+    fi
+    printf "%s" "$rc"
+  ' _ "$HELPERS")
+_assert_eq "hook timeout prefix: external backend rejects duration suffix with status 125" \
+  "125" "$timeout_suffix_external_rc"
+if [ ! -e "$suffix_external_backend_marker" ]; then
+  _pass "hook timeout prefix: suffix rejection skips the external backend"
+else
+  _fail "hook timeout prefix: suffix rejection invoked the external backend"
+fi
+if [ ! -e "$suffix_external_side_effect" ]; then
+  _pass "hook timeout prefix: external suffix rejection skips the target"
+else
+  _fail "hook timeout prefix: external suffix rejection executed the target"
+fi
+
+# The wrapper may inherit shell options, but its temporary monitor mode must
+# not change the exported SHELLOPTS seen by a guarded Bash command. The target
+# also exits on `false` with status 1; reaching the explicit exit returns 8.
+timeout_target_shellopts_expected="$NO_TIMEOUT_BIN/target-shellopts.expected"
+timeout_target_shellopts_actual="$NO_TIMEOUT_BIN/target-shellopts.actual"
+timeout_target_errexit_rc=$(TIMEOUT_SHELLOPTS_EXPECTED="$timeout_target_shellopts_expected" \
+  TIMEOUT_SHELLOPTS_ACTUAL="$timeout_target_shellopts_actual" \
+  PATH="$NO_TIMEOUT_BIN" bash -c '
+  source "$1"
+  unset BASH_ENV
+  set -e
+  export SHELLOPTS
+  printf "%s\n" "$SHELLOPTS" >"$TIMEOUT_SHELLOPTS_EXPECTED"
+  _hook_timeout_prefix 5
+  if "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '\''
+    printf "%s\n" "$SHELLOPTS" >"$TIMEOUT_SHELLOPTS_ACTUAL"
+    false
+    exit 8
+  '\''; then
+    rc=0
+  else
+    rc=$?
+  fi
+  printf "%s" "$rc"
+' _ "$HELPERS")
+_assert_eq "hook timeout prefix: preserves exported errexit for the target" \
+  "1" "$timeout_target_errexit_rc"
+_assert_eq "hook timeout prefix: preserves exported shell options with monitor off" \
+  "$(cat "$timeout_target_shellopts_expected")" "$(cat "$timeout_target_shellopts_actual")"
+
+# Preserve monitor when the caller already exported it instead of always
+# removing the option in the target while undoing process-group setup.
+timeout_monitor_shellopts_expected="$NO_TIMEOUT_BIN/monitor-shellopts.expected"
+timeout_monitor_shellopts_actual="$NO_TIMEOUT_BIN/monitor-shellopts.actual"
+TIMEOUT_SHELLOPTS_EXPECTED="$timeout_monitor_shellopts_expected" \
+  TIMEOUT_SHELLOPTS_ACTUAL="$timeout_monitor_shellopts_actual" \
+  PATH="$NO_TIMEOUT_BIN" bash -c '
+  source "$1"
+  unset BASH_ENV
+  set -m
+  export SHELLOPTS
+  printf "%s\n" "$SHELLOPTS" >"$TIMEOUT_SHELLOPTS_EXPECTED"
+  _hook_timeout_prefix 5
+  "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '\''
+    printf "%s\n" "$SHELLOPTS" >"$TIMEOUT_SHELLOPTS_ACTUAL"
+  '\''
+' _ "$HELPERS"
+_assert_eq "hook timeout prefix: preserves exported shell options with monitor on" \
+  "$(cat "$timeout_monitor_shellopts_expected")" "$(cat "$timeout_monitor_shellopts_actual")"
+
+# The target owns a distinct process group, so descendants cannot escape when
+# the direct child exits on TERM. Make the grandchild ignore TERM to prove the
+# wrapper follows with a group-wide KILL rather than only reaping its child.
+timeout_descendant_pid_file="$NO_TIMEOUT_BIN/descendant.pid"
+cat >"$NO_TIMEOUT_BIN/descendant-target" <<'SCRIPT'
+#!/usr/bin/env bash
+bash -c 'trap "" TERM; printf "%s\n" "$$" >"$1"; exec sleep 30' _ "$1" &
+wait
+SCRIPT
+chmod +x "$NO_TIMEOUT_BIN/descendant-target"
+timeout_descendant_rc=$(
+  PATH="$NO_TIMEOUT_BIN" bash -c '
+    source "$1"
+    _hook_timeout_prefix 1
+    "${_HOOK_TIMEOUT_PREFIX[@]}" descendant-target "$2"
+    printf "%s" "$?"
+  ' _ "$HELPERS" "$timeout_descendant_pid_file"
+)
+_assert_eq "hook timeout prefix: descendant timeout reports 124" \
+  "124" "$timeout_descendant_rc"
+timeout_descendant_pid=$(cat "$timeout_descendant_pid_file")
+timeout_descendant_state=$(ps -p "$timeout_descendant_pid" -o stat= 2>/dev/null || true)
+if [ -z "$timeout_descendant_state" ] || [[ "$timeout_descendant_state" == Z* ]]; then
+  _pass "hook timeout prefix: timeout terminates target descendants"
+else
+  _fail "hook timeout prefix: timeout left descendant $timeout_descendant_pid alive ($timeout_descendant_state)"
+  kill -KILL "$timeout_descendant_pid" 2>/dev/null || true
+fi
+
+# A command that exits before its budget owns the result, and stopping the
+# watchdog must also stop and reap its sleeping timer. The mock records the
+# timer PID before execing the real sleep so the assertion catches both a live
+# watchdog and an orphaned timer.
+TIMEOUT_CLEAN_BIN=$(_tmpdir)
+timeout_watchdog_pid_file="$TIMEOUT_CLEAN_BIN/watchdog-timer.pid"
+timeout_target_pid_file="$TIMEOUT_CLEAN_BIN/target.pid"
+TIMEOUT_REAL_SLEEP=$(command -v sleep)
+ln -s "$(command -v bash)" "$TIMEOUT_CLEAN_BIN/bash"
+cat >"$TIMEOUT_CLEAN_BIN/sleep" <<'SCRIPT'
+#!/usr/bin/env bash
+if [ "$1" = "5" ]; then
+  printf '%s\n' "$$" >"$TIMEOUT_WATCHDOG_PID_FILE"
+fi
+exec "$TIMEOUT_REAL_SLEEP" "$@"
+SCRIPT
+chmod +x "$TIMEOUT_CLEAN_BIN/sleep"
+
+timeout_prefix_normal_rc=$(
+  PATH="$TIMEOUT_CLEAN_BIN" \
+    TIMEOUT_REAL_SLEEP="$TIMEOUT_REAL_SLEEP" \
+    TIMEOUT_WATCHDOG_PID_FILE="$timeout_watchdog_pid_file" \
+    bash -c '
+      source "$1"
+      _hook_timeout_prefix 5
+      "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '\''
+        while [ ! -s "$1" ]; do /bin/sleep 0.01; done
+        exit 7
+      '\'' _ "$2"
+      printf "%s" "$?"
+    ' _ "$HELPERS" "$timeout_watchdog_pid_file"
+)
+_assert_eq "hook timeout prefix: portable fallback preserves command status" \
+  "7" "$timeout_prefix_normal_rc"
+timeout_watchdog_pid=$(cat "$timeout_watchdog_pid_file")
+if ! kill -0 "$timeout_watchdog_pid" 2>/dev/null; then
+  _pass "hook timeout prefix: normal completion reaps the watchdog timer"
+else
+  _fail "hook timeout prefix: normal completion left watchdog timer $timeout_watchdog_pid alive"
+  kill -KILL "$timeout_watchdog_pid" 2>/dev/null || true
+fi
+
+# Interrupting the wrapper must return the conventional shell status and clean
+# both children. `exec` makes the background job PID the timeout wrapper rather
+# than an outer shell that could hide signal-forwarding mistakes.
+: >"$timeout_watchdog_pid_file"
+PATH="$TIMEOUT_CLEAN_BIN" \
+  TIMEOUT_REAL_SLEEP="$TIMEOUT_REAL_SLEEP" \
+  TIMEOUT_WATCHDOG_PID_FILE="$timeout_watchdog_pid_file" \
+  bash -c '
+    source "$1"
+    _hook_timeout_prefix 5
+    exec "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '\''
+      trap "" TERM
+      printf "%s\n" "$$" >"$1"
+      while [ ! -s "$2" ]; do /bin/sleep 0.01; done
+      exec /bin/sleep 30
+    '\'' _ "$2" "$3"
+  ' _ "$HELPERS" "$timeout_target_pid_file" "$timeout_watchdog_pid_file" &
+timeout_wrapper_pid=$!
+for _ in {1..250}; do
+  [ -s "$timeout_target_pid_file" ] && [ -s "$timeout_watchdog_pid_file" ] && break
+  sleep 0.02
+done
+for _ in {1..5}; do
+  kill -TERM "$timeout_wrapper_pid" 2>/dev/null || true
+  sleep 0.01
+done
+wait "$timeout_wrapper_pid"
+timeout_interrupt_rc=$?
+_assert_eq "hook timeout prefix: repeated interruption returns the first signal status" \
+  "143" "$timeout_interrupt_rc"
+timeout_target_pid=$(cat "$timeout_target_pid_file")
+timeout_watchdog_pid=$(cat "$timeout_watchdog_pid_file")
+if ! kill -0 "$timeout_target_pid" 2>/dev/null &&
+  ! kill -0 "$timeout_watchdog_pid" 2>/dev/null; then
+  _pass "hook timeout prefix: repeated interruption reaps the target and watchdog timer"
+else
+  _fail "hook timeout prefix: repeated interruption left a child alive (target=$timeout_target_pid, timer=$timeout_watchdog_pid)"
+  kill -KILL "$timeout_target_pid" "$timeout_watchdog_pid" 2>/dev/null || true
+fi
 
 # BusyBox `timeout` returns 143 after its TERM signal instead of GNU's 124.
 # Exercise the detected implementation through the selected prefix so Alpine
