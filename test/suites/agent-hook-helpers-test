@@ -1094,6 +1094,43 @@ else
   _fail "hook timeout prefix: timer failure waited for the target (${timeout_timer_failure_elapsed}ms)"
 fi
 
+# Duration validation precedes target creation, so even a command that would
+# finish before a failed `sleep` is scheduled cannot win the status race.
+timeout_invalid_fast_rc=$(BASH_ENV="$timeout_errexit_env" PATH="$NO_TIMEOUT_BIN" bash -c '
+  source "$1"
+  _hook_timeout_prefix not-a-duration
+  if "${_HOOK_TIMEOUT_PREFIX[@]}" true 2>/dev/null; then
+    rc=0
+  else
+    rc=$?
+  fi
+  printf "%s" "$rc"
+' _ "$HELPERS")
+_assert_eq "hook timeout prefix: invalid duration rejects a fast target with status 125" \
+  "125" "$timeout_invalid_fast_rc"
+
+timeout_invalid_side_effect="$NO_TIMEOUT_BIN/invalid-duration-side-effect"
+timeout_invalid_side_effect_rc=$(TIMEOUT_SIDE_EFFECT="$timeout_invalid_side_effect" \
+  PATH="$NO_TIMEOUT_BIN" bash -c '
+    source "$1"
+    _hook_timeout_prefix not-a-duration
+    if "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '\''
+      printf "%s\n" ran >"$TIMEOUT_SIDE_EFFECT"
+    '\'' 2>/dev/null; then
+      rc=0
+    else
+      rc=$?
+    fi
+    printf "%s" "$rc"
+  ' _ "$HELPERS")
+_assert_eq "hook timeout prefix: invalid duration side-effect target returns status 125" \
+  "125" "$timeout_invalid_side_effect_rc"
+if [ ! -e "$timeout_invalid_side_effect" ]; then
+  _pass "hook timeout prefix: invalid duration does not execute the target"
+else
+  _fail "hook timeout prefix: invalid duration executed the target"
+fi
+
 # The wrapper may inherit shell options, but its temporary monitor mode must
 # not change the exported SHELLOPTS seen by a guarded Bash command. The target
 # also exits on `false` with status 1; reaching the explicit exit returns 8.

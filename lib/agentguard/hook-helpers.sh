@@ -614,6 +614,13 @@ _HOOK_PORTABLE_TIMEOUT_SCRIPT='
   timed_out=0
   timer_failed=0
 
+  # Validate before spawning the target. Otherwise a fast command can finish
+  # before `sleep` reports a malformed duration and incorrectly return success.
+  # Accept portable nonnegative decimal seconds, not GNU-only duration suffixes.
+  if [[ ! "$seconds" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]; then
+    exit 125
+  fi
+
   stop_target() {
     [ -n "$target_pgid" ] || return 0
     kill -TERM -- "-$target_pgid" 2>/dev/null || return 0
