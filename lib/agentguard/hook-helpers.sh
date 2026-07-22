@@ -623,7 +623,8 @@ _HOOK_PORTABLE_TIMEOUT_SCRIPT='
   stop_target() {
     [ -n "$target_pgid" ] || return 0
     kill -TERM -- "-$target_pgid" 2>/dev/null || return 0
-    sleep 0.1
+    # The PATH sleep may be the failing timer backend; this grace is advisory.
+    sleep 0.1 || true
     kill -KILL -- "-$target_pgid" 2>/dev/null || true
   }
 

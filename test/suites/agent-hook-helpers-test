@@ -1117,17 +1117,37 @@ timeout_errexit_rc=$(BASH_ENV="$timeout_errexit_env" PATH="$NO_TIMEOUT_BIN" bash
 _assert_eq "hook timeout prefix: inherited errexit preserves timeout status 124" \
   "124" "$timeout_errexit_rc"
 
+TIMER_FAILURE_BIN=$(_tmpdir)
+timer_failure_target_pid_file="$TIMER_FAILURE_BIN/target.pid"
+TIMER_FAILURE_REAL_BASH=$(command -v bash)
+TIMER_FAILURE_REAL_SLEEP=$(command -v sleep)
+ln -s "$TIMER_FAILURE_REAL_BASH" "$TIMER_FAILURE_BIN/bash"
+cat >"$TIMER_FAILURE_BIN/sleep" <<'SCRIPT'
+#!/usr/bin/env bash
+while [ ! -s "$TIMER_FAILURE_TARGET_PID_FILE" ]; do
+  "$TIMER_FAILURE_REAL_SLEEP" 0.01
+done
+exit 42
+SCRIPT
+chmod +x "$TIMER_FAILURE_BIN/sleep"
 timeout_timer_failure_start=$(_timeout_monotonic_ms)
-timeout_timer_failure_rc=$(BASH_ENV="$timeout_errexit_env" PATH="$NO_TIMEOUT_BIN" bash -c '
-  source "$1"
-  _hook_timeout_prefix not-a-duration
-  if "${_HOOK_TIMEOUT_PREFIX[@]}" sleep 5 2>/dev/null; then
-    rc=0
-  else
-    rc=$?
-  fi
-  printf "%s" "$rc"
-' _ "$HELPERS")
+timeout_timer_failure_rc=$(BASH_ENV="$timeout_errexit_env" \
+  TIMER_FAILURE_TARGET_PID_FILE="$timer_failure_target_pid_file" \
+  TIMER_FAILURE_REAL_BASH="$TIMER_FAILURE_REAL_BASH" \
+  TIMER_FAILURE_REAL_SLEEP="$TIMER_FAILURE_REAL_SLEEP" \
+  PATH="$TIMER_FAILURE_BIN" bash -c '
+    source "$1"
+    _hook_timeout_prefix 5
+    if "${_HOOK_TIMEOUT_PREFIX[@]}" "$TIMER_FAILURE_REAL_BASH" -c '\''
+      printf "%s\n" "$$" >"$TIMER_FAILURE_TARGET_PID_FILE"
+      exec "$TIMER_FAILURE_REAL_SLEEP" 30
+    '\'' 2>/dev/null; then
+      rc=0
+    else
+      rc=$?
+    fi
+    printf "%s" "$rc"
+  ' _ "$HELPERS")
 timeout_timer_failure_elapsed=$(($(_timeout_monotonic_ms) - timeout_timer_failure_start))
 _assert_eq "hook timeout prefix: inherited errexit preserves timer failure status 125" \
   "125" "$timeout_timer_failure_rc"
@@ -1135,6 +1155,13 @@ if [ "$timeout_timer_failure_elapsed" -lt 1500 ]; then
   _pass "hook timeout prefix: timer failure cuts off the target promptly"
 else
   _fail "hook timeout prefix: timer failure waited for the target (${timeout_timer_failure_elapsed}ms)"
+fi
+timeout_timer_failure_target_pid=$(cat "$timer_failure_target_pid_file")
+if ! kill -0 "$timeout_timer_failure_target_pid" 2>/dev/null; then
+  _pass "hook timeout prefix: timer failure reaps the target"
+else
+  _fail "hook timeout prefix: timer failure left target $timeout_timer_failure_target_pid alive"
+  kill -KILL "$timeout_timer_failure_target_pid" 2>/dev/null || true
 fi
 
 # Duration validation precedes target creation, so even a command that would
