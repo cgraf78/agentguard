@@ -595,9 +595,11 @@ _hook_hm_warn_once() {
 # stock macOS (no coreutils) and BusyBox: BusyBox reports a timed-out child as
 # status 143 instead of GNU's 124, so callers cannot distinguish the timeout
 # from an independently SIGTERM-terminated command. Takes the budget in
-# seconds as $1 and the guarded command as the rest; polls every 0.1s and,
-# past budget, TERMs then KILLs the child and exits 124 to match GNU
-# timeout's convention, which _hook_hm_event already checks for. Must be a
+# seconds as $1 and the guarded command as the rest. A one-shot sleep measures
+# wall time independently of scheduler delays; its watchdog signals this
+# wrapper, which TERMs then KILLs the child and exits 124 to match GNU timeout's
+# convention. Both child processes are reaped on every exit path so a completed
+# command cannot leave its timer behind. Must be a
 # real executable (not a shell function) so it works as a plain word in
 # _HOOK_TIMEOUT_PREFIX even when a caller execs it via `env` (env can only
 # exec real binaries, not the calling shell's functions) — `bash` itself is
@@ -606,22 +608,87 @@ _hook_hm_warn_once() {
 # shellcheck disable=SC2016 # single-quoted on purpose: expands later, inside the bash -c it's passed to.
 _HOOK_PORTABLE_TIMEOUT_SCRIPT='
   seconds="$1"; shift
-  "$@" &
-  pid=$!
-  waited=0
-  budget=$((seconds * 10))
-  while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge "$budget" ]; then
-      kill -TERM "$pid" 2>/dev/null
-      sleep 0.1
-      kill -KILL "$pid" 2>/dev/null
-      wait "$pid" 2>/dev/null
-      exit 124
-    fi
+  target_pid=""
+  watchdog_pid=""
+  timed_out=0
+  timer_failed=0
+
+  stop_target() {
+    [ -n "$target_pid" ] || return 0
+    kill -TERM "$target_pid" 2>/dev/null || return 0
     sleep 0.1
-    waited=$((waited + 1))
-  done
-  wait "$pid"
+    kill -KILL "$target_pid" 2>/dev/null || true
+  }
+
+  stop_watchdog() {
+    [ -n "$watchdog_pid" ] || return 0
+    kill -TERM "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    watchdog_pid=""
+  }
+
+  cleanup() {
+    trap - EXIT HUP INT QUIT TERM USR1 USR2
+    stop_watchdog
+    stop_target
+    [ -n "$target_pid" ] && wait "$target_pid" 2>/dev/null || true
+  }
+
+  expire() {
+    timed_out=1
+    stop_target
+  }
+
+  timer_error() {
+    timer_failed=1
+    stop_target
+  }
+
+  trap cleanup EXIT
+  trap "exit 129" HUP
+  trap "exit 130" INT
+  trap "exit 131" QUIT
+  trap "exit 143" TERM
+  trap expire USR1
+  trap timer_error USR2
+
+  "$@" &
+  target_pid=$!
+  wrapper_pid=$$
+
+  (
+    timer_pid=""
+    stop_timer() {
+      trap - HUP INT QUIT TERM
+      [ -n "$timer_pid" ] && kill -TERM "$timer_pid" 2>/dev/null || true
+      [ -n "$timer_pid" ] && wait "$timer_pid" 2>/dev/null || true
+      exit 0
+    }
+    trap stop_timer HUP INT QUIT TERM
+    sleep "$seconds" &
+    timer_pid=$!
+    wait "$timer_pid"
+    timer_status=$?
+    if [ "$timer_status" -eq 0 ]; then
+      kill -USR1 "$wrapper_pid" 2>/dev/null || true
+    else
+      kill -USR2 "$wrapper_pid" 2>/dev/null || true
+    fi
+  ) &
+  watchdog_pid=$!
+
+  wait "$target_pid"
+  target_status=$?
+  if [ "$timed_out" -eq 1 ] || [ "$timer_failed" -eq 1 ]; then
+    wait "$target_pid" 2>/dev/null || true
+  fi
+  target_pid=""
+  stop_watchdog
+  trap - EXIT HUP INT QUIT TERM USR1 USR2
+
+  [ "$timed_out" -eq 0 ] || exit 124
+  [ "$timer_failed" -eq 0 ] || exit 125
+  exit "$target_status"
 '
 
 # Best-effort external timeout guard for a slow subprocess, general-purpose
