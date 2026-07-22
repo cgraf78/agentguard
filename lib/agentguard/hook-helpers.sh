@@ -607,10 +607,6 @@ _hook_hm_warn_once() {
 # no new dependency.
 # shellcheck disable=SC2016 # single-quoted on purpose: expands later, inside the bash -c it's passed to.
 _HOOK_PORTABLE_TIMEOUT_SCRIPT='
-  # `bash -c` reads BASH_ENV before this script. Inherited `set -e` must not
-  # make expected nonzero waits bypass the wrapper status normalization.
-  set +e
-
   seconds="$1"; shift
   target_pid=""
   target_pgid=""
@@ -683,8 +679,11 @@ _HOOK_PORTABLE_TIMEOUT_SCRIPT='
     trap stop_timer HUP INT QUIT TERM
     sleep "$seconds" &
     timer_pid=$!
-    wait "$timer_pid"
-    timer_status=$?
+    if wait "$timer_pid"; then
+      timer_status=0
+    else
+      timer_status=$?
+    fi
     if [ "$timer_status" -eq 0 ]; then
       kill -USR1 "$wrapper_pid" 2>/dev/null || true
     else
@@ -693,8 +692,11 @@ _HOOK_PORTABLE_TIMEOUT_SCRIPT='
   ) &
   watchdog_pid=$!
 
-  wait "$target_pid"
-  target_status=$?
+  if wait "$target_pid"; then
+    target_status=0
+  else
+    target_status=$?
+  fi
   if [ "$timed_out" -eq 1 ] || [ "$timer_failed" -eq 1 ]; then
     wait "$target_pid" 2>/dev/null || true
   fi

@@ -1094,6 +1094,25 @@ else
   _fail "hook timeout prefix: timer failure waited for the target (${timeout_timer_failure_elapsed}ms)"
 fi
 
+# The wrapper may inherit errexit, but it must not disable that option in an
+# exported SHELLOPTS value seen by a guarded Bash command. The target exits on
+# `false` with status 1; reaching the explicit exit would instead return 8.
+timeout_target_errexit_rc=$(PATH="$NO_TIMEOUT_BIN" bash -c '
+  source "$1"
+  unset BASH_ENV
+  set -e
+  export SHELLOPTS
+  _hook_timeout_prefix 5
+  if "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c "false; exit 8"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  printf "%s" "$rc"
+' _ "$HELPERS")
+_assert_eq "hook timeout prefix: preserves exported errexit for the target" \
+  "1" "$timeout_target_errexit_rc"
+
 # The target owns a distinct process group, so descendants cannot escape when
 # the direct child exits on TERM. Make the grandchild ignore TERM to prove the
 # wrapper follows with a group-wide KILL rather than only reaping its child.
