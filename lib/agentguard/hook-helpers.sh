@@ -660,11 +660,20 @@ _HOOK_PORTABLE_TIMEOUT_SCRIPT='
   # Monitor mode gives this one asynchronous job a distinct process group on
   # Bash 3.2 and newer without requiring GNU `setsid`. Descendants inherit that
   # group, so timeout and interruption cleanup cannot strand grandchildren.
+  # Restore the inherited monitor option inside the child before exec so an
+  # exported SHELLOPTS value remains identical to direct execution.
+  monitor_was_on=0
+  case $- in
+    *m*) monitor_was_on=1 ;;
+  esac
   set -m
-  "$@" &
+  (
+    [ "$monitor_was_on" -eq 1 ] || set +m
+    exec "$@"
+  ) &
   target_pid=$!
   target_pgid=$target_pid
-  set +m
+  [ "$monitor_was_on" -eq 1 ] || set +m
   wrapper_pid=$$
 
   (

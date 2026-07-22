@@ -1094,16 +1094,25 @@ else
   _fail "hook timeout prefix: timer failure waited for the target (${timeout_timer_failure_elapsed}ms)"
 fi
 
-# The wrapper may inherit errexit, but it must not disable that option in an
-# exported SHELLOPTS value seen by a guarded Bash command. The target exits on
-# `false` with status 1; reaching the explicit exit would instead return 8.
-timeout_target_errexit_rc=$(PATH="$NO_TIMEOUT_BIN" bash -c '
+# The wrapper may inherit shell options, but its temporary monitor mode must
+# not change the exported SHELLOPTS seen by a guarded Bash command. The target
+# also exits on `false` with status 1; reaching the explicit exit returns 8.
+timeout_target_shellopts_expected="$NO_TIMEOUT_BIN/target-shellopts.expected"
+timeout_target_shellopts_actual="$NO_TIMEOUT_BIN/target-shellopts.actual"
+timeout_target_errexit_rc=$(TIMEOUT_SHELLOPTS_EXPECTED="$timeout_target_shellopts_expected" \
+  TIMEOUT_SHELLOPTS_ACTUAL="$timeout_target_shellopts_actual" \
+  PATH="$NO_TIMEOUT_BIN" bash -c '
   source "$1"
   unset BASH_ENV
   set -e
   export SHELLOPTS
+  printf "%s\n" "$SHELLOPTS" >"$TIMEOUT_SHELLOPTS_EXPECTED"
   _hook_timeout_prefix 5
-  if "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c "false; exit 8"; then
+  if "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '\''
+    printf "%s\n" "$SHELLOPTS" >"$TIMEOUT_SHELLOPTS_ACTUAL"
+    false
+    exit 8
+  '\''; then
     rc=0
   else
     rc=$?
@@ -1112,6 +1121,28 @@ timeout_target_errexit_rc=$(PATH="$NO_TIMEOUT_BIN" bash -c '
 ' _ "$HELPERS")
 _assert_eq "hook timeout prefix: preserves exported errexit for the target" \
   "1" "$timeout_target_errexit_rc"
+_assert_eq "hook timeout prefix: preserves exported shell options with monitor off" \
+  "$(cat "$timeout_target_shellopts_expected")" "$(cat "$timeout_target_shellopts_actual")"
+
+# Preserve monitor when the caller already exported it instead of always
+# removing the option in the target while undoing process-group setup.
+timeout_monitor_shellopts_expected="$NO_TIMEOUT_BIN/monitor-shellopts.expected"
+timeout_monitor_shellopts_actual="$NO_TIMEOUT_BIN/monitor-shellopts.actual"
+TIMEOUT_SHELLOPTS_EXPECTED="$timeout_monitor_shellopts_expected" \
+  TIMEOUT_SHELLOPTS_ACTUAL="$timeout_monitor_shellopts_actual" \
+  PATH="$NO_TIMEOUT_BIN" bash -c '
+  source "$1"
+  unset BASH_ENV
+  set -m
+  export SHELLOPTS
+  printf "%s\n" "$SHELLOPTS" >"$TIMEOUT_SHELLOPTS_EXPECTED"
+  _hook_timeout_prefix 5
+  "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '\''
+    printf "%s\n" "$SHELLOPTS" >"$TIMEOUT_SHELLOPTS_ACTUAL"
+  '\''
+' _ "$HELPERS"
+_assert_eq "hook timeout prefix: preserves exported shell options with monitor on" \
+  "$(cat "$timeout_monitor_shellopts_expected")" "$(cat "$timeout_monitor_shellopts_actual")"
 
 # The target owns a distinct process group, so descendants cannot escape when
 # the direct child exits on TERM. Make the grandchild ignore TERM to prove the
