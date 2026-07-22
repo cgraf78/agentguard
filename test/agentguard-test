@@ -6,6 +6,83 @@ set -euo pipefail
 test_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 root="${test_dir%/test}"
 
+# Keep runtime entry points explicit so additions require a lint review.
+runtime_shell_files=(
+  "$root/bin/agent-hook-notification"
+  "$root/bin/agent-hook-post-bash"
+  "$root/bin/agent-hook-post-edit"
+  "$root/bin/agent-hook-post-mcp"
+  "$root/bin/agent-hook-pre-bash"
+  "$root/bin/agent-hook-pre-edit"
+  "$root/bin/agent-hook-pre-mcp"
+  "$root/bin/agent-hook-prompt-submit"
+  "$root/bin/agent-hook-session-end"
+  "$root/bin/agent-hook-session-end-claude"
+  "$root/bin/agent-hook-session-start"
+  "$root/bin/agent-hook-session-start-claude"
+  "$root/bin/agent-hook-stop"
+  "$root/bin/agentguard-classify-command"
+  "$root/bin/claude-session-name"
+  "$root/lib/agentguard/agentguard.sh"
+  "$root/lib/agentguard/detect.sh"
+  "$root/lib/agentguard/hook-command-classifier.sh"
+  "$root/lib/agentguard/hook-helpers.sh"
+  "$root/share/agentguard/shell.sh"
+  "$root/support/script-resolver.sh.template"
+  "$root/support/sync-hook-bootstrap"
+)
+
+check_runtime_shell_inventory() {
+  local file first_line listed discovered
+  listed=$(
+    for file in "${runtime_shell_files[@]}"; do
+      printf '%s\n' "${file#"$root"/}"
+    done | LC_ALL=C sort
+  )
+  discovered=$(
+    while IFS= read -r file; do
+      case "$file" in
+        *.sh | *.sh.template)
+          printf '%s\n' "$file"
+          continue
+          ;;
+      esac
+      first_line=""
+      IFS= read -r first_line <"$root/$file" || true
+      if [[ "$first_line" == '#!'*bash* ||
+        "$first_line" == '#!'*dash* ||
+        "$first_line" == '#!'*ksh* ||
+        "$first_line" == '#!'*/sh ||
+        "$first_line" == '#!'*'/sh '* ||
+        "$first_line" == '#!'*' sh' ||
+        "$first_line" == '#!'*' sh '* ||
+        "$first_line" == '# shellcheck shell=bash' ||
+        "$first_line" == '# shellcheck shell=dash' ||
+        "$first_line" == '# shellcheck shell=ksh' ||
+        "$first_line" == '# shellcheck shell=sh' ]]; then
+        printf '%s\n' "$file"
+      fi
+    done < <(git -C "$root" ls-files -- bin lib share support)
+  )
+  discovered=$(printf '%s\n' "$discovered" | sed '/^$/d' | LC_ALL=C sort)
+
+  if [[ "$listed" != "$discovered" ]]; then
+    printf 'agentguard-test: runtime shell inventory is stale\n' >&2
+    diff -u \
+      <(printf '%s\n' "$listed") \
+      <(printf '%s\n' "$discovered") >&2 || true
+    return 1
+  fi
+}
+
+check_runtime_shell_inventory
+shellcheck -x -P SCRIPTDIR \
+  "${runtime_shell_files[@]}" \
+  "$test_dir/agentguard-test" \
+  "$test_dir/helpers.sh" \
+  "$test_dir"/suites/*-test \
+  "$test_dir/suites/agent-hook-helpers.sh"
+
 "$root/support/sync-hook-bootstrap" --check
 
 for suite in "$test_dir"/suites/*-test; do
