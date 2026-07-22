@@ -15,5 +15,5 @@ jobs:
   shell:
     uses: cgraf78/actions/.github/workflows/shell-ci.yml@7d88c3afa6e51a83e9cfefb0c12f503155e17952
     with:
-      profiles: base,jq,python
+      profiles: base,shellcheck,jq,python
       test-command: test/agentguard-test
