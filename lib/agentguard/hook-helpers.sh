@@ -23,13 +23,17 @@ _HOOK_HM_CONFIG_PATH=''
 # with a sparse environment. Avoid external commands until PATH is repaired;
 # a trailing `:` would add the current directory to command lookup.
 if [ -n "${PATH:-}" ]; then
-  case ":$PATH:" in
-    *":$HOME/.local/bin:"*) ;;
-    *) [ -d "$HOME/.local/bin" ] && PATH="$HOME/.local/bin:$PATH" ;;
-  esac
+  if [ -n "${HOME:-}" ] && [ -d "$HOME/.local/bin" ]; then
+    case ":$PATH:" in
+      *":$HOME/.local/bin:"*) ;;
+      *) PATH="$HOME/.local/bin:$PATH" ;;
+    esac
+  fi
 else
   PATH="/usr/local/bin:/usr/bin:/bin"
-  [ -d "$HOME/.local/bin" ] && PATH="$HOME/.local/bin:$PATH"
+  if [ -n "${HOME:-}" ] && [ -d "$HOME/.local/bin" ]; then
+    PATH="$HOME/.local/bin:$PATH"
+  fi
 fi
 export PATH
 
@@ -465,7 +469,7 @@ _hook_cd_to_target() {
 
 # --- Hive Memory integration ---
 
-_hook_hm_config_path() {
+_hook_hm_resolve_config() {
   local base
 
   # Match Hive Memory's own precedence exactly. An explicitly set override is
@@ -473,7 +477,7 @@ _hook_hm_config_path() {
   # silently fall through to another config. XDG base directories, unlike
   # tool-specific path overrides, are valid only when absolute.
   if [ -n "${HIVE_MEMORY_CONFIG+x}" ]; then
-    printf '%s\n' "$HIVE_MEMORY_CONFIG"
+    _HOOK_HM_CONFIG_PATH="$HIVE_MEMORY_CONFIG"
     return 0
   fi
 
@@ -484,7 +488,7 @@ _hook_hm_config_path() {
       base="${HOME%/}/.config"
       ;;
   esac
-  printf '%s/hive-memory/config.toml\n' "$base"
+  _HOOK_HM_CONFIG_PATH="$base/hive-memory/config.toml"
 }
 
 _hook_hm_available() {
@@ -497,7 +501,7 @@ _hook_hm_available() {
   # recursively call back into Hive Memory.
   [ "${HIVE_MEMORY_HOOK_ACTIVE:-0}" != "1" ] || return 1
   command -v hm >/dev/null 2>&1 || return 1
-  _HOOK_HM_CONFIG_PATH=$(_hook_hm_config_path) || return 1
+  _hook_hm_resolve_config || return 1
   [ -n "$_HOOK_HM_CONFIG_PATH" ] || return 1
   [ -f "$_HOOK_HM_CONFIG_PATH" ] || return 1
 }
@@ -507,7 +511,8 @@ _hook_hm_read_input() {
 }
 
 _hook_hm_project_hint_is_home() {
-  local hint="${1%/}" home="${HOME%/}"
+  local hint="${1%/}" home="${HOME:-}"
+  home="${home%/}"
   [ -n "$home" ] && [ "$hint" = "$home" ]
 }
 

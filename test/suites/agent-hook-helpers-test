@@ -478,6 +478,12 @@ _assert_eq "parse_edit_files: extracts object patch paths" "0" "$?"
 echo ""
 echo "=== hook-helpers: Hive Memory integration ==="
 
+# The runner may define XDG_CONFIG_HOME. HOME-fallback fixtures must not inherit
+# it, and the original environment must be restored before leaving this section.
+hm_ambient_xdg_set=${XDG_CONFIG_HOME+x}
+hm_ambient_xdg=${XDG_CONFIG_HOME:-}
+unset XDG_CONFIG_HOME
+
 HM_MOCK_ROOT=$(_tmpdir)
 HM_HOME="$HM_MOCK_ROOT/home"
 HM_BIN="$HM_MOCK_ROOT/bin"
@@ -529,12 +535,16 @@ chmod +x "$HM_BIN/hm"
 hm_xdg_config="$HM_MOCK_ROOT/xdg-config"
 hm_xdg_home="$HM_MOCK_ROOT/xdg-home"
 hm_explicit_config="$HM_MOCK_ROOT/explicit/config.toml"
+hm_newline_config="$HM_MOCK_ROOT/newline/config.toml"$'\n'
 mkdir -p "$hm_xdg_config/hive-memory" "$hm_xdg_home" "${hm_explicit_config%/*}"
-touch "$hm_xdg_config/hive-memory/config.toml" "$hm_explicit_config"
+mkdir -p "${hm_newline_config%/*}"
+touch "$hm_xdg_config/hive-memory/config.toml" "$hm_explicit_config" "$hm_newline_config"
 
 hm_config_path=$(
   env -u HIVE_MEMORY_CONFIG -u XDG_CONFIG_HOME \
-    HOME="$HM_HOME" bash -c 'source "$1"; _hook_hm_config_path' _ "$HELPERS"
+    HOME="$HM_HOME" bash -c \
+    'source "$1"; _hook_hm_resolve_config; printf "%s" "$_HOOK_HM_CONFIG_PATH"' \
+    _ "$HELPERS"
 )
 _assert_eq "hm config: HOME fallback when XDG is unset" \
   "$HM_HOME/.config/hive-memory/config.toml" "$hm_config_path"
@@ -542,7 +552,9 @@ _assert_eq "hm config: HOME fallback when XDG is unset" \
 hm_config_path=$(
   env -u HIVE_MEMORY_CONFIG \
     HOME="$HM_HOME" XDG_CONFIG_HOME="$hm_xdg_config/" \
-    bash -c 'source "$1"; _hook_hm_config_path' _ "$HELPERS"
+    bash -c \
+    'source "$1"; _hook_hm_resolve_config; printf "%s" "$_HOOK_HM_CONFIG_PATH"' \
+    _ "$HELPERS"
 )
 _assert_eq "hm config: absolute XDG_CONFIG_HOME wins and joins cleanly" \
   "$hm_xdg_config/hive-memory/config.toml" "$hm_config_path"
@@ -553,7 +565,9 @@ for invalid_xdg in '' relative/config; do
   hm_config_path=$(
     env -u HIVE_MEMORY_CONFIG \
       HOME="$HM_HOME" XDG_CONFIG_HOME="$invalid_xdg" \
-      bash -c 'source "$1"; _hook_hm_config_path' _ "$HELPERS"
+      bash -c \
+      'source "$1"; _hook_hm_resolve_config; printf "%s" "$_HOOK_HM_CONFIG_PATH"' \
+      _ "$HELPERS"
   )
   _assert_eq "hm config: $invalid_xdg_label XDG_CONFIG_HOME falls back to HOME" \
     "$HM_HOME/.config/hive-memory/config.toml" "$hm_config_path"
@@ -562,7 +576,9 @@ done
 hm_config_path=$(
   HIVE_MEMORY_CONFIG="relative/config.toml" \
     HOME="$HM_HOME" XDG_CONFIG_HOME="$hm_xdg_config" \
-    bash -c 'source "$1"; _hook_hm_config_path' _ "$HELPERS"
+    bash -c \
+    'source "$1"; _hook_hm_resolve_config; printf "%s" "$_HOOK_HM_CONFIG_PATH"' \
+    _ "$HELPERS"
 )
 _assert_eq "hm config: explicit override stays authoritative and unchanged" \
   "relative/config.toml" "$hm_config_path"
@@ -592,6 +608,12 @@ HIVE_MEMORY_CONFIG="$hm_explicit_config" \
   bash -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
 _assert_eq "hm config: availability accepts an explicit config" "0" "$?"
 
+HIVE_MEMORY_CONFIG="$hm_newline_config" \
+  HOME="$hm_xdg_home" XDG_CONFIG_HOME="$hm_xdg_config" \
+  PATH="$HM_BIN:/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  bash -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
+_assert_eq "hm config: explicit override preserves trailing newlines" "0" "$?"
+
 HIVE_MEMORY_CONFIG="$HM_MOCK_ROOT/missing.toml" \
   HOME="$HM_HOME" XDG_CONFIG_HOME="$hm_xdg_config" \
   PATH="$HM_BIN:/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
@@ -606,8 +628,22 @@ _assert_eq "hm config: empty explicit override does not fall through" "1" "$?"
 
 env -u HIVE_MEMORY_CONFIG -u XDG_CONFIG_HOME -u HOME \
   PATH="/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
-  bash -c 'source "$1"; _hook_hm_config_path' _ "$HELPERS" >/dev/null 2>&1
+  bash -c 'source "$1"; _hook_hm_resolve_config' _ "$HELPERS" >/dev/null 2>&1
 _assert_eq "hm config: no valid config root fails closed" "1" "$?"
+
+: >"$HM_LOG"
+env -u HIVE_MEMORY_CONFIG -u HOME \
+  XDG_CONFIG_HOME="$hm_xdg_config" PATH="$HM_BIN:/usr/bin:/bin" \
+  HM_LOG="$HM_LOG" AGENTGUARD_HIVE_MEMORY_HOOKS=1 AGENTGUARD_NAME=codex \
+  CODEX_THREAD_ID="hm-xdg-no-home-session" \
+  bash -uc '
+    source "$1"
+    _HOOK_INPUT='"'"'{"prompt":"remember this","cwd":"/tmp/project"}'"'"'
+    _hook_hm_prompt_submit
+  ' _ "$HELPERS" >/dev/null 2>/dev/null
+_assert_eq "hm config: nounset event works with XDG config and no HOME" "0" "$?"
+_assert_contains "hm config: HOME-less event passes the XDG path" \
+  "config=$hm_xdg_config/hive-memory/config.toml" "$(cat "$HM_LOG")"
 
 : >"$HM_LOG"
 hm_prompt_err="$HM_MOCK_ROOT/prompt.err"
@@ -1114,6 +1150,12 @@ else
 fi
 _assert_contains "hm hook: timeout warning still fires without an external timeout binary" \
   "Hive Memory hook timed out after 1s" "$(cat "$hm_hang_no_timeout_err")"
+
+if [ -n "$hm_ambient_xdg_set" ]; then
+  export XDG_CONFIG_HOME="$hm_ambient_xdg"
+else
+  unset XDG_CONFIG_HOME
+fi
 
 # _hook_timeout_prefix (general-purpose, not Hive Memory-specific): absent
 # timeout/gtimeout falls back to the portable bash implementation, not to
