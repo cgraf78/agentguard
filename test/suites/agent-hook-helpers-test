@@ -1056,6 +1056,44 @@ fi
 _assert_eq "hook timeout prefix: portable fallback reports 124 like GNU timeout" \
   "124" "$timeout_prefix_fallback_rc"
 
+# `bash -c` reads BASH_ENV before its command string. The fallback is an
+# executable boundary and must not inherit errexit in a way that bypasses its
+# normalized timeout and timer-failure statuses.
+timeout_errexit_env="$NO_TIMEOUT_BIN/bash-env"
+printf '%s\n' 'set -e' >"$timeout_errexit_env"
+timeout_errexit_rc=$(BASH_ENV="$timeout_errexit_env" PATH="$NO_TIMEOUT_BIN" bash -c '
+  source "$1"
+  _hook_timeout_prefix 1
+  if "${_HOOK_TIMEOUT_PREFIX[@]}" sleep 5; then
+    rc=0
+  else
+    rc=$?
+  fi
+  printf "%s" "$rc"
+' _ "$HELPERS")
+_assert_eq "hook timeout prefix: inherited errexit preserves timeout status 124" \
+  "124" "$timeout_errexit_rc"
+
+timeout_timer_failure_start=$(_timeout_monotonic_ms)
+timeout_timer_failure_rc=$(BASH_ENV="$timeout_errexit_env" PATH="$NO_TIMEOUT_BIN" bash -c '
+  source "$1"
+  _hook_timeout_prefix not-a-duration
+  if "${_HOOK_TIMEOUT_PREFIX[@]}" sleep 5 2>/dev/null; then
+    rc=0
+  else
+    rc=$?
+  fi
+  printf "%s" "$rc"
+' _ "$HELPERS")
+timeout_timer_failure_elapsed=$(($(_timeout_monotonic_ms) - timeout_timer_failure_start))
+_assert_eq "hook timeout prefix: inherited errexit preserves timer failure status 125" \
+  "125" "$timeout_timer_failure_rc"
+if [ "$timeout_timer_failure_elapsed" -lt 1500 ]; then
+  _pass "hook timeout prefix: timer failure cuts off the target promptly"
+else
+  _fail "hook timeout prefix: timer failure waited for the target (${timeout_timer_failure_elapsed}ms)"
+fi
+
 # The target owns a distinct process group, so descendants cannot escape when
 # the direct child exits on TERM. Make the grandchild ignore TERM to prove the
 # wrapper follows with a group-wide KILL rather than only reaping its child.

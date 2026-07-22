@@ -607,6 +607,10 @@ _hook_hm_warn_once() {
 # no new dependency.
 # shellcheck disable=SC2016 # single-quoted on purpose: expands later, inside the bash -c it's passed to.
 _HOOK_PORTABLE_TIMEOUT_SCRIPT='
+  # `bash -c` reads BASH_ENV before this script. Inherited `set -e` must not
+  # make expected nonzero waits bypass the wrapper status normalization.
+  set +e
+
   seconds="$1"; shift
   target_pid=""
   target_pgid=""
