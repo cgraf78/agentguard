@@ -1174,6 +1174,73 @@ else
   _fail "hook timeout prefix: invalid duration executed the target"
 fi
 
+# Reject GNU-only suffixes before backend selection. Both an environment with
+# no timeout binary and one advertising a GNU-compatible timeout must return
+# 125 without executing the backend or target.
+timeout_suffix_portable_side_effect="$NO_TIMEOUT_BIN/suffix-portable-side-effect"
+timeout_suffix_portable_rc=$(TIMEOUT_SIDE_EFFECT="$timeout_suffix_portable_side_effect" \
+  PATH="$NO_TIMEOUT_BIN" bash -c '
+    source "$1"
+    _hook_timeout_prefix 0.1s
+    if "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '\''
+      printf "%s\n" ran >"$TIMEOUT_SIDE_EFFECT"
+    '\''; then
+      rc=0
+    else
+      rc=$?
+    fi
+    printf "%s" "$rc"
+  ' _ "$HELPERS")
+_assert_eq "hook timeout prefix: portable backend rejects duration suffix with status 125" \
+  "125" "$timeout_suffix_portable_rc"
+if [ ! -e "$timeout_suffix_portable_side_effect" ]; then
+  _pass "hook timeout prefix: portable suffix rejection skips the target"
+else
+  _fail "hook timeout prefix: portable suffix rejection executed the target"
+fi
+
+SUFFIX_EXTERNAL_BIN=$(_tmpdir)
+suffix_external_backend_marker="$SUFFIX_EXTERNAL_BIN/backend-invoked"
+suffix_external_side_effect="$SUFFIX_EXTERNAL_BIN/target-ran"
+ln -s "$(command -v bash)" "$SUFFIX_EXTERNAL_BIN/bash"
+cat >"$SUFFIX_EXTERNAL_BIN/timeout" <<'SCRIPT'
+#!/usr/bin/env bash
+printf '%s\n' invoked >"$TIMEOUT_BACKEND_MARKER"
+if [ "${1:-}" = "--help" ]; then
+  printf '%s\n' 'timeout (GNU coreutils)'
+  exit 0
+fi
+shift
+exec "$@"
+SCRIPT
+chmod +x "$SUFFIX_EXTERNAL_BIN/timeout"
+timeout_suffix_external_rc=$(TIMEOUT_BACKEND_MARKER="$suffix_external_backend_marker" \
+  TIMEOUT_SIDE_EFFECT="$suffix_external_side_effect" \
+  PATH="$SUFFIX_EXTERNAL_BIN" bash -c '
+    source "$1"
+    _hook_timeout_prefix 0.1s
+    if "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '\''
+      printf "%s\n" ran >"$TIMEOUT_SIDE_EFFECT"
+    '\''; then
+      rc=0
+    else
+      rc=$?
+    fi
+    printf "%s" "$rc"
+  ' _ "$HELPERS")
+_assert_eq "hook timeout prefix: external backend rejects duration suffix with status 125" \
+  "125" "$timeout_suffix_external_rc"
+if [ ! -e "$suffix_external_backend_marker" ]; then
+  _pass "hook timeout prefix: suffix rejection skips the external backend"
+else
+  _fail "hook timeout prefix: suffix rejection invoked the external backend"
+fi
+if [ ! -e "$suffix_external_side_effect" ]; then
+  _pass "hook timeout prefix: external suffix rejection skips the target"
+else
+  _fail "hook timeout prefix: external suffix rejection executed the target"
+fi
+
 # The wrapper may inherit shell options, but its temporary monitor mode must
 # not change the exported SHELLOPTS seen by a guarded Bash command. The target
 # also exits on `false` with status 1; reaching the explicit exit returns 8.

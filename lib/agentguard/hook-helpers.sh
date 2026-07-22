@@ -614,13 +614,6 @@ _HOOK_PORTABLE_TIMEOUT_SCRIPT='
   timed_out=0
   timer_failed=0
 
-  # Validate before spawning the target. Otherwise a fast command can finish
-  # before `sleep` reports a malformed duration and incorrectly return success.
-  # Accept portable nonnegative decimal seconds, not GNU-only duration suffixes.
-  if [[ ! "$seconds" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]; then
-    exit 125
-  fi
-
   # GNU timeout treats a zero duration as disabling the timeout. Preserve that
   # contract before creating a process group or watchdog in the fallback.
   if [[ "$seconds" =~ ^0*([.]0*)?$ ]]; then
@@ -738,6 +731,15 @@ _HOOK_PORTABLE_TIMEOUT_SCRIPT='
 # platform exposes the same status-124 timeout contract.
 _hook_timeout_prefix() {
   local seconds="$1" timeout_help=''
+
+  # Own the duration grammar before selecting a backend so GNU extensions do
+  # not behave differently from stock macOS or BusyBox. The status-only prefix
+  # ignores every appended target argument and therefore cannot execute it.
+  if [[ ! "$seconds" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]; then
+    _HOOK_TIMEOUT_PREFIX=(bash -c 'exit 125' _)
+    return 0
+  fi
+
   if command -v timeout >/dev/null 2>&1; then
     timeout_help=$(timeout --help 2>&1 || true)
     if [[ "$timeout_help" == *BusyBox* ]]; then
