@@ -41,8 +41,33 @@ Use shdeps to locate sourceable files instead of reconstructing install paths:
 ## Dependencies
 
 - Bash 4 or newer for hook scripts that use the command classifier. On macOS,
-  `agent-hook-pre-bash` re-execs `~/.local/bin/bash`, Homebrew Bash, or
-  `/usr/local/bin/bash` when `/usr/bin/env bash` resolves to Bash 3.
+  `agent-hook-pre-bash` and `agentguard-classify-command` validate and re-exec
+  `/opt/homebrew/bin/bash`, `/usr/local/bin/bash`, `/bin/bash`, or
+  `/usr/bin/bash`, in that order, from a fixed privileged `/bin/bash -p`
+  bootstrap. `HOME` and `PATH` never select the interpreter. Direct executable
+  invocation through the privileged shebang is the supported security boundary.
+  Explicit interpreter invocation such as `bash script-path` is outside this
+  security boundary: Bash can run caller-controlled `BASH_ENV` code that changes
+  or forges behavior before the script's first instruction, and no shell script
+  can undo or reliably detect those earlier effects. Rejection of an otherwise
+  ordinary, detectable explicit invocation is best-effort only, not a security
+  guarantee. Before candidate discovery, `/usr/bin/awk` must return an exact
+  clean or dirty environment sentinel. Raw exported-function entries trigger a
+  clean `/bin/bash` environment rebuild: valid ordinary exported names and
+  values travel as NUL-delimited records over the clean process's initial stdin,
+  never as command-line operands, while `BASH_ENV`, `ENV`, recursion, POSIX and
+  compatibility controls, shell-internal state, legacy re-entry markers, and
+  every `BASH_FUNC_*%%` entry are excluded. `BASH_XTRACEFD` is made
+  non-exported instead of unset so Bash cannot close its caller-owned target.
+  Collision-free private descriptors below Bash's reserved fd 255 preserve
+  caller stdin and stdout, including a closed stdin, while pre-source stdout
+  carries the handshake; those descriptors close before application code runs.
+  Exhausting that portable descriptor range fails closed.
+  Each candidate proves Bash 4 semantics and sources the launcher in that same
+  process with the original stdin, stdout, argv, and exit status. Both directly
+  executed entry points exit with status 2 rather than continuing
+  unguarded when no compatible Bash is available or a fixed inspection or
+  scrub tool fails.
 - `jq` for hook payload parsing and JSON responses.
 - `cgraf78/sley` is a hard runtime dependency for hooks that format files.
   `agent-hook-post-edit` invokes the PATH-visible `sley hook format-file` CLI.
@@ -55,6 +80,15 @@ context when its config is available through `HIVE_MEMORY_CONFIG`, an absolute
 status context, and
 `claude-templates` enables a Claude-specific maintenance hook when that
 command is installed.
+
+The launcher trusts the platform `/bin/bash -p`, `/usr/bin/awk`,
+`/usr/bin/env`, and the absolute Bash candidate files above. The fixed
+`/bin/bash` interpreter is the bootstrap trust anchor and must be a working
+Bash. Candidate entry programs detect accidental non-Bash executables and
+avoid a validate-then-reopen race, but cannot authenticate a deliberately
+malicious file already installed at a trusted path. The `HOME` and `PATH`
+variables cannot add candidate paths; normal PATH-visible hook dependencies
+remain caller-trusted after bootstrap.
 
 ## Lifecycle
 
@@ -70,12 +104,14 @@ _hook_source_extensions
 _hook_finish
 ```
 
-`_agentguard_script_dir`/`_agentguard_script_parent` are generated into each
-hook and the public classifier from `support/script-resolver.sh.template`. They
-cannot be loaded from `lib/` or a PATH command because they locate `lib/`
-itself, and launchers may use a minimal PATH. Run
-`support/sync-hook-bootstrap` after editing the template; the test entrypoint
-uses `--check` against the launcher manifest to prevent drift.
+The secure pre-Bash bootstrap is generated into its two entry points from
+`support/secure-launcher.sh.template`; the resolver block is generated into all
+launchers from `support/script-resolver.sh.template`. Run
+`support/sync-hook-bootstrap` after changing either template. Its `--check`
+mode rejects a stale or one-sided generated edit.
+
+The resolver cannot be loaded from `lib/` or a PATH command because it locates
+`lib/` itself, and launchers may use a minimal PATH.
 
 The split between `_HOOK_SELF` and `_HOOK_BIN_DIR` is intentional: `_HOOK_SELF`
 keeps extension discovery adjacent to the invoked symlink in `~/.local/bin`,
