@@ -25,4 +25,22 @@ done < <(
     sort
 )
 
+echo ""
+echo "=== agentguard: launcher security boundary documentation ==="
+
+for relative_path in \
+  README.md \
+  lib/agentguard/README.md \
+  man/man1/agent-hook-pre-bash.1 \
+  man/man1/agentguard-classify-command.1; do
+  content=$(cat "$AGENTGUARD_REPO_ROOT/$relative_path")
+  normalized=$(printf '%s\n' "$content" | tr '\n' ' ' | tr -s ' ')
+  _assert_contains "$relative_path: direct execution is the supported boundary" \
+    "supported security boundary" "$normalized"
+  _assert_contains "$relative_path: explicit interpreters are outside the boundary" \
+    "outside this security boundary" "$normalized"
+  _assert_contains "$relative_path: detectable rejection is best-effort" \
+    "best-effort only" "$normalized"
+done
+
 _test_summary

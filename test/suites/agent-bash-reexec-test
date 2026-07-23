@@ -1,0 +1,1663 @@
+#!/usr/bin/env bash
+# agent-bash-reexec-test - modern-Bash launcher failure behavior.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+CLASSIFY_COMMAND="$BIN_DIR/agentguard-classify-command"
+REAL_BASH=$(type -P bash)
+
+_assert_eq "pre-bash: fixed bootstrap is privileged Bash" "#!/bin/bash -p" \
+  "$(head -n 1 "$PRE_BASH")"
+_assert_eq "classifier: fixed bootstrap is privileged Bash" "#!/bin/bash -p" \
+  "$(head -n 1 "$CLASSIFY_COMMAND")"
+
+echo ""
+echo "=== modern Bash launcher ==="
+
+modern_home="$TEST_TMPDIR/modern-bash-home"
+mkdir -p "$modern_home/.local/bin"
+launcher_log="$TEST_TMPDIR/modern-bash-launcher.log"
+cat >"$modern_home/.local/bin/bash" <<EOF
+#!/bin/sh
+printf '%s\n' invoked >>"$launcher_log"
+exec "$REAL_BASH" "\$@"
+EOF
+chmod +x "$modern_home/.local/bin/bash"
+
+_install_candidate_fixture() {
+  local install="$1" candidate="$2" entry generated
+  _install_hook_fixture \
+    "$install" agent-hook-pre-bash agentguard-classify-command
+  for entry in agent-hook-pre-bash agentguard-classify-command; do
+    generated="$install/bin/$entry.generated"
+    sed "s#/opt/homebrew/bin/bash#$candidate#" \
+      "$install/bin/$entry" >"$generated"
+    command cat "$generated" >"$install/bin/$entry"
+    rm -f "$generated"
+  done
+}
+
+modern_install="$TEST_TMPDIR/modern-bash-install"
+_install_candidate_fixture "$modern_install" "$modern_home/.local/bin/bash"
+modern_hook="$modern_install/bin/agent-hook-pre-bash"
+modern_classifier="$modern_install/bin/agentguard-classify-command"
+
+set +e
+hook_output=$(printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+  "$modern_hook" 2>"$TEST_TMPDIR/hook-modern.err")
+hook_rc=$?
+classifier_output=$("$modern_classifier" --json -- 'printf ok' \
+  2>"$TEST_TMPDIR/classifier-modern.err")
+classifier_rc=$?
+set -e
+_assert_eq "pre-bash: re-exec preserves and blocks a dangerous payload" "2" "$hook_rc"
+_assert_contains "pre-bash: re-exec reports the preserved dangerous payload" "BLOCKED" \
+  "$(cat "$TEST_TMPDIR/hook-modern.err")"
+_assert_eq "pre-bash: blocked re-exec emits protocol JSON" "{}" "$hook_output"
+_assert_eq "classifier: re-execs a validated modern Bash" "0" "$classifier_rc"
+_assert_eq "classifier: modern Bash preserves classification" "printf" \
+  "$(jq -r '.commands[0].basename' <<<"$classifier_output")"
+_assert_contains "launcher: configured modern Bash was invoked" "invoked" "$(cat "$launcher_log")"
+
+# Explicit interpreter invocation bypasses the privileged shebang and is outside
+# the supported security boundary. An otherwise ordinary, detectable invocation
+# should still stop before reading stdin or loading application code, but that is
+# best-effort hygiene rather than a security guarantee: BASH_ENV can change or
+# forge behavior before the first script instruction, which no script can undo
+# or reliably detect. Direct executable invocation is the supported entry path.
+explicit_install="$TEST_TMPDIR/explicit-install"
+explicit_hook="$explicit_install/bin/agent-hook-pre-bash"
+explicit_classifier="$explicit_install/bin/agentguard-classify-command"
+explicit_application_capture="$TEST_TMPDIR/explicit-application.capture"
+explicit_startup_capture="$TEST_TMPDIR/explicit-startup.capture"
+explicit_input="$TEST_TMPDIR/explicit.input"
+_install_hook_fixture "$explicit_install" agent-hook-pre-bash agentguard-classify-command
+cat >"$explicit_install/bin/agent-hook-pre-bash-work" <<'EOF'
+: >"$AGENTGUARD_APPLICATION_CAPTURE"
+EOF
+explicit_module="$explicit_install/lib/agentguard/hook-command-classifier.sh"
+mv "$explicit_module" "$explicit_module.original"
+{
+  # shellcheck disable=SC2016 # The fixture module expands the capture path.
+  printf '%s\n' ': >"$AGENTGUARD_APPLICATION_CAPTURE"'
+  cat "$explicit_module.original"
+} >"$explicit_module"
+printf '%s\n' '{"tool_input":{"command":"true"}}' >"$explicit_input"
+
+set +e
+(
+  exec 9<"$explicit_input"
+  AGENTGUARD_APPLICATION_CAPTURE="$explicit_application_capture" \
+    /bin/bash --noprofile --norc "$explicit_hook" \
+    >"$TEST_TMPDIR/hook-explicit.out" 2>"$TEST_TMPDIR/hook-explicit.err" <&9
+  printf '%s' "$?" >"$TEST_TMPDIR/hook-explicit.rc"
+  IFS= read -r explicit_remaining <&9 || :
+  printf '%s\n' "$explicit_remaining" >"$TEST_TMPDIR/hook-explicit.remaining"
+)
+AGENTGUARD_APPLICATION_CAPTURE="$explicit_application_capture" \
+  /bin/bash --noprofile --norc "$explicit_classifier" --json -- 'printf ok' \
+  >"$TEST_TMPDIR/classifier-explicit.out" 2>"$TEST_TMPDIR/classifier-explicit.err"
+explicit_classifier_rc=$?
+cat >"$TEST_TMPDIR/hostile-bash-env" <<'EOF'
+: >"$AGENTGUARD_STARTUP_CAPTURE"
+EOF
+BASH_ENV="$TEST_TMPDIR/hostile-bash-env" \
+  AGENTGUARD_APPLICATION_CAPTURE="$explicit_application_capture" \
+  AGENTGUARD_STARTUP_CAPTURE="$explicit_startup_capture" \
+  /bin/bash --noprofile --norc "$explicit_hook" \
+  >"$TEST_TMPDIR/hook-explicit-startup.out" \
+  2>"$TEST_TMPDIR/hook-explicit-startup.err" </dev/null
+explicit_startup_rc=$?
+set -e
+
+_assert_eq "pre-bash: detectable explicit Bash is best-effort rejected" "2" \
+  "$(cat "$TEST_TMPDIR/hook-explicit.rc")"
+_assert_contains "pre-bash: best-effort explicit rejection names direct execution" \
+  "execute this file directly" "$(cat "$TEST_TMPDIR/hook-explicit.err")"
+_assert_eq "pre-bash: detectable explicit Bash emits no allow protocol" "" \
+  "$(cat "$TEST_TMPDIR/hook-explicit.out")"
+_assert_eq "pre-bash: detectable explicit Bash leaves stdin unread" \
+  "$(cat "$explicit_input")" \
+  "$(cat "$TEST_TMPDIR/hook-explicit.remaining")"
+_assert_file_missing \
+  "pre-bash: detectable explicit Bash does not load application code" \
+  "$explicit_application_capture"
+_assert_eq "classifier: detectable explicit Bash is best-effort rejected" "2" \
+  "$explicit_classifier_rc"
+_assert_contains "classifier: best-effort explicit rejection names direct execution" \
+  "execute this file directly" "$(cat "$TEST_TMPDIR/classifier-explicit.err")"
+_assert_eq "classifier: detectable explicit Bash emits no classification" "" \
+  "$(cat "$TEST_TMPDIR/classifier-explicit.out")"
+_assert_file_missing \
+  "classifier: detectable explicit Bash does not load application code" \
+  "$explicit_application_capture"
+_assert_file_exists \
+  "explicit Bash: BASH_ENV runs outside the script's security boundary" \
+  "$explicit_startup_capture"
+_assert_eq "explicit Bash: ordinary startup leaves invocation detectable" "2" \
+  "$explicit_startup_rc"
+
+rm -f "$explicit_application_capture"
+set +e
+printf '%s' '{"tool_input":{"command":"true"}}' |
+  env 'BASH_FUNC_exit%%=() { return 0; }' \
+    AGENTGUARD_APPLICATION_CAPTURE="$explicit_application_capture" \
+    /bin/bash --noprofile --norc "$explicit_hook" \
+    >"$TEST_TMPDIR/hook-explicit-imported-exit.out" \
+    2>"$TEST_TMPDIR/hook-explicit-imported-exit.err"
+explicit_imported_exit_rc=$?
+set -e
+_assert_eq "pre-bash: detectable explicit Bash ignores an imported exit" "2" \
+  "$explicit_imported_exit_rc"
+_assert_file_missing \
+  "pre-bash: detectable imported exit does not reach application code" \
+  "$explicit_application_capture"
+
+rm -f "$explicit_application_capture"
+set +e
+printf '%s' '{"tool_input":{"command":"true"}}' |
+  env 'BASH_FUNC_unset%%=() { return 0; }' \
+    'BASH_FUNC_exec%%=() { return 0; }' \
+    AGENTGUARD_APPLICATION_CAPTURE="$explicit_application_capture" \
+    /bin/bash --noprofile --norc "$explicit_hook" \
+    >"$TEST_TMPDIR/hook-explicit-imported-control.out" \
+    2>"$TEST_TMPDIR/hook-explicit-imported-control.err"
+explicit_imported_control_hook_rc=$?
+set -e
+_assert_eq "pre-bash: imported control functions cannot continue explicit Bash" "2" \
+  "$explicit_imported_control_hook_rc"
+_assert_eq "pre-bash: imported control functions emit no allow protocol" "" \
+  "$(cat "$TEST_TMPDIR/hook-explicit-imported-control.out")"
+_assert_file_missing \
+  "pre-bash: imported control functions do not reach application code" \
+  "$explicit_application_capture"
+
+rm -f "$explicit_application_capture"
+set +e
+env 'BASH_FUNC_unset%%=() { return 0; }' \
+  'BASH_FUNC_exec%%=() { return 0; }' \
+  AGENTGUARD_APPLICATION_CAPTURE="$explicit_application_capture" \
+  /bin/bash --noprofile --norc "$explicit_classifier" --json -- 'printf ok' \
+  >"$TEST_TMPDIR/classifier-explicit-imported-control.out" \
+  2>"$TEST_TMPDIR/classifier-explicit-imported-control.err"
+explicit_imported_control_classifier_rc=$?
+set -e
+_assert_eq "classifier: imported control functions cannot continue explicit Bash" "2" \
+  "$explicit_imported_control_classifier_rc"
+_assert_eq "classifier: imported control functions emit no classification" "" \
+  "$(cat "$TEST_TMPDIR/classifier-explicit-imported-control.out")"
+_assert_file_missing \
+  "classifier: imported control functions do not reach application code" \
+  "$explicit_application_capture"
+
+rm -f "$explicit_startup_capture"
+AGENTGUARD_APPLICATION_CAPTURE="$explicit_application_capture" \
+  AGENTGUARD_STARTUP_CAPTURE="$explicit_startup_capture" \
+  BASH_ENV="$TEST_TMPDIR/hostile-bash-env" \
+  "$explicit_classifier" --json -- 'printf ok' \
+  >"$TEST_TMPDIR/classifier-direct.out" 2>"$TEST_TMPDIR/classifier-direct.err"
+_assert_file_missing "direct execution: privileged shebang ignores BASH_ENV" \
+  "$explicit_startup_capture"
+_assert_file_exists "direct execution: application code still runs" \
+  "$explicit_application_capture"
+
+# Privileged Bash suppresses function import but retains the raw BASH_FUNC_*
+# environment entries. A candidate implemented as a shell wrapper must not
+# import them before it reaches the validated Bash binary.
+wrapper_function_capture="$TEST_TMPDIR/wrapper-function.capture"
+: >"$wrapper_function_capture"
+# shellcheck disable=SC2016 # Expanded only if a candidate imports the fixture.
+imported_printf='() { /bin/echo imported >>"$AGENTGUARD_FUNCTION_CAPTURE"; /usr/bin/printf "$@"; }'
+set +e
+printf '%s' '{"tool_input":{"command":"true"}}' |
+  env "BASH_FUNC_printf%%=$imported_printf" \
+    AGENTGUARD_FUNCTION_CAPTURE="$wrapper_function_capture" \
+    "$modern_hook" \
+    >"$TEST_TMPDIR/hook-wrapper-function.out" \
+    2>"$TEST_TMPDIR/hook-wrapper-function.err"
+wrapper_function_hook_rc=$?
+env "BASH_FUNC_printf%%=$imported_printf" \
+  AGENTGUARD_FUNCTION_CAPTURE="$wrapper_function_capture" \
+  "$modern_classifier" --json -- 'printf ok' \
+  >"$TEST_TMPDIR/classifier-wrapper-function.out" \
+  2>"$TEST_TMPDIR/classifier-wrapper-function.err"
+wrapper_function_classifier_rc=$?
+set -e
+if [ "$wrapper_function_hook_rc" -ne 0 ]; then
+  sed 's/^/    hook stderr: /' "$TEST_TMPDIR/hook-wrapper-function.err" >&2
+fi
+if [ "$wrapper_function_classifier_rc" -ne 0 ]; then
+  sed 's/^/    classifier stderr: /' "$TEST_TMPDIR/classifier-wrapper-function.err" >&2
+fi
+_assert_eq "pre-bash: a candidate wrapper starts without imported functions" \
+  "0" "$wrapper_function_hook_rc"
+_assert_eq "classifier: a candidate wrapper starts without imported functions" \
+  "0" "$wrapper_function_classifier_rc"
+_assert_eq "launcher: candidate wrappers never execute imported functions" \
+  "" "$(cat "$wrapper_function_capture")"
+
+# A fixed candidate can be a wrapper around a valid Bash. If that wrapper closes
+# the launcher's private descriptors, it must be rejected before its handshake
+# can downgrade the hook's explicit blocking status.
+closing_candidate="$TEST_TMPDIR/fd-closing-bash"
+cat >"$closing_candidate" <<EOF
+#!/bin/bash
+fd=3
+while [ "\$fd" -le 254 ]; do
+  eval "exec \$fd>&-" 2>/dev/null || :
+  eval "exec \$fd<&-" 2>/dev/null || :
+  fd=\$((fd + 1))
+done
+exec "$REAL_BASH" "\$@"
+EOF
+chmod +x "$closing_candidate"
+closing_install="$TEST_TMPDIR/fd-closing-install"
+_install_hook_fixture \
+  "$closing_install" agent-hook-pre-bash agentguard-classify-command
+for closing_entry in agent-hook-pre-bash agentguard-classify-command; do
+  closing_path="$closing_install/bin/$closing_entry"
+  sed "s#/opt/homebrew/bin/bash /usr/local/bin/bash /bin/bash /usr/bin/bash#$closing_candidate $closing_candidate $closing_candidate $closing_candidate#" \
+    "$closing_path" >"$closing_path.tmp"
+  command cat "$closing_path.tmp" >"$closing_path"
+  rm -f "$closing_path.tmp"
+done
+
+for closing_mode in clean dirty; do
+  closing_env=(env -i HOME="$HOME" PATH="$PATH")
+  if [[ $closing_mode == dirty ]]; then
+    closing_env+=('BASH_FUNC_agentguard_fd_closer%%=() { :; }')
+  fi
+  set +e
+  printf '%s' '{"tool_input":{"command":"true"}}' |
+    _with_timeout 5 "${closing_env[@]}" \
+      "$closing_install/bin/agent-hook-pre-bash" \
+      >"$TEST_TMPDIR/hook-fd-closing-$closing_mode.out" \
+      2>"$TEST_TMPDIR/hook-fd-closing-$closing_mode.err"
+  closing_hook_rc=$?
+  _with_timeout 5 "${closing_env[@]}" \
+    "$closing_install/bin/agentguard-classify-command" --json -- 'printf ok' \
+    >"$TEST_TMPDIR/classifier-fd-closing-$closing_mode.out" \
+    2>"$TEST_TMPDIR/classifier-fd-closing-$closing_mode.err"
+  closing_classifier_rc=$?
+  set -e
+  _assert_eq "pre-bash: $closing_mode fd-closing candidate fails closed" \
+    "2" "$closing_hook_rc"
+  _assert_contains "pre-bash: $closing_mode fd-closing failure is actionable" \
+    "Bash 4 or newer" "$(cat "$TEST_TMPDIR/hook-fd-closing-$closing_mode.err")"
+  _assert_eq "pre-bash: $closing_mode fd-closing candidate emits no allow response" \
+    "" "$(cat "$TEST_TMPDIR/hook-fd-closing-$closing_mode.out")"
+  _assert_eq "classifier: $closing_mode fd-closing candidate fails closed" \
+    "2" "$closing_classifier_rc"
+  _assert_contains "classifier: $closing_mode fd-closing failure is actionable" \
+    "Bash 4 or newer" \
+    "$(cat "$TEST_TMPDIR/classifier-fd-closing-$closing_mode.err")"
+  _assert_eq "classifier: $closing_mode fd-closing candidate emits no classification" \
+    "" "$(cat "$TEST_TMPDIR/classifier-fd-closing-$closing_mode.out")"
+done
+
+invalid_home="$TEST_TMPDIR/invalid-bash-home"
+mkdir -p "$invalid_home/.local/bin"
+invalid_log="$TEST_TMPDIR/invalid-bash-launcher.log"
+cat >"$invalid_home/.local/bin/bash" <<EOF
+#!/bin/sh
+for arg; do
+  if [ "\$arg" = -c ]; then
+    printf '%s\n' probe >>"$invalid_log"
+    exit 1
+  fi
+done
+printf '%s\n' executed >>"$invalid_log"
+exit 79
+EOF
+chmod +x "$invalid_home/.local/bin/bash"
+invalid_install="$TEST_TMPDIR/invalid-bash-install"
+_install_candidate_fixture "$invalid_install" "$invalid_home/.local/bin/bash"
+invalid_hook="$invalid_install/bin/agent-hook-pre-bash"
+invalid_classifier="$invalid_install/bin/agentguard-classify-command"
+
+set +e
+printf '%s' '{"tool_input":{}}' |
+  "$invalid_hook" \
+    >"$TEST_TMPDIR/hook-invalid.out" 2>"$TEST_TMPDIR/hook-invalid.err"
+invalid_hook_rc=$?
+"$invalid_classifier" --json -- 'printf ok' \
+  >"$TEST_TMPDIR/classifier-invalid.out" 2>"$TEST_TMPDIR/classifier-invalid.err"
+invalid_classifier_rc=$?
+set -e
+_assert_contains "launcher: unusable candidate is probed" "probe" "$(cat "$invalid_log")"
+_assert_not_contains "launcher: unusable candidate is never re-executed" "executed" "$(cat "$invalid_log")"
+# A platform-level fallback may exist after the injected invalid candidate. Either
+# successful fallback or an explicit usage failure is acceptable here.
+case "$invalid_hook_rc:$invalid_classifier_rc" in
+  0:0 | 2:2) _pass "launcher: both entry points handle an unusable candidate consistently" ;;
+  *) _fail "launcher: both entry points handle an unusable candidate consistently" ;;
+esac
+
+false_home="$TEST_TMPDIR/false-bash-home"
+mkdir -p "$false_home/.local/bin"
+ln -s /bin/true "$false_home/.local/bin/bash"
+false_install="$TEST_TMPDIR/false-bash-install"
+_install_candidate_fixture "$false_install" "$false_home/.local/bin/bash"
+false_hook="$false_install/bin/agent-hook-pre-bash"
+false_classifier="$false_install/bin/agentguard-classify-command"
+
+set +e
+printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+  "$false_hook" \
+    >"$TEST_TMPDIR/hook-false.out" 2>"$TEST_TMPDIR/hook-false.err"
+false_hook_rc=$?
+"$false_classifier" --json -- 'rm -rf /' \
+  >"$TEST_TMPDIR/classifier-false.out" 2>"$TEST_TMPDIR/classifier-false.err"
+false_classifier_rc=$?
+set -e
+_assert_eq "pre-bash: a success-only executable cannot bypass the guard" "2" "$false_hook_rc"
+case "$false_classifier_rc" in
+  2)
+    _pass "classifier: a success-only executable fails closed without a fallback"
+    ;;
+  0)
+    if [ -s "$TEST_TMPDIR/classifier-false.out" ] &&
+      jq -e '.commands[0].basename == "rm"' "$TEST_TMPDIR/classifier-false.out" >/dev/null; then
+      _pass "classifier: a success-only executable is skipped for a valid fallback"
+    else
+      _fail "classifier: a success-only executable is skipped for a valid fallback"
+    fi
+    ;;
+  *)
+    _fail "classifier: a success-only executable has a valid outcome"
+    ;;
+esac
+
+hostile_path="$TEST_TMPDIR/hostile-path"
+mkdir -p "$hostile_path"
+ln -s /bin/true "$hostile_path/bash"
+set +e
+printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+  PATH="$hostile_path:/usr/bin:/bin" "$PRE_BASH" \
+    >"$TEST_TMPDIR/hook-hostile-path.out" 2>"$TEST_TMPDIR/hook-hostile-path.err"
+hostile_path_hook_rc=$?
+PATH="$hostile_path:/usr/bin:/bin" "$CLASSIFY_COMMAND" --json -- 'printf ok' \
+  >"$TEST_TMPDIR/classifier-hostile-path.out" 2>"$TEST_TMPDIR/classifier-hostile-path.err"
+hostile_path_classifier_rc=$?
+set -e
+_assert_eq "pre-bash: the bootstrap interpreter ignores a hostile PATH bash" \
+  "2" "$hostile_path_hook_rc"
+_assert_eq "classifier: the bootstrap interpreter ignores a hostile PATH bash" \
+  "0" "$hostile_path_classifier_rc"
+_assert_eq "classifier: hostile PATH still preserves classification" "printf" \
+  "$(jq -r '.commands[0].basename' "$TEST_TMPDIR/classifier-hostile-path.out")"
+
+# Candidate discovery is a filesystem trust boundary. Caller-selected HOME and
+# PATH values must not be able to nominate an executable that can forge the
+# public handshake without ever entering application code.
+for hostile_candidate_source in home path; do
+  hostile_candidate_root="$TEST_TMPDIR/hostile-$hostile_candidate_source-candidate"
+  hostile_candidate_bin="$hostile_candidate_root/bin"
+  hostile_candidate_marker="$hostile_candidate_root/invoked"
+  mkdir -p "$hostile_candidate_bin" "$hostile_candidate_root/.local/bin"
+  cat >"$hostile_candidate_root/fake-bash" <<EOF
+#!/bin/sh
+: >"$hostile_candidate_marker"
+printf '%s\n' agentguard-modern-bash-v2
+exit 0
+EOF
+  chmod +x "$hostile_candidate_root/fake-bash"
+  if [[ $hostile_candidate_source == home ]]; then
+    ln -s "$hostile_candidate_root/fake-bash" \
+      "$hostile_candidate_root/.local/bin/bash"
+    hostile_candidate_home="$hostile_candidate_root"
+    hostile_candidate_path="$PATH"
+  else
+    ln -s "$hostile_candidate_root/fake-bash" "$hostile_candidate_bin/bash"
+    hostile_candidate_home=relative-home
+    hostile_candidate_path="$hostile_candidate_bin:$PATH"
+  fi
+
+  rm -f "$hostile_candidate_marker"
+  set +e
+  printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+    env HOME="$hostile_candidate_home" PATH="$hostile_candidate_path" \
+      "$PRE_BASH" >"$hostile_candidate_root/hook.out" \
+      2>"$hostile_candidate_root/hook.err"
+  hostile_candidate_hook_rc=$?
+  env HOME="$hostile_candidate_home" PATH="$hostile_candidate_path" \
+    "$CLASSIFY_COMMAND" --json -- 'rm -rf /' \
+    >"$hostile_candidate_root/classifier.out" \
+    2>"$hostile_candidate_root/classifier.err"
+  hostile_candidate_classifier_rc=$?
+  set -e
+
+  _assert_eq "pre-bash: hostile $hostile_candidate_source candidate cannot allow" \
+    "2" "$hostile_candidate_hook_rc"
+  _assert_contains "pre-bash: hostile $hostile_candidate_source candidate still blocks" \
+    "BLOCKED" "$(cat "$hostile_candidate_root/hook.err")"
+  _assert_eq "classifier: hostile $hostile_candidate_source candidate completes" \
+    "0" "$hostile_candidate_classifier_rc"
+  _assert_eq "classifier: hostile $hostile_candidate_source candidate preserves classification" \
+    "rm" "$(jq -r '.commands[0].basename' \
+      "$hostile_candidate_root/classifier.out" 2>/dev/null)"
+  _assert_file_missing "launcher: hostile $hostile_candidate_source candidate is never invoked" \
+    "$hostile_candidate_marker"
+done
+
+startup_env="$TEST_TMPDIR/hostile-bash-env"
+startup_capture="$TEST_TMPDIR/hostile-bash-env.capture"
+cat >"$startup_env" <<'EOF'
+cat >>"$AGENTGUARD_STARTUP_CAPTURE"
+EOF
+: >"$startup_capture"
+set +e
+printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+  BASH_ENV="$startup_env" ENV="$startup_env" AGENTGUARD_STARTUP_CAPTURE="$startup_capture" \
+    "$PRE_BASH" \
+    >"$TEST_TMPDIR/hook-startup-env.out" 2>"$TEST_TMPDIR/hook-startup-env.err"
+startup_env_hook_rc=$?
+printf '%s' 'rm -rf /' |
+  BASH_ENV="$startup_env" ENV="$startup_env" AGENTGUARD_STARTUP_CAPTURE="$startup_capture" \
+    "$CLASSIFY_COMMAND" \
+    >"$TEST_TMPDIR/classifier-startup-env.out" 2>"$TEST_TMPDIR/classifier-startup-env.err"
+startup_env_classifier_rc=$?
+set -e
+_assert_eq "pre-bash: startup files cannot consume the hook payload" "2" "$startup_env_hook_rc"
+_assert_eq "classifier: startup files cannot consume stdin" "0" "$startup_env_classifier_rc"
+_assert_eq "classifier: sanitized startup preserves stdin classification" "rm" \
+  "$(jq -r '.commands[0].basename' "$TEST_TMPDIR/classifier-startup-env.out")"
+_assert_eq "launcher: sanitized startup files never execute" "" "$(cat "$startup_capture")"
+
+# A candidate that is replaced while it validates must not be looked up again
+# before script entry. The already-running, validated Bash owns the handoff.
+for swap_kind in hook classifier; do
+  swap_home="$TEST_TMPDIR/swap-$swap_kind-home"
+  swap_wrapper="$TEST_TMPDIR/swap-$swap_kind-wrapper"
+  swap_candidate="$swap_home/.local/bin/bash"
+  mkdir -p "$swap_home/.local/bin"
+  cat >"$swap_wrapper" <<EOF
+#!/bin/sh
+rm -f "$swap_candidate"
+ln -s /bin/true "$swap_candidate"
+exec "$REAL_BASH" "\$@"
+EOF
+  chmod +x "$swap_wrapper"
+  ln -s "$swap_wrapper" "$swap_candidate"
+  swap_install="$TEST_TMPDIR/swap-$swap_kind-install"
+  _install_candidate_fixture "$swap_install" "$swap_candidate"
+  set +e
+  if [ "$swap_kind" = hook ]; then
+    printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+      _with_timeout 5 "$swap_install/bin/agent-hook-pre-bash" \
+        >"$TEST_TMPDIR/swap-hook.out" 2>"$TEST_TMPDIR/swap-hook.err"
+    swap_rc=$?
+  else
+    _with_timeout 5 "$swap_install/bin/agentguard-classify-command" \
+      --json -- 'rm -rf /' \
+      >"$TEST_TMPDIR/swap-classifier.out" 2>"$TEST_TMPDIR/swap-classifier.err"
+    swap_rc=$?
+  fi
+  set -e
+  if [ "$swap_kind" = hook ]; then
+    _assert_eq "pre-bash: candidate replacement cannot return allow" "2" "$swap_rc"
+    _assert_contains "pre-bash: validated process blocks after candidate replacement" \
+      "BLOCKED" "$(cat "$TEST_TMPDIR/swap-hook.err")"
+  else
+    _assert_eq "classifier: candidate replacement retains validated process" "0" "$swap_rc"
+    _assert_eq "classifier: candidate replacement preserves the command" "rm" \
+      "$(jq -r '.commands[0].basename' "$TEST_TMPDIR/swap-classifier.out")"
+  fi
+done
+
+# Environment-only re-entry markers are not reliable across otherwise valid
+# wrappers. Stripping them must neither loop nor change the guarded result.
+marker_strip_home="$TEST_TMPDIR/marker-strip-home"
+mkdir -p "$marker_strip_home/.local/bin"
+cat >"$marker_strip_home/.local/bin/bash" <<EOF
+#!/bin/sh
+exec /usr/bin/env \
+  -u AGENTGUARD_HOOK_BASH_REEXEC \
+  -u AGENTGUARD_CLASSIFY_COMMAND_REEXEC \
+  -u AGENTGUARD_ENV_SCRUB_REEXEC \
+  "$REAL_BASH" "\$@"
+EOF
+chmod +x "$marker_strip_home/.local/bin/bash"
+marker_strip_install="$TEST_TMPDIR/marker-strip-install"
+_install_candidate_fixture \
+  "$marker_strip_install" "$marker_strip_home/.local/bin/bash"
+set +e
+printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+  _with_timeout 5 "$marker_strip_install/bin/agent-hook-pre-bash" \
+    >"$TEST_TMPDIR/hook-marker-strip.out" 2>"$TEST_TMPDIR/hook-marker-strip.err"
+marker_strip_hook_rc=$?
+_with_timeout 5 "$marker_strip_install/bin/agentguard-classify-command" \
+  --json -- 'rm -rf /' \
+  >"$TEST_TMPDIR/classifier-marker-strip.out" \
+  2>"$TEST_TMPDIR/classifier-marker-strip.err"
+marker_strip_classifier_rc=$?
+set -e
+_assert_eq "pre-bash: marker-stripping wrapper completes and blocks" \
+  "2" "$marker_strip_hook_rc"
+_assert_eq "classifier: marker-stripping wrapper completes" \
+  "0" "$marker_strip_classifier_rc"
+_assert_eq "classifier: marker-stripping wrapper preserves the command" "rm" \
+  "$(jq -r '.commands[0].basename' "$TEST_TMPDIR/classifier-marker-strip.out")"
+
+function_home="$TEST_TMPDIR/function-import-home"
+mkdir -p "$function_home/.local/bin"
+function_capture="$TEST_TMPDIR/function-import.capture"
+: >"$function_capture"
+imported_jq="() { /bin/cat >>\"$function_capture\"; }"
+cat >"$function_home/.local/bin/bash" <<EOF
+#!/bin/sh
+exec env 'BASH_FUNC_jq%%=$imported_jq' "$REAL_BASH" "\$@"
+EOF
+chmod +x "$function_home/.local/bin/bash"
+function_install="$TEST_TMPDIR/function-import-install"
+_install_candidate_fixture \
+  "$function_install" "$function_home/.local/bin/bash"
+set +e
+printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+  "$function_install/bin/agent-hook-pre-bash" \
+    >"$TEST_TMPDIR/hook-function-import.out" 2>"$TEST_TMPDIR/hook-function-import.err"
+function_hook_rc=$?
+set -e
+_assert_eq "pre-bash: imported functions cannot replace the JSON parser" "2" "$function_hook_rc"
+_assert_eq "launcher: imported JSON parser never executes" "" "$(cat "$function_capture")"
+
+# The sanitized environment must remain clean after privileged mode is lowered.
+# A later child Bash must not re-import the original function encoding, while
+# ordinary exported values (including embedded newlines) remain exact.
+descendant_install="$TEST_TMPDIR/descendant-function-install"
+mkdir -p "$descendant_install"
+ln -s "$PRE_BASH" "$descendant_install/agent-hook-pre-bash"
+cat >"$descendant_install/agent-hook-pre-bash-work" <<'EOF'
+if [ "${AGENTGUARD_MULTILINE_VALUE:-}" != $'first line\nsecond line' ]; then
+  _hook_block "ordinary multiline environment value changed"
+fi
+if [ "${AGENTGUARD_APOSTROPHE_VALUE:-}" != "second line's value" ] ||
+  [ "${BASH_FUNC_not_a_function:-}" != "ordinary prefix value" ]; then
+  _hook_block "ordinary environment entry changed"
+fi
+if [ "$(/bin/bash --noprofile --norc -c 'type -t agentguard_imported_function')" = function ]; then
+  _hook_block "exported function leaked into descendant Bash"
+fi
+if /usr/bin/awk 'BEGIN {
+  for (name in ENVIRON) {
+    if (length(name) >= 12 && substr(name, 1, 10) == "BASH_FUNC_" &&
+      substr(name, length(name) - 1) == "%%") exit 0
+  }
+  exit 1
+}'; then
+  _hook_block "raw exported-function entry leaked into extensions"
+fi
+EOF
+imported_descendant='() { printf PWNED; }'
+set +e
+printf '%s' '{"tool_input":{"command":"true"}}' |
+  env "BASH_FUNC_agentguard_imported_function%%=$imported_descendant" \
+    $'BASH_FUNC_line\nbreak%%=() { printf PWNED; }' \
+    AGENTGUARD_MULTILINE_VALUE=$'first line\nsecond line' \
+    AGENTGUARD_APOSTROPHE_VALUE="second line's value" \
+    BASH_FUNC_not_a_function='ordinary prefix value' \
+    "$descendant_install/agent-hook-pre-bash" \
+    >"$TEST_TMPDIR/hook-descendant-function.out" \
+    2>"$TEST_TMPDIR/hook-descendant-function.err"
+descendant_function_rc=$?
+set -e
+if [ "$descendant_function_rc" -ne 0 ]; then
+  sed 's/^/    descendant stderr: /' "$TEST_TMPDIR/hook-descendant-function.err" >&2
+fi
+_assert_eq "pre-bash: sanitized environment reaches extensions" "0" \
+  "$descendant_function_rc"
+_assert_not_contains "pre-bash: descendant Bash cannot re-import a function" \
+  "function leaked" "$(cat "$TEST_TMPDIR/hook-descendant-function.err")"
+_assert_not_contains "pre-bash: malformed exported-function entries are removed" \
+  "raw exported-function entry leaked" "$(cat "$TEST_TMPDIR/hook-descendant-function.err")"
+_assert_not_contains "pre-bash: multiline environment values remain exact" \
+  "multiline environment value changed" "$(cat "$TEST_TMPDIR/hook-descendant-function.err")"
+_assert_not_contains "pre-bash: ordinary environment entries remain exact" \
+  "ordinary environment entry changed" "$(cat "$TEST_TMPDIR/hook-descendant-function.err")"
+
+# The environment scrub must not duplicate exported values into process argv.
+# Interpose the fixed env utility to make its short-lived command line
+# deterministic, while exercising the real scrub and hook extension behavior.
+argv_install="$TEST_TMPDIR/argv-install"
+argv_env="$TEST_TMPDIR/argv-env"
+argv_log="$TEST_TMPDIR/argv.log"
+argv_probe="$TEST_TMPDIR/argv-probe"
+argv_source="$TEST_TMPDIR/argv-source"
+argv_capture="$TEST_TMPDIR/argv.capture"
+mkdir -p "$argv_install/bin"
+ln -s "$AGENTGUARD_ROOT/lib" "$argv_install/lib"
+cat >"$argv_env" <<EOF
+#!/bin/bash -p
+for arg; do
+  printf '%s\\0' "\$arg" >>"$argv_log"
+done
+sleep 0.05
+exec /usr/bin/env "\$@"
+EOF
+chmod +x "$argv_env"
+cat >"$argv_probe" <<'EOF'
+if [ "$#" -ne 3 ] || [ "$1" != 'first argument' ] || [ "$2" != '' ] ||
+  [ "$3" != $'last\nargument' ]; then
+  echo "agent-hook-pre-bash: launcher argv changed" >&2
+  exit 2
+fi
+printf '%s\n' exact >"$AGENTGUARD_ARGV_CAPTURE"
+EOF
+sed "s#/usr/bin/env#$argv_env#g" "$PRE_BASH" >"$argv_source"
+awk '
+  NR == FNR { probe = probe $0 "\n"; next }
+  !inserted && $0 ~ /^[[:space:]]*set -u$/ { printf "%s", probe; inserted = 1 }
+  { print }
+  END { if (!inserted) exit 2 }
+' "$argv_probe" "$argv_source" >"$argv_install/bin/agent-hook-pre-bash"
+chmod +x "$argv_install/bin/agent-hook-pre-bash"
+cat >"$argv_install/bin/agent-hook-pre-bash-work" <<'EOF'
+if [ "${AGENTGUARD_SECRET_SENTINEL:-}" != 'agentguard-secret-never-in-argv' ]; then
+  _hook_block "secret environment value changed"
+fi
+if [ "${AGENTGUARD_TRAILING_VALUE:-}" != $'first line\nsecond line\n' ]; then
+  _hook_block "trailing-newline environment value changed"
+fi
+EOF
+: >"$argv_log"
+set +e
+printf '%s' '{"tool_input":{"command":"true"}}' |
+  env "BASH_FUNC_agentguard_argv_scrub%%=() { :; }" \
+    AGENTGUARD_SECRET_SENTINEL='agentguard-secret-never-in-argv' \
+    AGENTGUARD_TRAILING_VALUE=$'first line\nsecond line\n' \
+    AGENTGUARD_ARGV_CAPTURE="$argv_capture" \
+    "$argv_install/bin/agent-hook-pre-bash" \
+    'first argument' '' $'last\nargument' \
+    >"$TEST_TMPDIR/hook-argv.out" 2>"$TEST_TMPDIR/hook-argv.err"
+argv_hook_rc=$?
+set -e
+_assert_eq "pre-bash: scrub preserves environment, argv, and stdin" "0" "$argv_hook_rc"
+_assert_eq "pre-bash: scrub preserves exact launcher argv" "exact" \
+  "$(cat "$argv_capture" 2>/dev/null)"
+_assert_not_contains "launcher: scrub utility argv never contains exported secrets" \
+  "agentguard-secret-never-in-argv" "$(tr '\0' '\n' <"$argv_log")"
+_assert_not_contains "pre-bash: exact scrub inputs do not trigger extension blocks" \
+  "changed" "$(cat "$TEST_TMPDIR/hook-argv.err")"
+
+# Bootstrap channels must not take ownership of descriptors inherited from the
+# caller. Keep a broad range occupied so the launcher must find private slots,
+# and use fd 3 as an input stream to verify that its access mode and shared file
+# offset survive both transitions. The first two free descriptors must also be
+# closed before hook or classifier application code runs.
+descriptor_install="$TEST_TMPDIR/descriptor-install"
+descriptor_hook="$descriptor_install/bin/agent-hook-pre-bash"
+descriptor_classifier="$descriptor_install/bin/agentguard-classify-command"
+descriptor_probe="$TEST_TMPDIR/descriptor-probe"
+mkdir -p "$descriptor_install/bin" "$descriptor_install/lib/agentguard"
+ln -s "$PRE_BASH" "$descriptor_hook"
+cp "$CLASSIFY_COMMAND" "$descriptor_classifier"
+
+cat >"$descriptor_probe" <<'EOF'
+IFS= read -r _agentguard_descriptor_value <&3 || {
+  echo "agentguard descriptor probe: inherited fd 3 is unreadable" >&2
+  return 2 2>/dev/null || exit 2
+}
+if [ "$_agentguard_descriptor_value" != second ]; then
+  echo "agentguard descriptor probe: inherited fd 3 offset changed" >&2
+  return 2 2>/dev/null || exit 2
+fi
+printf '%s\n' "$_agentguard_descriptor_value" >"$AGENTGUARD_DESCRIPTOR_READ_CAPTURE"
+
+_agentguard_descriptor_fd=4
+while [ "$_agentguard_descriptor_fd" -le 64 ]; do
+  if ! eval "printf '%s\\n' fd-$_agentguard_descriptor_fd >&$_agentguard_descriptor_fd"; then
+    echo "agentguard descriptor probe: inherited fd $_agentguard_descriptor_fd is unwritable" >&2
+    return 2 2>/dev/null || exit 2
+  fi
+  _agentguard_descriptor_fd=$((_agentguard_descriptor_fd + 1))
+done
+
+for _agentguard_descriptor_fd in 65 66; do
+  if [ "/dev/fd/$_agentguard_descriptor_fd" -ef "$AGENTGUARD_DESCRIPTOR_STDIN_FILE" ] ||
+    [ "/dev/fd/$_agentguard_descriptor_fd" -ef "$AGENTGUARD_DESCRIPTOR_STDOUT_FILE" ]; then
+    echo "agentguard descriptor probe: private fd $_agentguard_descriptor_fd leaked" >&2
+    return 2 2>/dev/null || exit 2
+  fi
+done
+unset _agentguard_descriptor_fd _agentguard_descriptor_value
+EOF
+
+{
+  # shellcheck disable=SC2016 # The generated hook expands the probe path.
+  printf '%s\n' 'if ! source "$AGENTGUARD_DESCRIPTOR_PROBE"; then'
+  printf '%s\n' '  _hook_block "launcher changed inherited file descriptors"'
+  printf '%s\n' 'fi'
+} >"$descriptor_install/bin/agent-hook-pre-bash-work"
+{
+  printf '%s\n' '# shellcheck disable=SC1090 # Test probe path is supplied by the harness.'
+  # shellcheck disable=SC2016 # The generated classifier expands the probe path.
+  printf '%s\n' 'source "$AGENTGUARD_DESCRIPTOR_PROBE" || exit 2'
+  cat "$AGENTGUARD_ROOT/lib/agentguard/hook-command-classifier.sh"
+} >"$descriptor_install/lib/agentguard/hook-command-classifier.sh"
+
+_run_descriptor_entry() {
+  local kind="$1" mode="$2"
+  local output="$TEST_TMPDIR/descriptor-$kind-$mode.output"
+  local error="$TEST_TMPDIR/descriptor-$kind-$mode.error"
+  local writes="$TEST_TMPDIR/descriptor-$kind-$mode.writes"
+  local read_capture="$TEST_TMPDIR/descriptor-$kind-$mode.read"
+  local input="$TEST_TMPDIR/descriptor-$kind-$mode.input"
+  local payload="$TEST_TMPDIR/descriptor-$kind-$mode.payload"
+  local fd initial rc expected_writes=""
+
+  printf '%s\n' first second >"$input"
+  if [ "$kind" = hook ]; then
+    printf '%s' '{"tool_input":{"command":"true"}}' >"$payload"
+  else
+    printf '%s\n' 'classifier stdin remains caller-owned' >"$payload"
+  fi
+  : >"$writes"
+  (
+    exec 3<"$input"
+    IFS= read -r initial <&3 || exit 90
+    [ "$initial" = first ] || exit 91
+    fd=4
+    while [ "$fd" -le 64 ]; do
+      eval 'exec '"$fd"'>>"$writes"'
+      fd=$((fd + 1))
+    done
+
+    if [ "$kind" = hook ]; then
+      if [ "$mode" = dirty ]; then
+        # shellcheck disable=SC2094 # Env values name, but do not access, redirected files.
+        env 'BASH_FUNC_agentguard_descriptor_fixture%%=() { :; }' \
+          AGENTGUARD_DESCRIPTOR_PROBE="$descriptor_probe" \
+          AGENTGUARD_DESCRIPTOR_READ_CAPTURE="$read_capture" \
+          AGENTGUARD_DESCRIPTOR_STDIN_FILE="$payload" \
+          AGENTGUARD_DESCRIPTOR_STDOUT_FILE="$output" \
+          "$descriptor_hook" <"$payload" >"$output" 2>"$error"
+      else
+        # shellcheck disable=SC2094 # Env values name, but do not access, redirected files.
+        AGENTGUARD_DESCRIPTOR_PROBE="$descriptor_probe" \
+          AGENTGUARD_DESCRIPTOR_READ_CAPTURE="$read_capture" \
+          AGENTGUARD_DESCRIPTOR_STDIN_FILE="$payload" \
+          AGENTGUARD_DESCRIPTOR_STDOUT_FILE="$output" \
+          "$descriptor_hook" <"$payload" >"$output" 2>"$error"
+      fi
+    elif [ "$mode" = dirty ]; then
+      # shellcheck disable=SC2094 # Env values name, but do not access, redirected files.
+      env 'BASH_FUNC_agentguard_descriptor_fixture%%=() { :; }' \
+        AGENTGUARD_DESCRIPTOR_PROBE="$descriptor_probe" \
+        AGENTGUARD_DESCRIPTOR_READ_CAPTURE="$read_capture" \
+        AGENTGUARD_DESCRIPTOR_STDIN_FILE="$payload" \
+        AGENTGUARD_DESCRIPTOR_STDOUT_FILE="$output" \
+        "$descriptor_classifier" --json -- 'printf ok' \
+        <"$payload" >"$output" 2>"$error"
+    else
+      # shellcheck disable=SC2094 # Env values name, but do not access, redirected files.
+      AGENTGUARD_DESCRIPTOR_PROBE="$descriptor_probe" \
+        AGENTGUARD_DESCRIPTOR_READ_CAPTURE="$read_capture" \
+        AGENTGUARD_DESCRIPTOR_STDIN_FILE="$payload" \
+        AGENTGUARD_DESCRIPTOR_STDOUT_FILE="$output" \
+        "$descriptor_classifier" --json -- 'printf ok' \
+        <"$payload" >"$output" 2>"$error"
+    fi
+  )
+  rc=$?
+
+  _assert_eq "$kind $mode: caller descriptors remain available" "0" "$rc"
+  _assert_eq "$kind $mode: caller input descriptor preserves its offset" \
+    "second" "$(cat "$read_capture" 2>/dev/null)"
+  fd=4
+  while [ "$fd" -le 64 ]; do
+    expected_writes="${expected_writes}fd-$fd
+"
+    fd=$((fd + 1))
+  done
+  expected_writes=${expected_writes%$'\n'}
+  _assert_eq "$kind $mode: broad caller descriptor range preserves write semantics" \
+    "$expected_writes" "$(cat "$writes")"
+  _assert_not_contains "$kind $mode: private descriptors do not leak" \
+    "private fd" "$(cat "$error")"
+  if [ "$kind" = classifier ] && [ "$rc" -eq 0 ]; then
+    _assert_eq "$kind $mode: classification still reaches application code" "printf" \
+      "$(jq -r '.commands[0].basename' "$output")"
+  fi
+}
+
+set +e
+for descriptor_kind in hook classifier; do
+  for descriptor_mode in clean dirty; do
+    _run_descriptor_entry "$descriptor_kind" "$descriptor_mode"
+  done
+done
+set -e
+
+# Bash reserves fd 255 internally and does not safely support bootstrap
+# redirections above it on every supported release. Some older releases also
+# use several high descriptors internally while evaluating the launcher. Near
+# that ceiling, permit either safe success or an exact fail-closed refusal and
+# require refusal at exhaustion; the broader descriptor test above still
+# requires successful handoff with ordinary headroom. A high inherited
+# descriptor remains caller-owned when the platform permits one.
+dense_install="$TEST_TMPDIR/dense-descriptor-install"
+dense_hook="$dense_install/bin/agent-hook-pre-bash"
+dense_classifier="$dense_install/bin/agentguard-classify-command"
+dense_probe="$TEST_TMPDIR/dense-descriptor-probe"
+_install_hook_fixture "$dense_install" agent-hook-pre-bash agentguard-classify-command
+cat >"$dense_probe" <<'EOF'
+for _agentguard_dense_fd in 253 254; do
+  if [ "/dev/fd/$_agentguard_dense_fd" -ef "$AGENTGUARD_DENSE_STDIN_FILE" ] ||
+    [ "/dev/fd/$_agentguard_dense_fd" -ef "$AGENTGUARD_DENSE_STDOUT_FILE" ]; then
+    echo "agentguard dense descriptor probe: private fd $_agentguard_dense_fd leaked" >&2
+    return 2 2>/dev/null || exit 2
+  fi
+done
+if [[ ${AGENTGUARD_EXPECT_HIGH_FD:-0} == 1 ]]; then
+  printf '%s\n' high-fd-preserved >&512 || {
+    return 2 2>/dev/null || exit 2
+  }
+fi
+unset _agentguard_dense_fd
+EOF
+cat >"$dense_install/bin/agent-hook-pre-bash-work" <<'EOF'
+# shellcheck disable=SC1090 # Test probe path is supplied by the harness.
+source "$AGENTGUARD_DENSE_PROBE" ||
+  _hook_block "launcher changed dense inherited descriptors"
+EOF
+dense_module="$dense_install/lib/agentguard/hook-command-classifier.sh"
+mv "$dense_module" "$dense_module.original"
+{
+  printf '%s\n' '# shellcheck disable=SC1090 # Test probe path is supplied by the harness.'
+  # shellcheck disable=SC2016 # The fixture module expands the probe path.
+  printf '%s\n' 'source "$AGENTGUARD_DENSE_PROBE" || exit 2'
+  cat "$dense_module.original"
+} >"$dense_module"
+
+_run_dense_descriptor_entry() {
+  local kind="$1" highest="$2"
+  local output="$TEST_TMPDIR/dense-$kind-$highest.output"
+  local error="$TEST_TMPDIR/dense-$kind-$highest.error"
+  local high_writes="$TEST_TMPDIR/dense-$kind-$highest.high"
+  local payload="$TEST_TMPDIR/dense-$kind-$highest.payload"
+  local fd=3 high_fd_enabled=0 rc
+
+  : >"$high_writes"
+  printf '%s' '{"tool_input":{"command":"true"}}' >"$payload"
+  set +e
+  (
+    ulimit -c 0
+    while [[ $fd -le $highest ]]; do
+      eval "exec $fd>/dev/null" || exit 90
+      fd=$((fd + 1))
+    done
+    if [[ $(ulimit -n) == unlimited || $(ulimit -n) -gt 513 ]]; then
+      exec 512>>"$high_writes"
+      high_fd_enabled=1
+    fi
+    if [[ $kind == hook ]]; then
+      # shellcheck disable=SC2094 # Env values name, but do not access, redirected files.
+      AGENTGUARD_DENSE_PROBE="$dense_probe" \
+        AGENTGUARD_DENSE_STDIN_FILE="$payload" \
+        AGENTGUARD_DENSE_STDOUT_FILE="$output" \
+        AGENTGUARD_EXPECT_HIGH_FD="$high_fd_enabled" \
+        "$dense_hook" <"$payload" >"$output" 2>"$error"
+    else
+      # shellcheck disable=SC2094 # Env values name, but do not access, redirected files.
+      AGENTGUARD_DENSE_PROBE="$dense_probe" \
+        AGENTGUARD_DENSE_STDIN_FILE="$payload" \
+        AGENTGUARD_DENSE_STDOUT_FILE="$output" \
+        AGENTGUARD_EXPECT_HIGH_FD="$high_fd_enabled" \
+        "$dense_classifier" --json -- 'printf ok' \
+        <"$payload" >"$output" 2>"$error"
+    fi
+  )
+  rc=$?
+  set -e
+
+  if [[ $highest -lt 253 && $rc -eq 0 ]]; then
+    _pass "$kind: dense descriptors through $highest safely succeed when available"
+    _assert_not_contains "$kind: private fds 253 and 254 do not leak" \
+      "private fd" "$(cat "$error")"
+    if [[ -s $high_writes ]]; then
+      _assert_eq "$kind: high inherited descriptor remains writable" \
+        "high-fd-preserved" "$(cat "$high_writes")"
+    else
+      _pass "$kind: high inherited descriptor test skipped below fd 512 limit"
+    fi
+  else
+    _assert_eq "$kind: dense descriptors through $highest fail cleanly" "2" "$rc"
+    _assert_contains "$kind: descriptor exhaustion is actionable" \
+      "cannot reserve private bootstrap descriptors" "$(cat "$error")"
+    _assert_eq "$kind: descriptor exhaustion emits no allow response" "" \
+      "$(cat "$output")"
+  fi
+}
+
+for dense_kind in hook classifier; do
+  _run_dense_descriptor_entry "$dense_kind" 251
+  _run_dense_descriptor_entry "$dense_kind" 252
+  _run_dense_descriptor_entry "$dense_kind" 253
+done
+
+echo ""
+echo "=== shell-control environment isolation ==="
+
+control_install="$TEST_TMPDIR/control-install"
+control_hook="$control_install/bin/agent-hook-pre-bash"
+control_classifier="$control_install/bin/agentguard-classify-command"
+mkdir -p "$control_install/bin" "$control_install/lib/agentguard"
+ln -s "$PRE_BASH" "$control_hook"
+cp "$CLASSIFY_COMMAND" "$control_classifier"
+cp "$AGENTGUARD_ROOT/lib/agentguard/hook-command-classifier.sh" \
+  "$control_install/lib/agentguard/hook-command-classifier.sh"
+cat >"$control_install/bin/agent-hook-pre-bash-work" <<'EOF'
+for _agentguard_control_name in FUNCNEST POSIXLY_CORRECT BASH_COMPAT BASH_XTRACEFD; do
+  if [[ ${!_agentguard_control_name+x} ]]; then
+    _hook_block "shell-control variable leaked: $_agentguard_control_name"
+  fi
+done
+unset _agentguard_control_name
+for _agentguard_control_name in \
+	_agentguard_probe _agentguard_private_fd_limit _agentguard_entry_name \
+	_agentguard_saved_stdout_fd _agentguard_saved_stdin_fd \
+	_agentguard_stdin_state _agentguard_stdin_status \
+	_agentguard_complete _agentguard_name _agentguard_value _agentguard_end \
+	_agentguard_environment_scan _agentguard_environment_scan_status \
+  _agentguard_bash_entry_declaration _agentguard_env_clean_declaration \
+  _agentguard_scrub_handshake _agentguard_scrub_status \
+  _agentguard_needs_modern_bash _agentguard_bash_major \
+  _agentguard_bash _agentguard_bash_handshake \
+  _agentguard_bash_status _AGENTGUARD_BASH_ENTRY _AGENTGUARD_ENV_CLEAN; do
+  if declare -p "$_agentguard_control_name" >/dev/null 2>&1; then
+    _hook_block "bootstrap state leaked: $_agentguard_control_name"
+  fi
+done
+unset _agentguard_control_name
+for _agentguard_control_name in \
+	_agentguard_fd_is_open _agentguard_reserve_fd _agentguard_reserve_stdin \
+	_agentguard_prepare_private_descriptors _agentguard_close_private_descriptors \
+	_agentguard_write_environment; do
+	if declare -F "$_agentguard_control_name" >/dev/null 2>&1; then
+		_hook_block "bootstrap function leaked: $_agentguard_control_name"
+	fi
+done
+unset _agentguard_control_name
+if [[ ${AGENTGUARD_EXPECT_STDIN_CLOSED:-0} == 1 && -e /dev/fd/0 ]]; then
+  echo "agentguard classifier: closed stdin was reopened" >&2
+  exit 2
+fi
+if [[ -n ${AGENTGUARD_CONTROL_PROBE:-} ]]; then
+  # shellcheck disable=SC1090 # Test probe path is supplied by the harness.
+  source "$AGENTGUARD_CONTROL_PROBE" ||
+    _hook_block "shell-control descriptor probe failed"
+fi
+EOF
+
+control_module="$control_install/lib/agentguard/hook-command-classifier.sh"
+mv "$control_module" "$control_module.original"
+{
+  cat <<'EOF'
+for _agentguard_control_name in FUNCNEST POSIXLY_CORRECT BASH_COMPAT BASH_XTRACEFD; do
+  if [[ ${!_agentguard_control_name+x} ]]; then
+    echo "agentguard classifier: shell-control variable leaked: $_agentguard_control_name" >&2
+    exit 2
+  fi
+done
+unset _agentguard_control_name
+for _agentguard_control_name in \
+	_agentguard_probe _agentguard_private_fd_limit _agentguard_entry_name \
+	_agentguard_saved_stdout_fd _agentguard_saved_stdin_fd \
+	_agentguard_stdin_state _agentguard_stdin_status \
+	_agentguard_complete _agentguard_name _agentguard_value _agentguard_end \
+	_agentguard_environment_scan _agentguard_environment_scan_status \
+  _agentguard_bash_entry_declaration _agentguard_env_clean_declaration \
+  _agentguard_scrub_handshake _agentguard_scrub_status \
+  _agentguard_needs_modern_bash _agentguard_bash_major \
+  _agentguard_bash _agentguard_bash_handshake \
+  _agentguard_bash_status _AGENTGUARD_BASH_ENTRY _AGENTGUARD_ENV_CLEAN; do
+  if declare -p "$_agentguard_control_name" >/dev/null 2>&1; then
+    echo "agentguard classifier: bootstrap state leaked: $_agentguard_control_name" >&2
+    exit 2
+  fi
+done
+unset _agentguard_control_name
+for _agentguard_control_name in \
+	_agentguard_fd_is_open _agentguard_reserve_fd _agentguard_reserve_stdin \
+	_agentguard_prepare_private_descriptors _agentguard_close_private_descriptors \
+	_agentguard_write_environment; do
+	if declare -F "$_agentguard_control_name" >/dev/null 2>&1; then
+		echo "agentguard classifier: bootstrap function leaked: $_agentguard_control_name" >&2
+		exit 2
+	fi
+done
+unset _agentguard_control_name
+if [[ -n ${AGENTGUARD_CONTROL_PROBE:-} ]]; then
+  # shellcheck disable=SC1090 # Test probe path is supplied by the harness.
+  source "$AGENTGUARD_CONTROL_PROBE" || exit 2
+fi
+EOF
+  cat "$control_module.original"
+} >"$control_module"
+
+_run_control_entry() {
+  local kind="$1" mode="$2" name="$3" value="$4"
+  local output="$TEST_TMPDIR/control-$kind-$mode-$name.output"
+  local error="$TEST_TMPDIR/control-$kind-$mode-$name.error"
+  local rc
+  set +e
+  if [[ $kind == hook ]]; then
+    if [[ $mode == dirty ]]; then
+      printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+        env -i HOME="$HOME" PATH="$PATH" "$name=$value" \
+          'BASH_FUNC_agentguard_control%%=() { :; }' \
+          "$control_hook" >"$output" 2>"$error"
+    else
+      printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+        env -i HOME="$HOME" PATH="$PATH" "$name=$value" \
+          "$control_hook" >"$output" 2>"$error"
+    fi
+  elif [[ $mode == dirty ]]; then
+    env -i HOME="$HOME" PATH="$PATH" "$name=$value" \
+      'BASH_FUNC_agentguard_control%%=() { :; }' \
+      "$control_classifier" --json -- 'printf ok' >"$output" 2>"$error"
+  else
+    env -i HOME="$HOME" PATH="$PATH" "$name=$value" \
+      "$control_classifier" --json -- 'printf ok' >"$output" 2>"$error"
+  fi
+  rc=$?
+  set -e
+
+  if [[ $kind == hook ]]; then
+    _assert_eq "$kind $mode $name=$value: dangerous command remains blocked" "2" "$rc"
+    _assert_contains "$kind $mode $name=$value: block protocol remains intact" \
+      "BLOCKED: rm -rf" "$(cat "$error")"
+    _assert_not_contains "$kind $mode $name=$value: control state does not reach extensions" \
+      "shell-control variable leaked" "$(cat "$error")"
+    _assert_not_contains "$kind $mode $name=$value: bootstrap state does not reach extensions" \
+      "bootstrap state leaked" "$(cat "$error")"
+    _assert_not_contains "$kind $mode $name=$value: bootstrap functions do not reach extensions" \
+      "bootstrap function leaked" "$(cat "$error")"
+  else
+    _assert_eq "$kind $mode $name=$value: classification succeeds" "0" "$rc"
+    _assert_eq "$kind $mode $name=$value: classification remains exact" "printf" \
+      "$(jq -r '.commands[0].basename' "$output" 2>/dev/null)"
+    _assert_not_contains "$kind $mode $name=$value: control state does not reach classifier" \
+      "shell-control variable leaked" "$(cat "$error")"
+    _assert_not_contains "$kind $mode $name=$value: bootstrap state does not reach classifier" \
+      "bootstrap state leaked" "$(cat "$error")"
+    _assert_not_contains "$kind $mode $name=$value: bootstrap functions do not reach classifier" \
+      "bootstrap function leaked" "$(cat "$error")"
+  fi
+}
+
+for control_mode in clean dirty; do
+  for control_kind in hook classifier; do
+    for funcnest_value in 1 2 3 4 5; do
+      _run_control_entry "$control_kind" "$control_mode" FUNCNEST "$funcnest_value"
+    done
+    _run_control_entry "$control_kind" "$control_mode" POSIXLY_CORRECT 1
+    _run_control_entry "$control_kind" "$control_mode" BASH_COMPAT 3.2
+  done
+done
+
+for closed_mode in clean dirty; do
+  closed_output="$TEST_TMPDIR/closed-stdin-$closed_mode.output"
+  closed_error="$TEST_TMPDIR/closed-stdin-$closed_mode.error"
+  set +e
+  if [[ $closed_mode == dirty ]]; then
+    env -i HOME="$HOME" PATH="$PATH" \
+      AGENTGUARD_EXPECT_STDIN_CLOSED=1 \
+      'BASH_FUNC_agentguard_closed_stdin%%=() { :; }' \
+      "$control_classifier" --json -- 'printf ok' \
+      0<&- >"$closed_output" 2>"$closed_error"
+  else
+    env -i HOME="$HOME" PATH="$PATH" \
+      AGENTGUARD_EXPECT_STDIN_CLOSED=1 \
+      "$control_classifier" --json -- 'printf ok' \
+      0<&- >"$closed_output" 2>"$closed_error"
+  fi
+  closed_rc=$?
+  set -e
+  _assert_eq "classifier $closed_mode: argv mode preserves closed stdin" "0" "$closed_rc"
+  _assert_eq "classifier $closed_mode: closed stdin still classifies" "printf" \
+    "$(jq -r '.commands[0].basename' "$closed_output" 2>/dev/null)"
+  _assert_not_contains "classifier $closed_mode: closed stdin has no descriptor error" \
+    "Bad file descriptor" "$(cat "$closed_error")"
+  _assert_not_contains "classifier $closed_mode: closed stdin is not reopened" \
+    "closed stdin was reopened" "$(cat "$closed_error")"
+done
+
+# Write-only stdin needs its own application-stage probe: duplicating fd 0 with
+# the wrong redirection operator can appear to work during bootstrap but change
+# the access mode by the time the sourced entry point begins running.
+write_stdin_install="$TEST_TMPDIR/write-only-stdin-install"
+write_stdin_hook="$write_stdin_install/bin/agent-hook-pre-bash"
+write_stdin_classifier="$write_stdin_install/bin/agentguard-classify-command"
+_install_hook_fixture \
+  "$write_stdin_install" agent-hook-pre-bash agentguard-classify-command
+for write_stdin_kind in hook classifier; do
+  if [[ $write_stdin_kind == hook ]]; then
+    write_stdin_entry="$write_stdin_hook"
+    write_stdin_application='    set -u'
+  else
+    write_stdin_entry="$write_stdin_classifier"
+    write_stdin_application='    set -euo pipefail'
+  fi
+  write_stdin_generated="$write_stdin_entry.generated"
+  awk -v application="$write_stdin_application" \
+    -v exit_after_probe="$([[ $write_stdin_kind == hook ]] && printf true || printf false)" '
+    { print }
+    $0 == application {
+      print "    printf \"%s\\n\" application-write >&0 || exit 97"
+      if (exit_after_probe == "true") print "    exit 0"
+    }
+  ' "$write_stdin_entry" >"$write_stdin_generated"
+  command cat "$write_stdin_generated" >"$write_stdin_entry"
+  rm -f "$write_stdin_generated"
+done
+
+for write_stdin_mode in clean dirty; do
+  for write_stdin_kind in hook classifier; do
+    write_stdin_output="$TEST_TMPDIR/write-only-$write_stdin_kind-$write_stdin_mode.out"
+    write_stdin_error="$TEST_TMPDIR/write-only-$write_stdin_kind-$write_stdin_mode.err"
+    write_stdin_capture="$TEST_TMPDIR/write-only-$write_stdin_kind-$write_stdin_mode.stdin"
+    write_stdin_env=(env -i HOME="$HOME" PATH="$PATH")
+    if [[ $write_stdin_mode == dirty ]]; then
+      write_stdin_env+=('BASH_FUNC_agentguard_write_only%%=() { :; }')
+    fi
+    set +e
+    if [[ $write_stdin_kind == hook ]]; then
+      "${write_stdin_env[@]}" "$write_stdin_hook" \
+        0>"$write_stdin_capture" >"$write_stdin_output" 2>"$write_stdin_error"
+    else
+      "${write_stdin_env[@]}" "$write_stdin_classifier" --json -- true \
+        0>"$write_stdin_capture" >"$write_stdin_output" 2>"$write_stdin_error"
+    fi
+    write_stdin_rc=$?
+    set -e
+
+    _assert_eq "$write_stdin_kind $write_stdin_mode: write-only stdin reaches application" \
+      "0" "$write_stdin_rc"
+    _assert_eq "$write_stdin_kind $write_stdin_mode: write-only stdin remains writable" \
+      "application-write" "$(cat "$write_stdin_capture")"
+    _assert_not_contains "$write_stdin_kind $write_stdin_mode: write-only stdin has no descriptor error" \
+      "Bad file descriptor" "$(cat "$write_stdin_error")"
+    if [[ $write_stdin_kind == classifier ]]; then
+      _assert_eq "$write_stdin_kind $write_stdin_mode: application continues after probe" \
+        "true" "$(jq -r '.commands[0].basename' "$write_stdin_output" 2>/dev/null)"
+    fi
+  done
+done
+
+control_probe="$TEST_TMPDIR/control-descriptor-probe"
+cat >"$control_probe" <<'EOF'
+if [[ ${BASH_XTRACEFD+x} ]]; then
+  echo "agentguard control probe: BASH_XTRACEFD leaked" >&2
+  return 2 2>/dev/null || exit 2
+fi
+case "$AGENTGUARD_CONTROL_FD" in
+  2)
+    printf '%s\n' agentguard-stderr-preserved >&2 || {
+      return 2 2>/dev/null || exit 2
+    }
+    ;;
+  8)
+    IFS= read -r _agentguard_control_value <&8 || {
+      echo "agentguard control probe: fd 8 is unreadable" >&2
+      return 2 2>/dev/null || exit 2
+    }
+    [[ $_agentguard_control_value == second ]] || {
+      echo "agentguard control probe: fd 8 offset changed" >&2
+      return 2 2>/dev/null || exit 2
+    }
+    printf '%s\n' third >&8 || {
+      echo "agentguard control probe: fd 8 is unwritable" >&2
+      return 2 2>/dev/null || exit 2
+    }
+    printf '%s\n' "$_agentguard_control_value" >"$AGENTGUARD_CONTROL_CAPTURE"
+    unset _agentguard_control_value
+    ;;
+  *) return 2 2>/dev/null || exit 2 ;;
+esac
+EOF
+
+_run_xtracefd_entry() {
+  local kind="$1" mode="$2" control_fd="$3"
+  local output="$TEST_TMPDIR/xtracefd-$kind-$mode-$control_fd.output"
+  local error="$TEST_TMPDIR/xtracefd-$kind-$mode-$control_fd.error"
+  local input="$TEST_TMPDIR/xtracefd-$kind-$mode-$control_fd.input"
+  local capture="$TEST_TMPDIR/xtracefd-$kind-$mode-$control_fd.capture"
+  local rc
+  printf '%s\n' first second >"$input"
+  set +e
+  (
+    if [[ $control_fd == 8 ]]; then
+      exec 8<>"$input"
+      IFS= read -r initial <&8 || exit 90
+      [[ $initial == first ]] || exit 91
+    fi
+    if [[ $kind == hook ]]; then
+      if [[ $mode == dirty ]]; then
+        printf '%s' '{"tool_input":{"command":"true"}}' |
+          env -i HOME="$HOME" PATH="$PATH" BASH_XTRACEFD="$control_fd" \
+            AGENTGUARD_CONTROL_PROBE="$control_probe" \
+            AGENTGUARD_CONTROL_FD="$control_fd" \
+            AGENTGUARD_CONTROL_CAPTURE="$capture" \
+            'BASH_FUNC_agentguard_xtracefd%%=() { :; }' \
+            "$control_hook" >"$output" 2>"$error"
+      else
+        printf '%s' '{"tool_input":{"command":"true"}}' |
+          env -i HOME="$HOME" PATH="$PATH" BASH_XTRACEFD="$control_fd" \
+            AGENTGUARD_CONTROL_PROBE="$control_probe" \
+            AGENTGUARD_CONTROL_FD="$control_fd" \
+            AGENTGUARD_CONTROL_CAPTURE="$capture" \
+            "$control_hook" >"$output" 2>"$error"
+      fi
+    elif [[ $mode == dirty ]]; then
+      env -i HOME="$HOME" PATH="$PATH" BASH_XTRACEFD="$control_fd" \
+        AGENTGUARD_CONTROL_PROBE="$control_probe" \
+        AGENTGUARD_CONTROL_FD="$control_fd" \
+        AGENTGUARD_CONTROL_CAPTURE="$capture" \
+        'BASH_FUNC_agentguard_xtracefd%%=() { :; }' \
+        "$control_classifier" --json -- 'printf ok' >"$output" 2>"$error"
+    else
+      env -i HOME="$HOME" PATH="$PATH" BASH_XTRACEFD="$control_fd" \
+        AGENTGUARD_CONTROL_PROBE="$control_probe" \
+        AGENTGUARD_CONTROL_FD="$control_fd" \
+        AGENTGUARD_CONTROL_CAPTURE="$capture" \
+        "$control_classifier" --json -- 'printf ok' >"$output" 2>"$error"
+    fi
+  )
+  rc=$?
+  set -e
+  _assert_eq "$kind $mode BASH_XTRACEFD=$control_fd: entry succeeds" "0" "$rc"
+  _assert_not_contains "$kind $mode BASH_XTRACEFD=$control_fd: control state is removed" \
+    "BASH_XTRACEFD leaked" "$(cat "$error")"
+  if [[ $control_fd == 2 ]]; then
+    _assert_contains "$kind $mode BASH_XTRACEFD=2: stderr remains writable" \
+      "agentguard-stderr-preserved" "$(cat "$error")"
+  else
+    _assert_eq "$kind $mode BASH_XTRACEFD=8: shared read offset is preserved" \
+      "second" "$(cat "$capture" 2>/dev/null)"
+    _assert_contains "$kind $mode BASH_XTRACEFD=8: read-write mode is preserved" \
+      "third" "$(cat "$input")"
+  fi
+}
+
+for control_kind in hook classifier; do
+  for control_mode in clean dirty; do
+    for control_fd in 2 8; do
+      _run_xtracefd_entry "$control_kind" "$control_mode" "$control_fd"
+    done
+  done
+done
+
+set +e
+printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+  env 'BASH_FUNC_[%%=() { return 0; }' "$PRE_BASH" \
+    >"$TEST_TMPDIR/hook-bootstrap-function.out" 2>"$TEST_TMPDIR/hook-bootstrap-function.err"
+bootstrap_function_rc=$?
+set -e
+_assert_eq "pre-bash: bootstrap ignores imported comparison functions" \
+  "2" "$bootstrap_function_rc"
+
+relative_root="$TEST_TMPDIR/relative-home-root"
+relative_log="$TEST_TMPDIR/relative-home.log"
+mkdir -p "$relative_root/relative-home/.local/bin"
+cat >"$relative_root/relative-home/.local/bin/bash" <<EOF
+#!/bin/sh
+printf '%s\n' invoked >>"$relative_log"
+exit 0
+EOF
+chmod +x "$relative_root/relative-home/.local/bin/bash"
+set +e
+(
+  cd "$relative_root" || exit 1
+  printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+    HOME=relative-home "$PRE_BASH"
+) >"$TEST_TMPDIR/hook-relative-home.out" 2>"$TEST_TMPDIR/hook-relative-home.err"
+relative_home_rc=$?
+set -e
+_assert_eq "pre-bash: a relative HOME cannot select an interpreter" "2" "$relative_home_rc"
+_assert_file_missing "launcher: a relative HOME interpreter is never invoked" "$relative_log"
+
+marker_install="$TEST_TMPDIR/marker-install"
+raw_function='() { printf PWNED; }'
+mkdir -p "$marker_install"
+ln -s "$PRE_BASH" "$marker_install/agent-hook-pre-bash"
+cat >"$marker_install/agent-hook-pre-bash-work" <<'EOF'
+if [ -n "${AGENTGUARD_HOOK_BASH_REEXEC:-}" ] ||
+  [ -n "${AGENTGUARD_ENV_SCRUB_REEXEC:-}" ]; then
+  _hook_block "re-exec marker leaked into hook extensions"
+fi
+EOF
+set +e
+printf '%s' '{"tool_input":{"command":"true"}}' |
+  "$marker_install/agent-hook-pre-bash" \
+    >"$TEST_TMPDIR/hook-marker.out" 2>"$TEST_TMPDIR/hook-marker.err"
+marker_hook_rc=$?
+set -e
+_assert_eq "pre-bash: re-exec marker is cleared before extensions" "0" "$marker_hook_rc"
+_assert_not_contains "pre-bash: extensions do not inherit the re-exec marker" \
+  "marker leaked" "$(cat "$TEST_TMPDIR/hook-marker.err")"
+
+# Caller-provided legacy and internal marker names are untrusted input. The
+# scrub removes them with the raw function entry instead of letting them
+# control re-entry or force an unbounded loop.
+set +e
+printf '%s' '{"tool_input":{"command":"true"}}' |
+  env "BASH_FUNC_agentguard_persistent_function%%=$raw_function" \
+    AGENTGUARD_ENV_SCRUB_REEXEC=1 \
+    _AGENTGUARD_BASH_ENTRY=agentguard-modern-bash-v2 \
+    _AGENTGUARD_ENV_CLEAN=agentguard-environment-scrub-v2 \
+    /bin/bash --noprofile --norc -p "$PRE_BASH" \
+    >"$TEST_TMPDIR/hook-persistent-function.out" \
+    2>"$TEST_TMPDIR/hook-persistent-function.err"
+persistent_hook_rc=$?
+env "BASH_FUNC_agentguard_persistent_function%%=$raw_function" \
+  AGENTGUARD_ENV_SCRUB_REEXEC=1 \
+  _AGENTGUARD_BASH_ENTRY=agentguard-modern-bash-v2 \
+  _AGENTGUARD_ENV_CLEAN=agentguard-environment-scrub-v2 \
+  /bin/bash --noprofile --norc -p "$CLASSIFY_COMMAND" --json -- 'printf ok' \
+  >"$TEST_TMPDIR/classifier-persistent-function.out" \
+  2>"$TEST_TMPDIR/classifier-persistent-function.err"
+persistent_classifier_rc=$?
+set -e
+_assert_eq "pre-bash: spoofed scrub state cannot prevent a safe scrub" "0" \
+  "$persistent_hook_rc"
+_assert_eq "classifier: spoofed scrub state cannot prevent a safe scrub" "0" \
+  "$persistent_classifier_rc"
+_assert_eq "classifier: scrubbed legacy state preserves classification" "printf" \
+  "$(jq -r '.commands[0].basename' "$TEST_TMPDIR/classifier-persistent-function.out")"
+
+# Caller-exported trusted-marker names must not retain their export attribute
+# across the trusted child assignment, and both clean and dirty environments
+# must converge without recursion.
+for spoof_marker in _AGENTGUARD_BASH_ENTRY _AGENTGUARD_ENV_CLEAN; do
+  for spoof_mode in clean dirty; do
+    spoof_output="$TEST_TMPDIR/classifier-spoof-$spoof_marker-$spoof_mode.out"
+    spoof_error="$TEST_TMPDIR/classifier-spoof-$spoof_marker-$spoof_mode.err"
+    spoof_env=(env -i HOME="$HOME" PATH="$PATH" "$spoof_marker=caller")
+    if [[ $spoof_mode == dirty ]]; then
+      spoof_env+=("BASH_FUNC_agentguard_spoof_marker%%=$raw_function")
+    fi
+    set +e
+    _with_timeout 5 "${spoof_env[@]}" \
+      "$CLASSIFY_COMMAND" --json -- 'printf ok' \
+      >"$spoof_output" 2>"$spoof_error"
+    spoof_rc=$?
+    set -e
+    _assert_eq "classifier: $spoof_mode caller $spoof_marker terminates" \
+      "0" "$spoof_rc"
+    _assert_eq "classifier: $spoof_mode caller $spoof_marker preserves classification" \
+      "printf" "$(jq -r '.commands[0].basename' "$spoof_output" 2>/dev/null)"
+  done
+done
+
+# A truncated environment stream must fail closed even when the caller exports
+# protocol scratch names. Remove the producer sentinel to exercise the receiver
+# independently of the normal producer's guaranteed final record.
+truncated_install="$TEST_TMPDIR/truncated-environment-install"
+_install_hook_fixture "$truncated_install" agentguard-classify-command
+truncated_classifier="$truncated_install/bin/agentguard-classify-command"
+sed '/^[[:space:]]*printf .*agentguard-environment-end-v2$/d' \
+  "$truncated_classifier" >"$truncated_classifier.tmp"
+command cat "$truncated_classifier.tmp" >"$truncated_classifier"
+rm -f "$truncated_classifier.tmp"
+set +e
+_with_timeout 5 env -i HOME="$HOME" PATH="$PATH" \
+  _agentguard_complete=1 \
+  _agentguard_name=_AGENTGUARD_BASH_ENTRY \
+  'BASH_FUNC_agentguard_truncated_stream%%=() { :; }' \
+  "$truncated_classifier" --json -- 'printf ok' \
+  >"$TEST_TMPDIR/classifier-truncated-environment.out" \
+  2>"$TEST_TMPDIR/classifier-truncated-environment.err"
+truncated_environment_rc=$?
+set -e
+_assert_eq "classifier: caller scratch cannot complete a truncated environment" \
+  "2" "$truncated_environment_rc"
+_assert_eq "classifier: truncated environment emits no classification" "" \
+  "$(cat "$TEST_TMPDIR/classifier-truncated-environment.out")"
+_assert_contains "classifier: truncated environment failure is actionable" \
+  "cannot rebuild a safe environment" \
+  "$(cat "$TEST_TMPDIR/classifier-truncated-environment.err")"
+
+no_modern_hook="$TEST_TMPDIR/agent-hook-pre-bash-no-modern"
+no_modern_classifier="$TEST_TMPDIR/agentguard-classify-command-no-modern"
+# shellcheck disable=SC2016 # The single quotes preserve the literal variable name.
+sed 's#/opt/homebrew/bin/bash /usr/local/bin/bash /bin/bash /usr/bin/bash#/definitely-missing-homebrew-bash /definitely-missing-local-bash /definitely-missing-bin-bash /definitely-missing-usr-bin-bash#' \
+  "$PRE_BASH" >"$no_modern_hook"
+# shellcheck disable=SC2016 # The single quotes preserve the literal variable name.
+sed 's#/opt/homebrew/bin/bash /usr/local/bin/bash /bin/bash /usr/bin/bash#/definitely-missing-homebrew-bash /definitely-missing-local-bash /definitely-missing-bin-bash /definitely-missing-usr-bin-bash#' \
+  "$CLASSIFY_COMMAND" >"$no_modern_classifier"
+chmod +x "$no_modern_hook" "$no_modern_classifier"
+set +e
+printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+  HOME=relative-home /bin/bash --noprofile --norc -p "$no_modern_hook" \
+    >"$TEST_TMPDIR/hook-no-modern.out" 2>"$TEST_TMPDIR/hook-no-modern.err"
+no_modern_hook_rc=$?
+HOME=relative-home /bin/bash --noprofile --norc -p \
+  "$no_modern_classifier" --json -- 'rm -rf /' \
+  >"$TEST_TMPDIR/classifier-no-modern.out" 2>"$TEST_TMPDIR/classifier-no-modern.err"
+no_modern_classifier_rc=$?
+set -e
+_assert_eq "pre-bash: no modern Bash blocks execution" "2" "$no_modern_hook_rc"
+_assert_contains "pre-bash: no modern Bash failure is actionable" "Bash 4 or newer" \
+  "$(cat "$TEST_TMPDIR/hook-no-modern.err")"
+_assert_eq "classifier: no modern Bash is a usage failure" "2" "$no_modern_classifier_rc"
+_assert_contains "classifier: no modern Bash failure is actionable" "Bash 4 or newer" \
+  "$(cat "$TEST_TMPDIR/classifier-no-modern.err")"
+
+echo ""
+echo "=== fixed bootstrap tool failures ==="
+
+_run_missing_tool_entry() {
+  local source="$1" old_path="$2" label="$3" kind="$4"
+  local install="$TEST_TMPDIR/missing-$label-$kind" entry output error rc
+  mkdir -p "$install"
+  entry="$install/$(basename "$source")"
+  sed "s#$old_path#$install/definitely-missing#g" "$source" >"$entry"
+  chmod +x "$entry"
+  output="$install/output"
+  error="$install/error"
+  set +e
+  # Some /bin/sh implementations discard Bash's exported-function encoding.
+  # Enter through privileged Bash so every platform exercises the scrub path.
+  if [ "$kind" = hook ]; then
+    printf '%s' '{"tool_input":{"command":"true"}}' |
+      env "BASH_FUNC_agentguard_missing_tool%%=$raw_function" \
+        /bin/bash --noprofile --norc -p "$entry" \
+        >"$output" 2>"$error"
+  else
+    env "BASH_FUNC_agentguard_missing_tool%%=$raw_function" \
+      /bin/bash --noprofile --norc -p "$entry" \
+      --json -- 'printf ok' >"$output" 2>"$error"
+  fi
+  rc=$?
+  set -e
+  _assert_eq "$kind: missing $label exits with blocking status" "2" "$rc"
+  _assert_contains "$kind: missing $label is actionable" "refusing unguarded execution" \
+    "$(cat "$error")"
+  _assert_eq "$kind: missing $label emits no allow response" "" "$(cat "$output")"
+}
+
+for entry_kind in hook classifier; do
+  if [ "$entry_kind" = hook ]; then
+    fixed_tool_entry="$PRE_BASH"
+  else
+    fixed_tool_entry="$CLASSIFY_COMMAND"
+  fi
+  _run_missing_tool_entry "$fixed_tool_entry" /usr/bin/awk awk "$entry_kind"
+  _run_missing_tool_entry "$fixed_tool_entry" /bin/bash bash "$entry_kind"
+  _run_missing_tool_entry "$fixed_tool_entry" /usr/bin/env env "$entry_kind"
+done
+
+# The inspector protocol distinguishes a clean scan from every tool failure or
+# malformed response. Exit 1 cannot double as the clean result.
+malformed_awk="$TEST_TMPDIR/malformed-awk"
+cat >"$malformed_awk" <<'EOF'
+#!/bin/sh
+printf '%s\n' agentguard-environment-unknown-v1
+exit 0
+EOF
+chmod +x "$malformed_awk"
+for inspector_kind in hook classifier; do
+  if [ "$inspector_kind" = hook ]; then
+    inspector_source="$PRE_BASH"
+  else
+    inspector_source="$CLASSIFY_COMMAND"
+  fi
+  for inspector_case in false malformed; do
+    inspector_install="$TEST_TMPDIR/inspector-$inspector_kind-$inspector_case"
+    mkdir -p "$inspector_install"
+    inspector_entry="$inspector_install/$(basename "$inspector_source")"
+    if [ "$inspector_case" = false ]; then
+      inspector_replacement=/bin/false
+    else
+      inspector_replacement="$malformed_awk"
+    fi
+    sed "s#/usr/bin/awk#$inspector_replacement#g" "$inspector_source" >"$inspector_entry"
+    chmod +x "$inspector_entry"
+    set +e
+    if [ "$inspector_kind" = hook ]; then
+      printf '%s' '{"tool_input":{"command":"true"}}' |
+        env "BASH_FUNC_agentguard_inspector%%=() { :; }" \
+          "$inspector_entry" >"$inspector_install/out" 2>"$inspector_install/err"
+    else
+      env "BASH_FUNC_agentguard_inspector%%=() { :; }" \
+        "$inspector_entry" --json -- true \
+        >"$inspector_install/out" 2>"$inspector_install/err"
+    fi
+    inspector_rc=$?
+    set -e
+    _assert_eq "$inspector_kind: $inspector_case inspector response fails closed" \
+      "2" "$inspector_rc"
+    _assert_contains "$inspector_kind: $inspector_case inspector failure is actionable" \
+      "cannot inspect the environment" "$(cat "$inspector_install/err")"
+    _assert_eq "$inspector_kind: $inspector_case inspector emits no allow response" \
+      "" "$(cat "$inspector_install/out")"
+  done
+done
+
+namespace_mode=""
+if command -v unshare >/dev/null 2>&1 && command -v mount >/dev/null 2>&1; then
+  if unshare -Urnm sh -c 'mount --make-rprivate /' >/dev/null 2>&1; then
+    namespace_mode=-Urnm
+  elif [ "$(id -u)" -eq 0 ] && unshare -mn sh -c 'mount --make-rprivate /' >/dev/null 2>&1; then
+    namespace_mode=-mn
+  fi
+fi
+
+if [ -n "$namespace_mode" ]; then
+  nonexec_tool="$TEST_TMPDIR/nonexec-fixed-tool"
+  printf '#!/bin/sh\nexit 0\n' >"$nonexec_tool"
+  chmod 0644 "$nonexec_tool"
+  failing_tool="$TEST_TMPDIR/failing-fixed-tool"
+  printf '#!/bin/sh\nexit 2\n' >"$failing_tool"
+  chmod +x "$failing_tool"
+
+  _run_namespace_entry() {
+    local fixed_path="$1" replacement="$2" kind="$3" expected_message="$4"
+    local input_file
+    input_file="$TEST_TMPDIR/namespace-$kind-$(basename "$fixed_path").input"
+    local output="$input_file.out" error="$input_file.err" remaining rc input_fd
+    if [ "$kind" = hook ]; then
+      printf '%s\n' '{"tool_input":{"command":"true"}}' >"$input_file"
+    else
+      printf '%s\n' 'printf ok' >"$input_file"
+    fi
+    exec {input_fd}<"$input_file"
+    set +e
+    # shellcheck disable=SC2016 # The isolated shell expands its positional arguments.
+    env "BASH_FUNC_agentguard_namespace_tool%%=$raw_function" \
+      unshare "$namespace_mode" /bin/bash --noprofile --norc -p -c '
+        mount --make-rprivate /
+        mount --bind "$2" "$1"
+        shift 2
+        exec "$@"
+      ' namespace-tool "$fixed_path" "$replacement" \
+      "$([ "$kind" = hook ] && printf '%s' "$PRE_BASH" || printf '%s' "$CLASSIFY_COMMAND")" \
+      >"$output" 2>"$error" <&"$input_fd"
+    rc=$?
+    set -e
+    IFS= read -r remaining <&"$input_fd" || true
+    exec {input_fd}<&-
+    _assert_eq "$kind: unusable $fixed_path exits with blocking status" "2" "$rc"
+    _assert_contains "$kind: unusable $fixed_path is actionable" "$expected_message" \
+      "$(cat "$error")"
+    _assert_eq "$kind: unusable $fixed_path emits no allow response" "" "$(cat "$output")"
+    _assert_eq "$kind: unusable $fixed_path leaves stdin unread" "$(cat "$input_file")" \
+      "$remaining"
+  }
+
+  _run_success_only_fixed_tool() {
+    local source="$1" fixed_path="$2" kind="$3"
+    local install entry output error rc
+    install="$TEST_TMPDIR/success-only-$kind-$(basename "$fixed_path")"
+    entry="$install/$(basename "$source")"
+    output="$install/output"
+    error="$install/error"
+    mkdir -p "$install"
+    sed "s#$fixed_path#/bin/true#g" "$source" >"$entry"
+    chmod +x "$entry"
+    set +e
+    if [ "$kind" = hook ]; then
+      printf '%s' '{"tool_input":{"command":"true"}}' |
+        env "BASH_FUNC_agentguard_success_only%%=$raw_function" \
+          unshare "$namespace_mode" "$entry" >"$output" 2>"$error"
+    else
+      env "BASH_FUNC_agentguard_success_only%%=$raw_function" \
+        unshare "$namespace_mode" "$entry" --json -- 'printf ok' \
+        >"$output" 2>"$error"
+    fi
+    rc=$?
+    set -e
+    _assert_eq "$kind: success-only $fixed_path exits with blocking status" "2" "$rc"
+    _assert_contains "$kind: success-only $fixed_path is rejected" \
+      "refusing unguarded execution" "$(cat "$error")"
+    _assert_eq "$kind: success-only $fixed_path emits no allow response" "" \
+      "$(cat "$output")"
+  }
+
+  for entry_kind in hook classifier; do
+    _run_namespace_entry /usr/bin/awk "$failing_tool" "$entry_kind" \
+      "cannot inspect the environment"
+    _run_namespace_entry /usr/bin/env "$nonexec_tool" "$entry_kind" \
+      "cannot rebuild a safe environment"
+    if [ "$entry_kind" = hook ]; then
+      fixed_tool_entry="$PRE_BASH"
+    else
+      fixed_tool_entry="$CLASSIFY_COMMAND"
+    fi
+    _run_success_only_fixed_tool "$fixed_tool_entry" /usr/bin/env "$entry_kind"
+  done
+
+  namespace_descendant_install="$TEST_TMPDIR/namespace-descendant-install"
+  namespace_descendant_marker="$TEST_TMPDIR/namespace-descendant.marker"
+  mkdir -p "$namespace_descendant_install"
+  ln -s "$PRE_BASH" "$namespace_descendant_install/agent-hook-pre-bash"
+  cat >"$namespace_descendant_install/agent-hook-pre-bash-work" <<EOF
+if [ "\$(/bin/bash --noprofile --norc -c 'type -t agentguard_namespace_import')" = function ]; then
+  : >"$namespace_descendant_marker"
+fi
+EOF
+  set +e
+  # shellcheck disable=SC2016 # The isolated shell expands its positional arguments.
+  printf '%s' '{"tool_input":{"command":"true"}}' |
+    env "BASH_FUNC_agentguard_namespace_import%%=$raw_function" \
+      unshare "$namespace_mode" /bin/bash --noprofile --norc -p -c '
+      mount --make-rprivate /
+      mount --bind "$2" /usr/bin/awk
+      exec "$1"
+    ' namespace-descendant "$namespace_descendant_install/agent-hook-pre-bash" \
+      "$failing_tool" \
+      >"$TEST_TMPDIR/namespace-descendant.out" \
+      2>"$TEST_TMPDIR/namespace-descendant.err"
+  namespace_descendant_rc=$?
+  set -e
+  _assert_eq "pre-bash: awk failure blocks before extensions" "2" "$namespace_descendant_rc"
+  _assert_file_missing "pre-bash: awk failure cannot leak functions to descendant Bash" \
+    "$namespace_descendant_marker"
+else
+  echo "  SKIP: fixed-tool mount namespace tests require unshare and mount"
+fi
+
+_test_summary

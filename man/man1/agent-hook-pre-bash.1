@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-PRE-BASH 1 "2026-06-30" "agentguard" "User Commands"
+.TH AGENT-HOOK-PRE-BASH 1 "2026-07-23" "agentguard" "User Commands"
 .SH NAME
 agent-hook-pre-bash \- guard agent shell commands before execution
 .SH SYNOPSIS
@@ -15,6 +15,35 @@ The hook is agent-agnostic. Launchers identify the concrete runtime with
 .B AGENTGUARD_NAME
 and
 .BR AGENTGUARD_SESSION_ID .
+.PP
+Execute this file directly so the kernel honors its privileged
+.B /bin/bash -p
+shebang. Direct executable invocation through that shebang is the
+supported security boundary. Explicit interpreter invocation is outside this
+security boundary:
+Bash may process caller-controlled
+.B BASH_ENV
+code that changes or forges behavior before the script's first instruction.
+No code in the script can undo or reliably detect those earlier effects.
+Rejection of an otherwise ordinary, detectable explicit invocation is
+best-effort only, not a security guarantee. When Bash 4 or newer is required,
+the launcher considers only
+.BR /opt/homebrew/bin/bash ,
+.BR /usr/local/bin/bash ,
+.BR /bin/bash ,
+and
+.BR /usr/bin/bash ,
+in that order. Caller-controlled
+.B HOME
+and
+.B PATH
+cannot add interpreter candidates. These fixed interpreter paths, together
+with the platform
+.BR /bin/bash ,
+.BR /usr/bin/awk ,
+and
+.BR /usr/bin/env ,
+form the launcher filesystem trust boundary.
 .SH EXTENSIONS
 After base policy runs, AgentGuard sources matching extension files through
 its hook helper API. Extensions can add warnings, blocks, or context while the
@@ -25,7 +54,9 @@ base hook keeps ownership of the protocol response.
 The command is allowed, possibly with warnings or reminders.
 .TP
 .B 2
-The command is blocked.
+The command is blocked, or launcher initialization failed closed because its
+interpreter, inspection tools, bootstrap protocol, or private descriptors were
+unavailable or invalid.
 .SH SEE ALSO
 .BR agentguard-classify-command (1),
 .BR agent-hook-post-bash (1)

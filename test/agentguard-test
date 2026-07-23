@@ -29,6 +29,7 @@ runtime_shell_files=(
   "$root/lib/agentguard/hook-helpers.sh"
   "$root/share/agentguard/shell.sh"
   "$root/support/script-resolver.sh.template"
+  "$root/support/secure-launcher.sh.template"
   "$root/support/sync-hook-bootstrap"
 )
 

@@ -12,12 +12,45 @@ AGENTGUARD_ROOT="${AGENTGUARD_TEST_DIR%/test}"
 
 echo "=== generated hook bootstrap ==="
 
+read_text_fixture() {
+  local path="$1" captured
+  if captured=$(
+    command cat "$path" || exit $?
+    printf x
+  ); then
+    text_fixture_contents=${captured%?}
+    return 0
+  fi
+  printf '%s\n' "cannot read test fixture: $path" >&2
+  return 2
+}
+
+text_fixtures_equal() {
+  local left_contents right_contents
+  if ! read_text_fixture "$1"; then
+    return 2
+  fi
+  left_contents=$text_fixture_contents
+  if ! read_text_fixture "$2"; then
+    return 2
+  fi
+  right_contents=$text_fixture_contents
+  [[ "$left_contents" == "$right_contents" ]]
+}
+
 fixture="$(_tmpdir)"
-mkdir -p "$fixture/bin" "$fixture/support"
+mkdir -p "$fixture/bin" "$fixture/lib/agentguard" "$fixture/support"
 cp "$AGENTGUARD_ROOT/support/sync-hook-bootstrap" "$fixture/support/"
 cp "$AGENTGUARD_ROOT/support/script-resolver.sh.template" "$fixture/support/"
+cp "$AGENTGUARD_ROOT/support/secure-launcher.sh.template" "$fixture/support/"
 cp "$AGENTGUARD_ROOT/bin/agent-hook-stop" "$fixture/bin/"
-printf '%s\n' 'hook bin/agent-hook-stop' >"$fixture/support/launcher-bootstrap.manifest"
+cp "$AGENTGUARD_ROOT/bin/agent-hook-pre-bash" "$fixture/bin/"
+cp "$AGENTGUARD_ROOT/bin/agentguard-classify-command" "$fixture/bin/"
+printf '%s\n' \
+  'hook bin/agent-hook-stop' \
+  'secure-hook bin/agent-hook-pre-bash' \
+  'secure-classifier bin/agentguard-classify-command' \
+  >"$fixture/support/launcher-bootstrap.manifest"
 
 "$fixture/support/sync-hook-bootstrap" --check
 _assert_exit "bootstrap sync: canonical hook passes drift check" 0 "$?"
@@ -38,6 +71,22 @@ _assert_exit "bootstrap sync: regeneration is idempotent" 0 "$?"
 _assert_not_contains "bootstrap sync: regeneration removes drift" \
   "deliberate test drift" "$(cat "$fixture/bin/agent-hook-stop")"
 
+indented="$fixture/agent-hook-stop.indented"
+awk '
+  /^# BEGIN GENERATED LAUNCHER BOOTSTRAP$/ { nested = 1 }
+  nested {
+    if ($0 == "") print
+    else print "    " $0
+    if ($0 == "# END GENERATED LAUNCHER BOOTSTRAP") nested = 0
+    next
+  }
+  { print }
+' "$fixture/bin/agent-hook-stop" >"$indented"
+command cat "$indented" >"$fixture/bin/agent-hook-stop"
+"$fixture/support/sync-hook-bootstrap" --check >/dev/null 2>&1
+_assert_exit "bootstrap sync: indented generated block passes drift check" 0 "$?"
+cp "$AGENTGUARD_ROOT/bin/agent-hook-stop" "$fixture/bin/agent-hook-stop"
+
 launcher_without_newline=$(<"$fixture/bin/agent-hook-stop")
 printf '%s' "$launcher_without_newline" >"$fixture/bin/agent-hook-stop"
 "$fixture/support/sync-hook-bootstrap" --check >/dev/null 2>&1
@@ -56,5 +105,820 @@ _assert_exit "bootstrap sync: a missing block fails the check" 1 "$?"
 cp "$AGENTGUARD_ROOT/bin/agent-hook-stop" "$fixture/bin/agent-hook-new-event"
 "$fixture/support/sync-hook-bootstrap" --check >/dev/null 2>&1
 _assert_exit "bootstrap sync: an unlisted base hook fails the check" 1 "$?"
+
+secure_fixture="$(_tmpdir)"
+mkdir -p "$secure_fixture/bin" "$secure_fixture/lib/agentguard" \
+  "$secure_fixture/support"
+cp "$AGENTGUARD_ROOT/support/sync-hook-bootstrap" "$secure_fixture/support/"
+cp "$AGENTGUARD_ROOT/support/script-resolver.sh.template" "$secure_fixture/support/"
+cp "$AGENTGUARD_ROOT/support/secure-launcher.sh.template" "$secure_fixture/support/"
+cp "$AGENTGUARD_ROOT/bin/agent-hook-pre-bash" "$secure_fixture/bin/"
+cp "$AGENTGUARD_ROOT/bin/agentguard-classify-command" "$secure_fixture/bin/"
+printf '%s\n' \
+  'secure-hook bin/agent-hook-pre-bash' \
+  'secure-classifier bin/agentguard-classify-command' \
+  >"$secure_fixture/support/launcher-bootstrap.manifest"
+
+"$secure_fixture/support/sync-hook-bootstrap" --check >/dev/null 2>&1
+_assert_exit "secure bootstrap sync: both generated entry points are canonical" 0 "$?"
+
+secure_drifted="$secure_fixture/agent-hook-pre-bash.drifted"
+awk '
+  { print }
+  /^# Generated secure launcher/ { print "# deliberate one-sided secure drift" }
+' "$secure_fixture/bin/agent-hook-pre-bash" >"$secure_drifted"
+command cat "$secure_drifted" >"$secure_fixture/bin/agent-hook-pre-bash"
+"$secure_fixture/support/sync-hook-bootstrap" --check >/dev/null 2>&1
+_assert_exit "secure bootstrap sync: one-sided launcher drift fails the check" 1 "$?"
+
+"$secure_fixture/support/sync-hook-bootstrap" >/dev/null
+"$secure_fixture/support/sync-hook-bootstrap" --check >/dev/null 2>&1
+_assert_exit "secure bootstrap sync: regeneration restores both entry points" 0 "$?"
+_assert_not_contains "secure bootstrap sync: regeneration removes one-sided drift" \
+  "deliberate one-sided secure drift" \
+  "$(cat "$secure_fixture/bin/agent-hook-pre-bash")"
+
+validation_bin="$secure_fixture/validation-bin"
+mkdir -p "$validation_bin"
+cat >"$validation_bin/mktemp" <<'EOF'
+#!/bin/sh
+: >"$AGENTGUARD_TEST_MKTEMP_MARKER"
+exec "$AGENTGUARD_TEST_REAL_MKTEMP" "$@"
+EOF
+chmod +x "$validation_bin/mktemp"
+real_cat=$(command -v cat)
+real_awk=$(command -v awk)
+real_mv=$(command -v mv)
+real_mktemp=$(command -v mktemp)
+minimal_bin="$secure_fixture/minimal-bin"
+mkdir -p "$minimal_bin"
+for required_tool in awk bash cat cp dirname mktemp mv rm; do
+  required_tool_path=$(command -v "$required_tool")
+  ln -s "$required_tool_path" "$minimal_bin/$required_tool"
+done
+missing_compare_tool=c
+missing_compare_tool+=mp
+if PATH="$minimal_bin" command -v "$missing_compare_tool" >/dev/null 2>&1; then
+  _fail "secure bootstrap sync: minimal generator PATH omits cmp"
+else
+  _pass "secure bootstrap sync: minimal generator PATH omits cmp"
+fi
+PATH="$minimal_bin" \
+  "$secure_fixture/support/sync-hook-bootstrap" --check >/dev/null 2>&1
+_assert_exit "secure bootstrap sync: canonical check works without cmp" 0 "$?"
+no_cmp_without_newline=$(<"$secure_fixture/bin/agent-hook-pre-bash")
+printf '%s' "$no_cmp_without_newline" \
+  >"$secure_fixture/bin/agent-hook-pre-bash"
+PATH="$minimal_bin" \
+  "$secure_fixture/support/sync-hook-bootstrap" --check >/dev/null 2>&1
+_assert_exit "secure bootstrap sync: newline-only drift is detected without cmp" \
+  1 "$?"
+no_cmp_update_output=$(
+  PATH="$minimal_bin" "$secure_fixture/support/sync-hook-bootstrap"
+)
+_assert_eq "secure bootstrap sync: write mode repairs drift without cmp" \
+  "updated: bin/agent-hook-pre-bash" "$no_cmp_update_output"
+PATH="$minimal_bin" \
+  "$secure_fixture/support/sync-hook-bootstrap" --check >/dev/null 2>&1
+_assert_exit "secure bootstrap sync: repaired launcher is canonical without cmp" 0 "$?"
+
+producer_failure_bin="$secure_fixture/producer-failure-bin"
+mkdir -p "$producer_failure_bin"
+cat >"$producer_failure_bin/cat" <<'EOF'
+#!/bin/sh
+if [ "${AGENTGUARD_TEST_FAILURE_MODE:-}" = resolver-cat ]; then
+  case "${1:-}" in
+    */support/script-resolver.sh.template)
+      : >"$AGENTGUARD_TEST_FAILURE_MARKER"
+      exit 72
+      ;;
+  esac
+fi
+if [ "${AGENTGUARD_TEST_FAILURE_MODE:-}" = comparison-cat ]; then
+  case "${1:-}" in
+    */agentguard-sync.*/launcher.0)
+      : >"$AGENTGUARD_TEST_FAILURE_MARKER"
+      exit 72
+      ;;
+  esac
+fi
+exec "$AGENTGUARD_TEST_REAL_CAT" "$@"
+EOF
+cat >"$producer_failure_bin/awk" <<'EOF'
+#!/bin/sh
+secure_part=false
+inventory_scan=false
+inventory_target=false
+for argument in "$@"; do
+  case "$argument" in
+    part=PROLOGUE) secure_part=true ;;
+    *'BEGIN GENERATED (HOOK|LAUNCHER)'*) inventory_scan=true ;;
+    */bin/agentguard-classify-command) inventory_target=true ;;
+  esac
+done
+if [ "${AGENTGUARD_TEST_FAILURE_MODE:-}" = secure-awk ] && "$secure_part"; then
+  : >"$AGENTGUARD_TEST_FAILURE_MARKER"
+  exit 72
+fi
+if [ "${AGENTGUARD_TEST_FAILURE_MODE:-}" = inventory-awk ] &&
+  "$inventory_scan" && "$inventory_target"; then
+  : >"$AGENTGUARD_TEST_FAILURE_MARKER"
+  exit 72
+fi
+exec "$AGENTGUARD_TEST_REAL_AWK" "$@"
+EOF
+cat >"$producer_failure_bin/mv" <<'EOF'
+#!/bin/sh
+if [ "${AGENTGUARD_TEST_FAILURE_MODE:-}" = staging-mv ]; then
+  case "${1:-}" in
+    */generated.0.PROLOGUE)
+      : >"$AGENTGUARD_TEST_FAILURE_MARKER"
+      exit 72
+      ;;
+  esac
+fi
+exec "$AGENTGUARD_TEST_REAL_MV" "$@"
+EOF
+chmod +x "$producer_failure_bin/cat" "$producer_failure_bin/awk" \
+  "$producer_failure_bin/mv"
+
+check_mode_drifted="$secure_fixture/agent-hook-pre-bash.check-mode-drifted"
+awk '
+  { print }
+  /^[[:space:]]*# Generated by support\/sync-hook-bootstrap/ {
+    print "# check mode must never install this drift"
+  }
+' "$secure_fixture/bin/agent-hook-pre-bash" >"$check_mode_drifted"
+command cat "$check_mode_drifted" >"$secure_fixture/bin/agent-hook-pre-bash"
+check_mode_before="$secure_fixture/agent-hook-pre-bash.check-mode-before"
+cp "$secure_fixture/bin/agent-hook-pre-bash" "$check_mode_before"
+check_mode_tmp="$secure_fixture/tmp-check-mode"
+mkdir -p "$check_mode_tmp"
+PATH="$validation_bin:$PATH" \
+  TMPDIR="$check_mode_tmp" \
+  AGENTGUARD_TEST_REAL_MKTEMP="$real_mktemp" \
+  AGENTGUARD_TEST_MKTEMP_MARKER="$check_mode_tmp/mktemp-invoked" \
+  "$secure_fixture/support/sync-hook-bootstrap" --check \
+  >/dev/null 2>"$check_mode_tmp/stderr"
+check_mode_rc=$?
+_assert_exit "secure bootstrap sync: check mode reports drift" 1 "$check_mode_rc"
+_assert_contains "secure bootstrap sync: check mode names the drifted launcher" \
+  "out of date: bin/agent-hook-pre-bash" "$(cat "$check_mode_tmp/stderr")"
+if text_fixtures_equal \
+  "$check_mode_before" "$secure_fixture/bin/agent-hook-pre-bash"; then
+  _pass "secure bootstrap sync: check mode leaves launcher byte-identical"
+else
+  _fail "secure bootstrap sync: check mode leaves launcher byte-identical"
+fi
+check_mode_adjacent=$(find "$secure_fixture" -name '.agentguard-sync.*' -print)
+_assert_eq "secure bootstrap sync: check mode creates no adjacent install files" \
+  "" "$check_mode_adjacent"
+check_mode_artifacts=$(find "$check_mode_tmp" -name 'agentguard-*' -print)
+_assert_eq "secure bootstrap sync: check mode cleans staging" \
+  "" "$check_mode_artifacts"
+
+assert_secure_sync_failure() {
+  local label="$1" failure_tmp="$2" expected_diagnostic="$3"
+  local path_prefix="${4:-}" expect_mktemp="${5:-no}"
+  local failure_mode="${6:-}" sync_arg="${7:-}"
+  local rc hook_before classifier_before artifacts adjacent_artifacts
+  local stderr_file mktemp_marker failure_marker combined_path
+  local classifier_existed=false
+  hook_before="$secure_fixture/agent-hook-pre-bash.before"
+  classifier_before="$secure_fixture/agentguard-classify-command.before"
+  cp "$secure_fixture/bin/agent-hook-pre-bash" "$hook_before"
+  if [[ -f "$secure_fixture/bin/agentguard-classify-command" ]]; then
+    cp "$secure_fixture/bin/agentguard-classify-command" "$classifier_before"
+    classifier_existed=true
+  else
+    rm -f "$classifier_before"
+  fi
+  mkdir -p "$failure_tmp"
+  stderr_file="$failure_tmp/stderr"
+  mktemp_marker="$failure_tmp/mktemp-invoked"
+  failure_marker="$failure_tmp/injected-failure"
+  combined_path="${path_prefix:+$path_prefix:}$validation_bin:$PATH"
+
+  PATH="$combined_path" \
+    TMPDIR="$failure_tmp" \
+    AGENTGUARD_TEST_REAL_CAT="$real_cat" \
+    AGENTGUARD_TEST_REAL_AWK="$real_awk" \
+    AGENTGUARD_TEST_REAL_MV="$real_mv" \
+    AGENTGUARD_TEST_REAL_MKTEMP="$real_mktemp" \
+    AGENTGUARD_TEST_MKTEMP_MARKER="$mktemp_marker" \
+    AGENTGUARD_TEST_FAILURE_MARKER="$failure_marker" \
+    AGENTGUARD_TEST_CAT_COUNT="$failure_tmp/cat-count" \
+    AGENTGUARD_TEST_FAILURE_MODE="$failure_mode" \
+    "$secure_fixture/support/sync-hook-bootstrap" \
+    ${sync_arg:+"$sync_arg"} >/dev/null 2>"$stderr_file"
+  rc=$?
+  _assert_exit "secure bootstrap sync: $label fails" 1 "$rc"
+  _assert_contains "secure bootstrap sync: $label reports its cause" \
+    "$expected_diagnostic" "$(cat "$stderr_file")"
+  if text_fixtures_equal \
+    "$hook_before" "$secure_fixture/bin/agent-hook-pre-bash"; then
+    _pass "secure bootstrap sync: $label leaves hook byte-identical"
+  else
+    _fail "secure bootstrap sync: $label leaves hook byte-identical"
+  fi
+  if "$classifier_existed"; then
+    if text_fixtures_equal \
+      "$classifier_before" \
+      "$secure_fixture/bin/agentguard-classify-command"; then
+      _pass "secure bootstrap sync: $label leaves classifier byte-identical"
+    else
+      _fail "secure bootstrap sync: $label leaves classifier byte-identical"
+    fi
+  elif [[ ! -e "$secure_fixture/bin/agentguard-classify-command" ]]; then
+    _pass "secure bootstrap sync: $label leaves classifier missing"
+  else
+    _fail "secure bootstrap sync: $label leaves classifier missing"
+  fi
+  artifacts=$(find "$failure_tmp" -mindepth 1 -name 'agentguard-*' -print)
+  _assert_eq "secure bootstrap sync: $label leaves no temporary artifacts" \
+    "" "$artifacts"
+  adjacent_artifacts=$(
+    find "$secure_fixture" -name '.agentguard-sync.*' -print
+  )
+  _assert_eq "secure bootstrap sync: $label leaves no adjacent install files" \
+    "" "$adjacent_artifacts"
+  if [[ "$expect_mktemp" == yes ]]; then
+    _assert_file_exists "secure bootstrap sync: $label reaches staging" \
+      "$mktemp_marker"
+  else
+    _assert_file_missing "secure bootstrap sync: $label allocates no temporary files" \
+      "$mktemp_marker"
+  fi
+  if [[ -n "$path_prefix" ]]; then
+    _assert_file_exists "secure bootstrap sync: $label reaches injected failure" \
+      "$failure_marker"
+  fi
+}
+
+reset_secure_fixture() {
+  rm -rf "${secure_fixture:?}/bin"
+  mkdir -p "$secure_fixture/bin"
+  cp "$AGENTGUARD_ROOT/bin/agent-hook-pre-bash" "$secure_fixture/bin/"
+  cp "$AGENTGUARD_ROOT/bin/agentguard-classify-command" "$secure_fixture/bin/"
+  chmod +x "$secure_fixture/bin/agent-hook-pre-bash" \
+    "$secure_fixture/bin/agentguard-classify-command"
+  cp "$AGENTGUARD_ROOT/support/script-resolver.sh.template" \
+    "$secure_fixture/support/"
+  cp "$AGENTGUARD_ROOT/support/secure-launcher.sh.template" \
+    "$secure_fixture/support/"
+  printf '%s\n' \
+    'secure-hook bin/agent-hook-pre-bash' \
+    'secure-classifier bin/agentguard-classify-command' \
+    >"$secure_fixture/support/launcher-bootstrap.manifest"
+}
+
+for manifest_case in one-field extra-field invalid-kind invalid-path duplicate \
+  missing-launcher non-executable-launcher; do
+  reset_secure_fixture
+  case "$manifest_case" in
+    one-field)
+      expected_diagnostic="invalid manifest line 3: expected exactly two fields"
+      printf '%s\n' 'secure-hook' \
+        >>"$secure_fixture/support/launcher-bootstrap.manifest"
+      ;;
+    extra-field)
+      expected_diagnostic="invalid manifest line 3: expected exactly two fields"
+      printf '%s\n' 'hook bin/agent-hook-pre-bash unexpected' \
+        >>"$secure_fixture/support/launcher-bootstrap.manifest"
+      ;;
+    invalid-kind)
+      expected_diagnostic="invalid launcher kind on manifest line 1: unknown"
+      printf '%s\n' 'unknown bin/agent-hook-pre-bash' \
+        >"$secure_fixture/support/launcher-bootstrap.manifest"
+      ;;
+    invalid-path)
+      expected_diagnostic="unsafe launcher path on manifest line 1: ../bin/agent-hook-pre-bash"
+      printf '%s\n' 'hook ../bin/agent-hook-pre-bash' \
+        >"$secure_fixture/support/launcher-bootstrap.manifest"
+      ;;
+    duplicate)
+      expected_diagnostic="duplicate launcher path on manifest line 3: bin/agent-hook-pre-bash"
+      printf '%s\n' 'hook bin/agent-hook-pre-bash' \
+        >>"$secure_fixture/support/launcher-bootstrap.manifest"
+      ;;
+    missing-launcher)
+      expected_diagnostic="missing or non-executable launcher: bin/agentguard-classify-command"
+      rm -f "$secure_fixture/bin/agentguard-classify-command"
+      ;;
+    non-executable-launcher)
+      expected_diagnostic="missing or non-executable launcher: bin/agent-hook-pre-bash"
+      chmod -x "$secure_fixture/bin/agent-hook-pre-bash"
+      ;;
+  esac
+  assert_secure_sync_failure \
+    "$manifest_case manifest" "$secure_fixture/tmp-$manifest_case" \
+    "$expected_diagnostic"
+done
+
+reset_secure_fixture
+printf '%s\n' 'secure-hook bin/agent-hook-pre-bash' \
+  >"$secure_fixture/support/launcher-bootstrap.manifest"
+assert_secure_sync_failure \
+  "missing classifier inventory" "$secure_fixture/tmp-missing-classifier" \
+  "missing manifest entry: bin/agentguard-classify-command"
+
+reset_secure_fixture
+printf '%s\n' \
+  'hook bin/agent-hook-pre-bash' \
+  'secure-classifier bin/agentguard-classify-command' \
+  >"$secure_fixture/support/launcher-bootstrap.manifest"
+assert_secure_sync_failure \
+  "wrong pre-bash kind" "$secure_fixture/tmp-wrong-pre-bash-kind" \
+  "launcher kind mismatch for bin/agent-hook-pre-bash: expected secure-hook, found hook"
+
+reset_secure_fixture
+printf '%s\n' \
+  'secure-hook bin/agent-hook-pre-bash' \
+  'classifier bin/agentguard-classify-command' \
+  >"$secure_fixture/support/launcher-bootstrap.manifest"
+assert_secure_sync_failure \
+  "wrong classifier kind" "$secure_fixture/tmp-wrong-classifier-kind" \
+  "launcher kind mismatch for bin/agentguard-classify-command: expected secure-classifier, found classifier"
+
+reset_secure_fixture
+printf '%s\n' \
+  'secure-hook bin/agent-hook-pre-bash' \
+  'secure-classifier bin/agentguard-classify-commands' \
+  >"$secure_fixture/support/launcher-bootstrap.manifest"
+assert_secure_sync_failure \
+  "wrong classifier path" "$secure_fixture/tmp-wrong-classifier-path" \
+  "missing manifest entry: bin/agentguard-classify-command"
+
+reset_secure_fixture
+cp "$AGENTGUARD_ROOT/bin/claude-session-name" \
+  "$secure_fixture/bin/extra-launcher"
+printf '%s\n' 'hook bin/extra-launcher' \
+  >>"$secure_fixture/support/launcher-bootstrap.manifest"
+assert_secure_sync_failure \
+  "extra manifest entry" "$secure_fixture/tmp-extra-entry" \
+  "unexpected manifest launcher: bin/extra-launcher"
+
+reset_secure_fixture
+cp "$AGENTGUARD_ROOT/bin/agentguard-classify-command" \
+  "$secure_fixture/bin/generated-launcher"
+assert_secure_sync_failure \
+  "unlisted generated launcher" "$secure_fixture/tmp-unlisted-generated" \
+  "unlisted generated launcher: bin/generated-launcher"
+
+reset_secure_fixture
+assert_secure_sync_failure \
+  "generated inventory scan error" "$secure_fixture/tmp-inventory-awk" \
+  "cannot inspect generated launcher: bin/agentguard-classify-command" \
+  "$producer_failure_bin" no inventory-awk
+
+reset_secure_fixture
+printf '%s\n' 'secure-hook bin/agent-hook-pre-bash' \
+  >"$secure_fixture/support/launcher-bootstrap.manifest"
+printf '%s' 'secure-classifier bin/agentguard-classify-command' \
+  >>"$secure_fixture/support/launcher-bootstrap.manifest"
+non_lf_tmp="$secure_fixture/tmp-non-lf-classifier"
+mkdir -p "$non_lf_tmp"
+PATH="$validation_bin:$PATH" \
+  TMPDIR="$non_lf_tmp" \
+  AGENTGUARD_TEST_REAL_MKTEMP="$real_mktemp" \
+  AGENTGUARD_TEST_MKTEMP_MARKER="$non_lf_tmp/mktemp-invoked" \
+  "$secure_fixture/support/sync-hook-bootstrap" --check >/dev/null 2>&1
+_assert_exit "secure bootstrap sync: a final non-LF classifier is consumed" 0 "$?"
+_assert_file_exists "secure bootstrap sync: final non-LF classifier reaches staging" \
+  "$non_lf_tmp/mktemp-invoked"
+
+for marker_case in missing-template missing-marker duplicate-marker; do
+  reset_secure_fixture
+  case "$marker_case" in
+    missing-template)
+      expected_marker_diagnostic="missing secure launcher template:"
+      rm -f "$secure_fixture/support/secure-launcher.sh.template"
+      ;;
+    missing-marker)
+      expected_marker_diagnostic="requires exactly one application marker; found 0"
+      awk '$0 !~ /^[[:space:]]*# @APPLICATION@$/' \
+        "$AGENTGUARD_ROOT/support/secure-launcher.sh.template" \
+        >"$secure_fixture/support/secure-launcher.sh.template"
+      ;;
+    duplicate-marker)
+      expected_marker_diagnostic="requires exactly one application marker; found 2"
+      awk '{ print } /^[[:space:]]*# @APPLICATION@$/ { print }' \
+        "$AGENTGUARD_ROOT/support/secure-launcher.sh.template" \
+        >"$secure_fixture/support/secure-launcher.sh.template"
+      ;;
+  esac
+  assert_secure_sync_failure \
+    "$marker_case application marker" "$secure_fixture/tmp-$marker_case" \
+    "$expected_marker_diagnostic"
+done
+
+reset_secure_fixture
+secure_drifted="$secure_fixture/agent-hook-pre-bash.resolver-drifted"
+awk '
+  { print }
+  /^[[:space:]]*# Generated by support\/sync-hook-bootstrap/ {
+    print "# resolver validation must precede launcher repair"
+  }
+' "$secure_fixture/bin/agent-hook-pre-bash" >"$secure_drifted"
+command cat "$secure_drifted" >"$secure_fixture/bin/agent-hook-pre-bash"
+rm -f "$secure_fixture/support/script-resolver.sh.template"
+assert_secure_sync_failure \
+  "missing resolver with launcher drift" "$secure_fixture/tmp-missing-resolver" \
+  "missing resolver template:"
+
+reset_secure_fixture
+secure_drifted="$secure_fixture/agent-hook-pre-bash.late-failure-drifted"
+awk '
+  { print }
+  /^[[:space:]]*# Generated by support\/sync-hook-bootstrap/ {
+    print "# late generation failure must not install an earlier candidate"
+  }
+' "$secure_fixture/bin/agent-hook-pre-bash" >"$secure_drifted"
+command cat "$secure_drifted" >"$secure_fixture/bin/agent-hook-pre-bash"
+secure_drifted="$secure_fixture/agentguard-classify-command.incomplete"
+awk '
+  $0 == "    # END GENERATED LAUNCHER BOOTSTRAP" { next }
+  { print }
+' "$secure_fixture/bin/agentguard-classify-command" >"$secure_drifted"
+command cat "$secure_drifted" >"$secure_fixture/bin/agentguard-classify-command"
+assert_secure_sync_failure \
+  "late candidate generation error" "$secure_fixture/tmp-late-generation" \
+  "missing or incomplete generated block: bin/agentguard-classify-command" \
+  "" yes
+
+reset_secure_fixture
+assert_secure_sync_failure \
+  "resolver template producer error" "$secure_fixture/tmp-resolver-cat" \
+  "cannot generate resolver block: bin/agent-hook-pre-bash" \
+  "$producer_failure_bin" yes resolver-cat
+
+reset_secure_fixture
+assert_secure_sync_failure \
+  "secure template producer error" "$secure_fixture/tmp-secure-awk" \
+  "cannot generate secure launcher block: bin/agent-hook-pre-bash" \
+  "$producer_failure_bin" yes secure-awk
+
+for compare_mode in normal check; do
+  reset_secure_fixture
+  compare_arg=''
+  if [[ "$compare_mode" == check ]]; then
+    compare_arg=--check
+  fi
+  assert_secure_sync_failure \
+    "$compare_mode launcher comparison error" \
+    "$secure_fixture/tmp-$compare_mode-comparison" \
+    "cannot compare generated launcher: bin/agent-hook-pre-bash" \
+    "$producer_failure_bin" yes comparison-cat "$compare_arg"
+done
+
+reset_secure_fixture
+assert_secure_sync_failure \
+  "secure staging rename error" "$secure_fixture/tmp-staging-mv" \
+  "cannot stage generated launcher: bin/agent-hook-pre-bash" \
+  "$producer_failure_bin" yes staging-mv
+
+signal_failure_bin="$secure_fixture/signal-failure-bin"
+mkdir -p "$signal_failure_bin"
+cat >"$signal_failure_bin/cat" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  */agentguard-sync.*/launcher.1)
+    count=0
+    if [ -f "$AGENTGUARD_TEST_SIGNAL_CAT_COUNT" ]; then
+      count=$("$AGENTGUARD_TEST_REAL_CAT" "$AGENTGUARD_TEST_SIGNAL_CAT_COUNT")
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$AGENTGUARD_TEST_SIGNAL_CAT_COUNT"
+    if [ "$count" -ne 2 ]; then
+      exec "$AGENTGUARD_TEST_REAL_CAT" "$@"
+    fi
+    printf '%s\n' "$$" >"$AGENTGUARD_TEST_SIGNAL_CHILD"
+    : >"$AGENTGUARD_TEST_SIGNAL_READY"
+    if [ "$AGENTGUARD_TEST_SIGNAL" = EXIT ]; then
+      while [ ! -f "$AGENTGUARD_TEST_SIGNAL_RELEASE" ]; do
+        sleep 0.01
+      done
+      exit 1
+    fi
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    while :; do
+      sleep 1
+    done
+    ;;
+esac
+exec "$AGENTGUARD_TEST_REAL_CAT" "$@"
+EOF
+chmod +x "$signal_failure_bin/cat"
+cat >"$signal_failure_bin/run-with-signals.py" <<'PY'
+#!/usr/bin/env python3
+import signal
+import subprocess
+import sys
+
+
+def reset_signals():
+    for handled_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        signal.signal(handled_signal, signal.SIG_DFL)
+
+
+pid_file, command = sys.argv[1], sys.argv[2:]
+process = subprocess.Popen(command, preexec_fn=reset_signals)
+with open(pid_file, "w", encoding="ascii") as handle:
+    handle.write(f"{process.pid}\n")
+returncode = process.wait()
+if returncode < 0:
+    returncode = 128 - returncode
+sys.exit(returncode)
+PY
+chmod +x "$signal_failure_bin/run-with-signals.py"
+
+for cleanup_signal in EXIT HUP INT TERM; do
+  reset_secure_fixture
+  signal_drifted="$secure_fixture/agent-hook-pre-bash.signal-drifted"
+  awk '
+    { print }
+    /^[[:space:]]*# Generated by support\/sync-hook-bootstrap/ {
+      print "# signal cleanup must preserve this old hook"
+    }
+  ' "$secure_fixture/bin/agent-hook-pre-bash" >"$signal_drifted"
+  command cat "$signal_drifted" >"$secure_fixture/bin/agent-hook-pre-bash"
+  signal_drifted="$secure_fixture/agentguard-classify-command.signal-drifted"
+  awk '
+    { print }
+    /^[[:space:]]*# Generated by support\/sync-hook-bootstrap/ {
+      print "# signal cleanup must preserve this old classifier"
+    }
+  ' "$secure_fixture/bin/agentguard-classify-command" >"$signal_drifted"
+  command cat "$signal_drifted" \
+    >"$secure_fixture/bin/agentguard-classify-command"
+  signal_hook_before="$secure_fixture/agent-hook-pre-bash.signal-before"
+  signal_classifier_before="$secure_fixture/agentguard-classify-command.signal-before"
+  cp "$secure_fixture/bin/agent-hook-pre-bash" "$signal_hook_before"
+  cp "$secure_fixture/bin/agentguard-classify-command" "$signal_classifier_before"
+  signal_tmp="$secure_fixture/tmp-signal-$cleanup_signal"
+  mkdir -p "$signal_tmp"
+  signal_ready="$signal_tmp/ready"
+  signal_child_file="$signal_tmp/child-pid"
+  signal_generator_file="$signal_tmp/generator-pid"
+  signal_release="$signal_tmp/release"
+  signal_cat_count="$signal_tmp/cat-count"
+  signal_mktemp_marker="$signal_tmp/mktemp-invoked"
+  PATH="$signal_failure_bin:$validation_bin:$PATH" \
+    TMPDIR="$signal_tmp" \
+    AGENTGUARD_TEST_REAL_CAT="$real_cat" \
+    AGENTGUARD_TEST_REAL_MKTEMP="$real_mktemp" \
+    AGENTGUARD_TEST_MKTEMP_MARKER="$signal_mktemp_marker" \
+    AGENTGUARD_TEST_SIGNAL="$cleanup_signal" \
+    AGENTGUARD_TEST_SIGNAL_READY="$signal_ready" \
+    AGENTGUARD_TEST_SIGNAL_CHILD="$signal_child_file" \
+    AGENTGUARD_TEST_SIGNAL_RELEASE="$signal_release" \
+    AGENTGUARD_TEST_SIGNAL_CAT_COUNT="$signal_cat_count" \
+    "$signal_failure_bin/run-with-signals.py" "$signal_generator_file" \
+    "$secure_fixture/support/sync-hook-bootstrap" \
+    >/dev/null 2>"$signal_tmp/stderr" &
+  signal_supervisor_pid=$!
+  signal_waits=0
+  while [[ ! -f "$signal_ready" ]] &&
+    kill -0 "$signal_supervisor_pid" 2>/dev/null; do
+    sleep 0.01
+    signal_waits=$((signal_waits + 1))
+    if [[ "$signal_waits" -ge 500 ]]; then
+      break
+    fi
+  done
+  _assert_file_exists "secure bootstrap sync: $cleanup_signal cleanup reaches staging" \
+    "$signal_ready"
+  signal_adjacent_before=$(find "$secure_fixture/bin" -name '.agentguard-sync.*' -print | wc -l)
+  _assert_eq "secure bootstrap sync: $cleanup_signal cleanup reaches adjacent installs" \
+    2 "${signal_adjacent_before//[[:space:]]/}"
+  if [[ "$cleanup_signal" == EXIT ]]; then
+    : >"$signal_release"
+  else
+    signal_generator=$(cat "$signal_generator_file")
+    signal_child=$(cat "$signal_child_file")
+    kill -s "$cleanup_signal" "$signal_generator"
+    kill -s "$cleanup_signal" "$signal_child" 2>/dev/null || :
+  fi
+  wait "$signal_supervisor_pid"
+  signal_rc=$?
+  case "$cleanup_signal" in
+    EXIT) expected_signal_rc=1 ;;
+    HUP) expected_signal_rc=129 ;;
+    INT) expected_signal_rc=130 ;;
+    TERM) expected_signal_rc=143 ;;
+  esac
+  _assert_exit "secure bootstrap sync: $cleanup_signal cleanup preserves status" \
+    "$expected_signal_rc" "$signal_rc"
+  signal_artifacts=$(find "$signal_tmp" -name 'agentguard-*' -print)
+  _assert_eq "secure bootstrap sync: $cleanup_signal cleanup removes staging" \
+    "" "$signal_artifacts"
+  signal_adjacent=$(find "$secure_fixture" -name '.agentguard-sync.*' -print)
+  _assert_eq "secure bootstrap sync: $cleanup_signal cleanup removes install files" \
+    "" "$signal_adjacent"
+  if text_fixtures_equal \
+    "$signal_hook_before" "$secure_fixture/bin/agent-hook-pre-bash" &&
+    text_fixtures_equal \
+      "$signal_classifier_before" \
+      "$secure_fixture/bin/agentguard-classify-command"; then
+    _pass "secure bootstrap sync: $cleanup_signal cleanup installs no candidates"
+  else
+    _fail "secure bootstrap sync: $cleanup_signal cleanup installs no candidates"
+  fi
+done
+
+install_failure_bin="$secure_fixture/install-failure-bin"
+mkdir -p "$install_failure_bin"
+cat >"$install_failure_bin/cat" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+  */agentguard-sync.*/launcher.1)
+    count=0
+    if [ -f "$AGENTGUARD_TEST_CAT_COUNT" ]; then
+      count=$("$AGENTGUARD_TEST_REAL_CAT" "$AGENTGUARD_TEST_CAT_COUNT")
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$AGENTGUARD_TEST_CAT_COUNT"
+    if [ "$count" -eq 2 ]; then
+      : >"$AGENTGUARD_TEST_FAILURE_MARKER"
+      exit 1
+    fi
+    ;;
+esac
+exec "$AGENTGUARD_TEST_REAL_CAT" "$@"
+EOF
+chmod +x "$install_failure_bin/cat"
+
+reset_secure_fixture
+secure_drifted="$secure_fixture/agent-hook-pre-bash.install-write-drifted"
+awk '
+  { print }
+  /^[[:space:]]*# Generated by support\/sync-hook-bootstrap/ {
+    print "# failed install writes must leave the old launcher intact"
+  }
+' "$secure_fixture/bin/agent-hook-pre-bash" >"$secure_drifted"
+command cat "$secure_drifted" >"$secure_fixture/bin/agent-hook-pre-bash"
+secure_drifted="$secure_fixture/agentguard-classify-command.install-write-drifted"
+awk '
+  { print }
+  /^[[:space:]]*# Generated by support\/sync-hook-bootstrap/ {
+    print "# a late install write failure must preserve every old launcher"
+  }
+' "$secure_fixture/bin/agentguard-classify-command" >"$secure_drifted"
+command cat "$secure_drifted" \
+  >"$secure_fixture/bin/agentguard-classify-command"
+assert_secure_sync_failure \
+  "install content write error" "$secure_fixture/tmp-install-write" \
+  "cannot prepare launcher update: bin/agentguard-classify-command" \
+  "$install_failure_bin" yes
+rm -f "$install_failure_bin/cat"
+
+cat >"$install_failure_bin/mv" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "-f" ]; then
+  shift
+fi
+case "${1:-}" in
+  */.agentguard-sync.*)
+    count=0
+    if [ -f "$AGENTGUARD_TEST_MV_COUNT" ]; then
+      count=$("$AGENTGUARD_TEST_REAL_CAT" "$AGENTGUARD_TEST_MV_COUNT")
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$AGENTGUARD_TEST_MV_COUNT"
+    : >"$AGENTGUARD_TEST_FAILURE_MARKER"
+    if [ "$count" -eq 2 ]; then
+      exit 1
+    fi
+    ;;
+esac
+exec "$AGENTGUARD_TEST_REAL_MV" "$@"
+EOF
+chmod +x "$install_failure_bin/mv"
+
+reset_secure_fixture
+secure_drifted="$secure_fixture/agent-hook-pre-bash.install-rename-drifted"
+awk '
+  { print }
+  /^[[:space:]]*# Generated by support\/sync-hook-bootstrap/ {
+    print "# failed install renames must leave the old launcher intact"
+  }
+' "$secure_fixture/bin/agent-hook-pre-bash" >"$secure_drifted"
+command cat "$secure_drifted" >"$secure_fixture/bin/agent-hook-pre-bash"
+secure_drifted="$secure_fixture/agentguard-classify-command.install-rename-drifted"
+awk '
+  { print }
+  /^[[:space:]]*# Generated by support\/sync-hook-bootstrap/ {
+    print "# a second rename failure leaves only complete old or new launchers"
+  }
+' "$secure_fixture/bin/agentguard-classify-command" >"$secure_drifted"
+command cat "$secure_drifted" \
+  >"$secure_fixture/bin/agentguard-classify-command"
+rename_hook_before="$secure_fixture/agent-hook-pre-bash.rename-before"
+rename_classifier_before="$secure_fixture/agentguard-classify-command.rename-before"
+cp "$secure_fixture/bin/agent-hook-pre-bash" "$rename_hook_before"
+cp "$secure_fixture/bin/agentguard-classify-command" "$rename_classifier_before"
+rename_failure_tmp="$secure_fixture/tmp-install-rename"
+mkdir -p "$rename_failure_tmp"
+rename_failure_stderr="$rename_failure_tmp/stderr"
+rename_failure_marker="$rename_failure_tmp/injected-failure"
+rename_mktemp_marker="$rename_failure_tmp/mktemp-invoked"
+rename_mv_count="$rename_failure_tmp/mv-count"
+PATH="$install_failure_bin:$validation_bin:$PATH" \
+  TMPDIR="$rename_failure_tmp" \
+  AGENTGUARD_TEST_REAL_CAT="$real_cat" \
+  AGENTGUARD_TEST_REAL_MV="$real_mv" \
+  AGENTGUARD_TEST_REAL_MKTEMP="$real_mktemp" \
+  AGENTGUARD_TEST_MKTEMP_MARKER="$rename_mktemp_marker" \
+  AGENTGUARD_TEST_FAILURE_MARKER="$rename_failure_marker" \
+  AGENTGUARD_TEST_MV_COUNT="$rename_mv_count" \
+  "$secure_fixture/support/sync-hook-bootstrap" \
+  >/dev/null 2>"$rename_failure_stderr"
+rename_failure_rc=$?
+_assert_exit "secure bootstrap sync: a second install rename failure fails" \
+  1 "$rename_failure_rc"
+_assert_contains "secure bootstrap sync: rename failure reports its launcher" \
+  "cannot install launcher: bin/agentguard-classify-command" \
+  "$(cat "$rename_failure_stderr")"
+if text_fixtures_equal \
+  "$rename_hook_before" "$secure_fixture/bin/agent-hook-pre-bash"; then
+  _fail "secure bootstrap sync: first atomic rename installs its complete candidate"
+else
+  _pass "secure bootstrap sync: first atomic rename installs its complete candidate"
+fi
+_assert_not_contains "secure bootstrap sync: first atomic rename removes its drift" \
+  "failed install renames" "$(cat "$secure_fixture/bin/agent-hook-pre-bash")"
+if text_fixtures_equal \
+  "$rename_classifier_before" \
+  "$secure_fixture/bin/agentguard-classify-command"; then
+  _pass "secure bootstrap sync: failed second rename preserves old classifier bytes"
+else
+  _fail "secure bootstrap sync: failed second rename preserves old classifier bytes"
+fi
+_assert_file_content "secure bootstrap sync: mv mock observes both install attempts" \
+  2 "$rename_mv_count"
+_assert_file_exists "secure bootstrap sync: mv mock reaches the injected failure" \
+  "$rename_failure_marker"
+rename_artifacts=$(find "$rename_failure_tmp" -name 'agentguard-*' -print)
+_assert_eq "secure bootstrap sync: rename failure cleans staging" \
+  "" "$rename_artifacts"
+rename_adjacent=$(find "$secure_fixture" -name '.agentguard-sync.*' -print)
+_assert_eq "secure bootstrap sync: rename failure cleans adjacent install files" \
+  "" "$rename_adjacent"
+
+file_mode() {
+  local path="$1" mode
+  if mode=$(stat -c '%a' "$path" 2>/dev/null); then
+    printf '%s\n' "$mode"
+  else
+    stat -f '%Lp' "$path"
+  fi
+}
+
+reset_secure_fixture
+chmod 751 "$secure_fixture/bin/agent-hook-pre-bash"
+secure_mode_before=$(file_mode "$secure_fixture/bin/agent-hook-pre-bash")
+secure_drifted="$secure_fixture/agent-hook-pre-bash.mode-drifted"
+awk '
+  { print }
+  /^[[:space:]]*# Generated by support\/sync-hook-bootstrap/ {
+    print "# successful repair preserves the launcher mode"
+  }
+' "$secure_fixture/bin/agent-hook-pre-bash" >"$secure_drifted"
+command cat "$secure_drifted" >"$secure_fixture/bin/agent-hook-pre-bash"
+secure_success_tmp="$secure_fixture/tmp-success"
+mkdir -p "$secure_success_tmp"
+secure_repair_output=$(
+  TMPDIR="$secure_success_tmp" \
+    "$secure_fixture/support/sync-hook-bootstrap"
+)
+secure_repair_rc=$?
+_assert_exit "secure bootstrap sync: a complete staged repair succeeds" \
+  0 "$secure_repair_rc"
+_assert_eq "secure bootstrap sync: a staged repair retains update output" \
+  "updated: bin/agent-hook-pre-bash" "$secure_repair_output"
+_assert_eq "secure bootstrap sync: a staged repair preserves launcher mode" \
+  "$secure_mode_before" \
+  "$(file_mode "$secure_fixture/bin/agent-hook-pre-bash")"
+secure_idempotent_output=$(
+  TMPDIR="$secure_success_tmp" \
+    "$secure_fixture/support/sync-hook-bootstrap"
+)
+secure_idempotent_rc=$?
+_assert_exit "secure bootstrap sync: a second staged repair is idempotent" \
+  0 "$secure_idempotent_rc"
+_assert_eq "secure bootstrap sync: an idempotent repair is silent" \
+  "" "$secure_idempotent_output"
+secure_success_artifacts=$(
+  find "$secure_success_tmp" -mindepth 1 -name 'agentguard-*' -print
+)
+_assert_eq "secure bootstrap sync: successful repairs leave no temporary artifacts" \
+  "" "$secure_success_artifacts"
+secure_success_adjacent_artifacts=$(
+  find "$secure_fixture" -name '.agentguard-sync.*' -print
+)
+_assert_eq "secure bootstrap sync: successful repairs leave no install files" \
+  "" "$secure_success_adjacent_artifacts"
 
 _test_summary
