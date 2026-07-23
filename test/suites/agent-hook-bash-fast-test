@@ -16,17 +16,23 @@ _run_hook_trace() {
   err_file=$(mktemp "$TEST_TMPDIR/err.XXXXXX")
   if [ -n "$input" ]; then
     printf '%s' "$input" |
-      AGENTGUARD_SESSION_ID="$TEST_SID" \
+      /usr/bin/env -i \
+        HOME="$HOME" PATH="$PATH" \
+        AGENTGUARD_SESSION_ID="$TEST_SID" \
         TMPDIR="$TEST_TMPDIR" \
         AGENTGUARD_NAME="agent" \
         CODEX_THREAD_ID="" \
-        bash -x "$hook" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
+        BASH_ENV='' ENV='' AGENTGUARD_HOOK_BASH_REEXEC=1 \
+        bash --noprofile --norc -p -x "$hook" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
   else
-    AGENTGUARD_SESSION_ID="$TEST_SID" \
+    /usr/bin/env -i \
+      HOME="$HOME" PATH="$PATH" \
+      AGENTGUARD_SESSION_ID="$TEST_SID" \
       TMPDIR="$TEST_TMPDIR" \
       AGENTGUARD_NAME="agent" \
       CODEX_THREAD_ID="" \
-      bash -x "$hook" >"$out_file" 2>"$err_file" </dev/null || HOOK_EXIT=$?
+      BASH_ENV='' ENV='' AGENTGUARD_HOOK_BASH_REEXEC=1 \
+      bash --noprofile --norc -p -x "$hook" >"$out_file" 2>"$err_file" </dev/null || HOOK_EXIT=$?
   fi
   HOOK_STDERR=$(cat "$err_file")
   rm -f "$out_file" "$err_file"

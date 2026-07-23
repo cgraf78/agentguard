@@ -1,17 +1,142 @@
-#!/usr/bin/env bash
+#!/bin/sh -p
+# shellcheck shell=bash
 # agent-hook-pre-bash — PreToolUse guard for Bash commands.
 
-# macOS can resolve `/usr/bin/env bash` to Bash 3 when launchers provide a
-# minimal PATH. The classifier uses Bash 4+ features, so re-exec a modern Bash
-# before reading stdin; the JSON payload is still available to the new process.
-if [ -n "${BASH_VERSION:-}" ] && [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] &&
-  [ -z "${AGENTGUARD_HOOK_BASH_REEXEC:-}" ]; then
-  for _hook_bash in "$HOME/.local/bin/bash" /opt/homebrew/bin/bash /usr/local/bin/bash; do
-    if [ -x "$_hook_bash" ]; then
-      AGENTGUARD_HOOK_BASH_REEXEC=1 exec "$_hook_bash" "$0" "$@"
+# Privileged Bash suppresses exported-function imports but leaves their raw
+# environment entries intact. Detect those entries structurally, then rebuild
+# the environment from Bash's exported-variable table before a candidate
+# wrapper or later non-privileged Bash can import them. Values remain argv
+# entries throughout, so embedded newlines and quotes are preserved.
+/usr/bin/awk '
+  BEGIN {
+    for (name in ENVIRON) {
+      if (length(name) >= 12 && substr(name, 1, 10) == "BASH_FUNC_" &&
+          substr(name, length(name) - 1) == "%%") {
+        exit 0
+      }
+    }
+    exit 1
+  }
+' </dev/null
+_agentguard_awk_status=$?
+if [ "$_agentguard_awk_status" -eq 0 ]; then
+  _agentguard_scrub_reentry=1
+  if [ -n "${AGENTGUARD_HOOK_BASH_REEXEC:-}" ]; then
+    if [ -n "${BASH_VERSION:-}" ] && [ -n "${BASH:-}" ] &&
+      (eval 'declare -A _agentguard_probe=([identity]=bash); [[ ${_agentguard_probe[identity]} == bash ]]') \
+        2>/dev/null; then
+      set -- "$BASH" --noprofile --norc -p "$0" "$@"
+    else
+      # A non-Bash shell carrying the re-exec marker cannot reach candidate
+      # discovery or non-privileged Bash; let the main bootstrap fail closed.
+      _agentguard_scrub_reentry=0
     fi
-  done
+  else
+    set -- /bin/sh -p "$0" "$@"
+  fi
+  if [ "$_agentguard_scrub_reentry" -eq 1 ]; then
+    _agentguard_scrub_bash_probe=$(BASH_ENV='' ENV='' \
+      /bin/bash --noprofile --norc -p -c '
+        case "$-" in *p*) ;; *) exit 1 ;; esac
+        [ -n "${BASH_VERSION:-}" ] || exit 1
+        printf "%s\n" agentguard-scrub-bash-v1
+      ' </dev/null 2>/dev/null)
+    _agentguard_scrub_bash_status=$?
+    if [ "$_agentguard_scrub_bash_status" -ne 0 ] ||
+      [ "$_agentguard_scrub_bash_probe" != agentguard-scrub-bash-v1 ]; then
+      echo "agent-hook-pre-bash: cannot start trusted /bin/bash environment scrub; refusing unguarded execution" >&2
+      exit 2
+    fi
+    BASH_ENV='' ENV='' /bin/bash --noprofile --norc -p -c '
+      _agentguard_env_probe=$(
+        /usr/bin/env -i BASH_ENV= ENV= /bin/sh -p -c \
+          '\''printf "%s\n" agentguard-scrub-env-v1'\'' </dev/null 2>/dev/null
+      )
+      if [[ $? -ne 0 || $_agentguard_env_probe != agentguard-scrub-env-v1 ]]; then
+        echo "agent-hook-pre-bash: cannot rebuild a safe environment with /usr/bin/env; refusing unguarded execution" >&2
+        exit 2
+      fi
+      _agentguard_environment=()
+      while IFS= read -r _agentguard_name; do
+        case "$_agentguard_name" in BASH_ENV | ENV) continue ;; esac
+        _agentguard_environment+=("$_agentguard_name=${!_agentguard_name}")
+      done < <(compgen -e)
+      shopt -s execfail
+      exec /usr/bin/env -i "${_agentguard_environment[@]}" BASH_ENV= ENV= "$@"
+      echo "agent-hook-pre-bash: cannot rebuild a safe environment with /usr/bin/env; refusing unguarded execution" >&2
+      exit 2
+    ' agentguard-environment-scrub "$@"
+    _agentguard_scrub_status=$?
+    case "$_agentguard_scrub_status" in
+      0 | 2) exit "$_agentguard_scrub_status" ;;
+      *)
+        echo "agent-hook-pre-bash: trusted environment scrub failed; refusing unguarded execution" >&2
+        exit 2
+        ;;
+    esac
+  fi
+elif [ "$_agentguard_awk_status" -ne 1 ]; then
+  echo "agent-hook-pre-bash: cannot inspect the environment with /usr/bin/awk; refusing unguarded execution" >&2
+  exit 2
 fi
+
+# Bootstrap through the platform's fixed POSIX shell so PATH cannot substitute
+# a fake interpreter before this code runs. The hook body needs Bash 4+.
+_hook_needs_modern_bash=1
+_hook_bash_major=${BASH_VERSION%%.*}
+case "$_hook_bash_major" in
+  "" | *[!0-9]*) ;;
+  *)
+    if [ "$_hook_bash_major" -ge 4 ] && [ "${AGENTGUARD_HOOK_BASH_REEXEC:-}" = 1 ]; then
+      case "$-" in
+        *p*)
+          # Keep Bash-4-only syntax inside eval so the POSIX bootstrap can parse
+          # this file. The associative array proves actual Bash semantics; an
+          # exported BASH_VERSION string is not sufficient.
+          if (eval 'declare -A _agentguard_probe=([identity]=bash); [[ ${_agentguard_probe[identity]} == bash ]]') \
+            2>/dev/null; then
+            _hook_needs_modern_bash=0
+          fi
+          ;;
+      esac
+    fi
+    ;;
+esac
+if [ "$_hook_needs_modern_bash" -eq 1 ]; then
+  if [ -z "${AGENTGUARD_HOOK_BASH_REEXEC:-}" ]; then
+    _hook_home_bash=""
+    case "${HOME:-}" in /*) _hook_home_bash="$HOME/.local/bin/bash" ;; esac
+    for _hook_bash in "$_hook_home_bash" /opt/homebrew/bin/bash /usr/local/bin/bash /bin/bash; do
+      [ -x "$_hook_bash" ] || continue
+      # -p suppresses BASH_ENV, SHELLOPTS, and exported-function imports. The
+      # environment scrub above also protects wrappers around Bash.
+      # shellcheck disable=SC2016 # The candidate Bash expands the probe body.
+      _hook_bash_probe=$(BASH_ENV='' ENV='' "$_hook_bash" --noprofile --norc -p -c '
+        case "$-" in *p*) ;; *) exit 1 ;; esac
+        [ -n "${BASH_VERSION:-}" ] || exit 1
+        case "${BASH_VERSINFO[0]:-}" in "" | *[!0-9]*) exit 1 ;; esac
+        [ "${BASH_VERSINFO[0]}" -ge 4 ] || exit 1
+        declare -A _agentguard_probe=([identity]=bash) || exit 1
+        [[ ${_agentguard_probe[identity]} == bash ]] || exit 1
+        printf "%s\n" agentguard-modern-bash-v1
+      ' </dev/null 2>/dev/null) || continue
+      if [ "$_hook_bash_probe" = agentguard-modern-bash-v1 ]; then
+        BASH_ENV='' ENV='' AGENTGUARD_HOOK_BASH_REEXEC=1 \
+          exec "$_hook_bash" --noprofile --norc -p "$0" "$@"
+      fi
+    done
+  fi
+  echo "agent-hook-pre-bash: Bash 4 or newer is required; refusing unguarded execution" >&2
+  exit 2
+fi
+# Startup files and exported functions were suppressed before Bash parsed this
+# script. Clear the handshake and return to ordinary, non-privileged semantics.
+unset BASH_ENV ENV AGENTGUARD_HOOK_BASH_REEXEC
+set +p
+unset _agentguard_awk_status _agentguard_scrub_reentry \
+  _agentguard_scrub_bash_probe _agentguard_scrub_bash_status \
+  _agentguard_scrub_status _hook_needs_modern_bash _hook_bash_major \
+  _hook_home_bash _hook_bash _hook_bash_probe
 
 set -u
 _HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}" # captured before sourcing so _hook_source_extensions finds agent/local variants

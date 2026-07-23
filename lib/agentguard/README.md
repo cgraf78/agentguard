@@ -41,8 +41,15 @@ Use shdeps to locate sourceable files instead of reconstructing install paths:
 ## Dependencies
 
 - Bash 4 or newer for hook scripts that use the command classifier. On macOS,
-  `agent-hook-pre-bash` re-execs `~/.local/bin/bash`, Homebrew Bash, or
-  `/usr/local/bin/bash` when `/usr/bin/env bash` resolves to Bash 3.
+  `agent-hook-pre-bash` and `agentguard-classify-command` validate and re-exec
+  `~/.local/bin/bash`, Homebrew Bash, `/usr/local/bin/bash`, or `/bin/bash` from
+  a fixed privileged `/bin/sh -p` bootstrap. Before candidate discovery, raw
+  exported-function entries trigger a privileged `/bin/bash` environment
+  rebuild that preserves ordinary exported variables but excludes `BASH_ENV`,
+  `ENV`, and every `BASH_FUNC_*%%` entry. Candidate Bash processes must prove
+  Bash 4 semantics before the hook reads stdin. Both entry points exit with
+  status 2 rather than continuing unguarded when no compatible Bash is
+  available or a fixed environment-inspection or scrub tool fails.
 - `jq` for hook payload parsing and JSON responses.
 - `cgraf78/sley` is a hard runtime dependency for hooks that format files.
   `agent-hook-post-edit` invokes the PATH-visible `sley hook format-file` CLI.
@@ -55,6 +62,13 @@ context when its config is available through `HIVE_MEMORY_CONFIG`, an absolute
 status context, and
 `claude-templates` enables a Claude-specific maintenance hook when that
 command is installed.
+
+The launcher trusts the platform `/bin/sh -p`, `/bin/bash -p`, `/usr/bin/awk`,
+`/usr/bin/env`, and the absolute Bash candidate files above. Its semantic probe
+detects an accidental non-Bash candidate, not a deliberately malicious
+executable already installed at a trusted path. The HOME candidate is
+considered only for an absolute `HOME`; normal PATH-visible hook dependencies
+remain caller-trusted after bootstrap.
 
 ## Lifecycle
 

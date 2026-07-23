@@ -1,0 +1,495 @@
+#!/usr/bin/env bash
+# agent-bash-reexec-test - modern-Bash launcher failure behavior.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+CLASSIFY_COMMAND="$BIN_DIR/agentguard-classify-command"
+REAL_BASH=$(type -P bash)
+
+legacy_shell=""
+for candidate in /bin/sh /usr/bin/zsh; do
+  [ -x "$candidate" ] || continue
+  # shellcheck disable=SC2016 # Expanded by the candidate shell.
+  if ! "$candidate" -c '[ -n "${BASH_VERSION:-}" ] && [ "${BASH_VERSION%%.*}" -ge 4 ]' \
+    >/dev/null 2>&1; then
+    legacy_shell="$candidate"
+    break
+  fi
+done
+[ -n "$legacy_shell" ] || {
+  _fail "test setup: a pre-Bash-4-compatible shell is available"
+  _test_summary
+}
+
+echo ""
+echo "=== modern Bash launcher ==="
+
+modern_home="$TEST_TMPDIR/modern-bash-home"
+mkdir -p "$modern_home/.local/bin"
+launcher_log="$TEST_TMPDIR/modern-bash-launcher.log"
+cat >"$modern_home/.local/bin/bash" <<EOF
+#!/bin/sh
+printf '%s\n' invoked >>"$launcher_log"
+exec "$REAL_BASH" "\$@"
+EOF
+chmod +x "$modern_home/.local/bin/bash"
+
+set +e
+hook_output=$(printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+  HOME="$modern_home" "$legacy_shell" "$PRE_BASH" 2>"$TEST_TMPDIR/hook-modern.err")
+hook_rc=$?
+classifier_output=$(HOME="$modern_home" "$legacy_shell" "$CLASSIFY_COMMAND" --json -- 'printf ok' \
+  2>"$TEST_TMPDIR/classifier-modern.err")
+classifier_rc=$?
+set -e
+_assert_eq "pre-bash: re-exec preserves and blocks a dangerous payload" "2" "$hook_rc"
+_assert_contains "pre-bash: re-exec reports the preserved dangerous payload" "BLOCKED" \
+  "$(cat "$TEST_TMPDIR/hook-modern.err")"
+_assert_eq "pre-bash: blocked re-exec emits protocol JSON" "{}" "$hook_output"
+_assert_eq "classifier: re-execs a validated modern Bash" "0" "$classifier_rc"
+_assert_eq "classifier: modern Bash preserves classification" "printf" \
+  "$(jq -r '.commands[0].basename' <<<"$classifier_output")"
+_assert_contains "launcher: configured modern Bash was invoked" "invoked" "$(cat "$launcher_log")"
+
+# Privileged Bash suppresses function import but retains the raw BASH_FUNC_*
+# environment entries. A candidate implemented as a shell wrapper must not
+# import them before it reaches the validated Bash binary.
+wrapper_function_capture="$TEST_TMPDIR/wrapper-function.capture"
+: >"$wrapper_function_capture"
+# shellcheck disable=SC2016 # Expanded only if a candidate imports the fixture.
+imported_printf='() { /bin/echo imported >>"$AGENTGUARD_FUNCTION_CAPTURE"; /usr/bin/printf "$@"; }'
+set +e
+printf '%s' '{"tool_input":{"command":"true"}}' |
+  env "BASH_FUNC_printf%%=$imported_printf" \
+    AGENTGUARD_FUNCTION_CAPTURE="$wrapper_function_capture" \
+    HOME="$modern_home" "$PRE_BASH" \
+    >"$TEST_TMPDIR/hook-wrapper-function.out" \
+    2>"$TEST_TMPDIR/hook-wrapper-function.err"
+wrapper_function_hook_rc=$?
+env "BASH_FUNC_printf%%=$imported_printf" \
+  AGENTGUARD_FUNCTION_CAPTURE="$wrapper_function_capture" \
+  HOME="$modern_home" "$CLASSIFY_COMMAND" --json -- 'printf ok' \
+  >"$TEST_TMPDIR/classifier-wrapper-function.out" \
+  2>"$TEST_TMPDIR/classifier-wrapper-function.err"
+wrapper_function_classifier_rc=$?
+set -e
+_assert_eq "pre-bash: a candidate wrapper starts without imported functions" \
+  "0" "$wrapper_function_hook_rc"
+_assert_eq "classifier: a candidate wrapper starts without imported functions" \
+  "0" "$wrapper_function_classifier_rc"
+_assert_eq "launcher: candidate wrappers never execute imported functions" \
+  "" "$(cat "$wrapper_function_capture")"
+
+invalid_home="$TEST_TMPDIR/invalid-bash-home"
+mkdir -p "$invalid_home/.local/bin"
+invalid_log="$TEST_TMPDIR/invalid-bash-launcher.log"
+cat >"$invalid_home/.local/bin/bash" <<EOF
+#!/bin/sh
+for arg; do
+  if [ "\$arg" = -c ]; then
+    printf '%s\n' probe >>"$invalid_log"
+    exit 1
+  fi
+done
+printf '%s\n' executed >>"$invalid_log"
+exit 79
+EOF
+chmod +x "$invalid_home/.local/bin/bash"
+
+set +e
+printf '%s' '{"tool_input":{}}' |
+  HOME="$invalid_home" "$legacy_shell" "$PRE_BASH" \
+    >"$TEST_TMPDIR/hook-invalid.out" 2>"$TEST_TMPDIR/hook-invalid.err"
+invalid_hook_rc=$?
+HOME="$invalid_home" "$legacy_shell" "$CLASSIFY_COMMAND" --json -- 'printf ok' \
+  >"$TEST_TMPDIR/classifier-invalid.out" 2>"$TEST_TMPDIR/classifier-invalid.err"
+invalid_classifier_rc=$?
+set -e
+_assert_contains "launcher: unusable candidate is probed" "probe" "$(cat "$invalid_log")"
+_assert_not_contains "launcher: unusable candidate is never re-executed" "executed" "$(cat "$invalid_log")"
+# A platform-level fallback may exist after the invalid HOME candidate. Either
+# successful fallback or an explicit usage failure is acceptable here.
+case "$invalid_hook_rc:$invalid_classifier_rc" in
+  0:0 | 2:2) _pass "launcher: both entry points handle an unusable candidate consistently" ;;
+  *) _fail "launcher: both entry points handle an unusable candidate consistently" ;;
+esac
+
+false_home="$TEST_TMPDIR/false-bash-home"
+mkdir -p "$false_home/.local/bin"
+ln -s /bin/true "$false_home/.local/bin/bash"
+
+set +e
+printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+  HOME="$false_home" "$legacy_shell" "$PRE_BASH" \
+    >"$TEST_TMPDIR/hook-false.out" 2>"$TEST_TMPDIR/hook-false.err"
+false_hook_rc=$?
+HOME="$false_home" "$legacy_shell" "$CLASSIFY_COMMAND" --json -- 'rm -rf /' \
+  >"$TEST_TMPDIR/classifier-false.out" 2>"$TEST_TMPDIR/classifier-false.err"
+false_classifier_rc=$?
+set -e
+_assert_eq "pre-bash: a success-only executable cannot bypass the guard" "2" "$false_hook_rc"
+case "$false_classifier_rc" in
+  2)
+    _pass "classifier: a success-only executable fails closed without a fallback"
+    ;;
+  0)
+    if [ -s "$TEST_TMPDIR/classifier-false.out" ] &&
+      jq -e '.commands[0].basename == "rm"' "$TEST_TMPDIR/classifier-false.out" >/dev/null; then
+      _pass "classifier: a success-only executable is skipped for a valid fallback"
+    else
+      _fail "classifier: a success-only executable is skipped for a valid fallback"
+    fi
+    ;;
+  *)
+    _fail "classifier: a success-only executable has a valid outcome"
+    ;;
+esac
+
+hostile_path="$TEST_TMPDIR/hostile-path"
+mkdir -p "$hostile_path"
+ln -s /bin/true "$hostile_path/bash"
+set +e
+printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+  PATH="$hostile_path:/usr/bin:/bin" HOME="$modern_home" "$PRE_BASH" \
+    >"$TEST_TMPDIR/hook-hostile-path.out" 2>"$TEST_TMPDIR/hook-hostile-path.err"
+hostile_path_hook_rc=$?
+PATH="$hostile_path:/usr/bin:/bin" HOME="$modern_home" "$CLASSIFY_COMMAND" --json -- 'printf ok' \
+  >"$TEST_TMPDIR/classifier-hostile-path.out" 2>"$TEST_TMPDIR/classifier-hostile-path.err"
+hostile_path_classifier_rc=$?
+set -e
+_assert_eq "pre-bash: the bootstrap interpreter ignores a hostile PATH bash" \
+  "2" "$hostile_path_hook_rc"
+_assert_eq "classifier: the bootstrap interpreter ignores a hostile PATH bash" \
+  "0" "$hostile_path_classifier_rc"
+_assert_eq "classifier: hostile PATH still preserves classification" "printf" \
+  "$(jq -r '.commands[0].basename' "$TEST_TMPDIR/classifier-hostile-path.out")"
+
+startup_env="$TEST_TMPDIR/hostile-bash-env"
+startup_capture="$TEST_TMPDIR/hostile-bash-env.capture"
+cat >"$startup_env" <<'EOF'
+cat >>"$AGENTGUARD_STARTUP_CAPTURE"
+EOF
+: >"$startup_capture"
+set +e
+printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+  BASH_ENV="$startup_env" ENV="$startup_env" AGENTGUARD_STARTUP_CAPTURE="$startup_capture" \
+    HOME="$modern_home" "$legacy_shell" "$PRE_BASH" \
+    >"$TEST_TMPDIR/hook-startup-env.out" 2>"$TEST_TMPDIR/hook-startup-env.err"
+startup_env_hook_rc=$?
+printf '%s' 'rm -rf /' |
+  BASH_ENV="$startup_env" ENV="$startup_env" AGENTGUARD_STARTUP_CAPTURE="$startup_capture" \
+    HOME="$modern_home" "$legacy_shell" "$CLASSIFY_COMMAND" \
+    >"$TEST_TMPDIR/classifier-startup-env.out" 2>"$TEST_TMPDIR/classifier-startup-env.err"
+startup_env_classifier_rc=$?
+set -e
+_assert_eq "pre-bash: startup files cannot consume the hook payload" "2" "$startup_env_hook_rc"
+_assert_eq "classifier: startup files cannot consume stdin" "0" "$startup_env_classifier_rc"
+_assert_eq "classifier: sanitized startup preserves stdin classification" "rm" \
+  "$(jq -r '.commands[0].basename' "$TEST_TMPDIR/classifier-startup-env.out")"
+_assert_eq "launcher: sanitized startup files never execute" "" "$(cat "$startup_capture")"
+
+function_home="$TEST_TMPDIR/function-import-home"
+mkdir -p "$function_home/.local/bin"
+function_capture="$TEST_TMPDIR/function-import.capture"
+: >"$function_capture"
+imported_jq="() { /bin/cat >>\"$function_capture\"; }"
+cat >"$function_home/.local/bin/bash" <<EOF
+#!/bin/sh
+exec env 'BASH_FUNC_jq%%=$imported_jq' "$REAL_BASH" "\$@"
+EOF
+chmod +x "$function_home/.local/bin/bash"
+set +e
+printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+  HOME="$function_home" "$legacy_shell" "$PRE_BASH" \
+    >"$TEST_TMPDIR/hook-function-import.out" 2>"$TEST_TMPDIR/hook-function-import.err"
+function_hook_rc=$?
+set -e
+_assert_eq "pre-bash: imported functions cannot replace the JSON parser" "2" "$function_hook_rc"
+_assert_eq "launcher: imported JSON parser never executes" "" "$(cat "$function_capture")"
+
+# The sanitized environment must remain clean after privileged mode is lowered.
+# A later child Bash must not re-import the original function encoding, while
+# ordinary exported values (including embedded newlines) remain exact.
+descendant_install="$TEST_TMPDIR/descendant-function-install"
+mkdir -p "$descendant_install"
+ln -s "$PRE_BASH" "$descendant_install/agent-hook-pre-bash"
+cat >"$descendant_install/agent-hook-pre-bash-work" <<'EOF'
+if [ "${AGENTGUARD_MULTILINE_VALUE:-}" != $'first line\nsecond line' ]; then
+  _hook_block "ordinary multiline environment value changed"
+fi
+if [ "${AGENTGUARD_APOSTROPHE_VALUE:-}" != "second line's value" ] ||
+  [ "${BASH_FUNC_not_a_function:-}" != "ordinary prefix value" ]; then
+  _hook_block "ordinary environment entry changed"
+fi
+if [ "$(/bin/bash --noprofile --norc -c 'type -t agentguard_imported_function')" = function ]; then
+  _hook_block "exported function leaked into descendant Bash"
+fi
+if /usr/bin/awk 'BEGIN {
+  for (name in ENVIRON) {
+    if (length(name) >= 12 && substr(name, 1, 10) == "BASH_FUNC_" &&
+      substr(name, length(name) - 1) == "%%") exit 0
+  }
+  exit 1
+}'; then
+  _hook_block "raw exported-function entry leaked into extensions"
+fi
+EOF
+imported_descendant='() { printf PWNED; }'
+set +e
+printf '%s' '{"tool_input":{"command":"true"}}' |
+  env "BASH_FUNC_agentguard_imported_function%%=$imported_descendant" \
+    $'BASH_FUNC_line\nbreak%%=() { printf PWNED; }' \
+    AGENTGUARD_MULTILINE_VALUE=$'first line\nsecond line' \
+    AGENTGUARD_APOSTROPHE_VALUE="second line's value" \
+    BASH_FUNC_not_a_function='ordinary prefix value' \
+    HOME="$modern_home" "$descendant_install/agent-hook-pre-bash" \
+    >"$TEST_TMPDIR/hook-descendant-function.out" \
+    2>"$TEST_TMPDIR/hook-descendant-function.err"
+descendant_function_rc=$?
+set -e
+_assert_eq "pre-bash: sanitized environment reaches extensions" "0" \
+  "$descendant_function_rc"
+_assert_not_contains "pre-bash: descendant Bash cannot re-import a function" \
+  "function leaked" "$(cat "$TEST_TMPDIR/hook-descendant-function.err")"
+_assert_not_contains "pre-bash: malformed exported-function entries are removed" \
+  "raw exported-function entry leaked" "$(cat "$TEST_TMPDIR/hook-descendant-function.err")"
+_assert_not_contains "pre-bash: multiline environment values remain exact" \
+  "multiline environment value changed" "$(cat "$TEST_TMPDIR/hook-descendant-function.err")"
+_assert_not_contains "pre-bash: ordinary environment entries remain exact" \
+  "ordinary environment entry changed" "$(cat "$TEST_TMPDIR/hook-descendant-function.err")"
+
+bootstrap_function_home="$TEST_TMPDIR/bootstrap-function-home"
+mkdir -p "$bootstrap_function_home/.local/bin"
+ln -s /bin/true "$bootstrap_function_home/.local/bin/bash"
+set +e
+printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+  env 'BASH_FUNC_[%%=() { return 0; }' HOME="$bootstrap_function_home" "$PRE_BASH" \
+    >"$TEST_TMPDIR/hook-bootstrap-function.out" 2>"$TEST_TMPDIR/hook-bootstrap-function.err"
+bootstrap_function_rc=$?
+set -e
+_assert_eq "pre-bash: bootstrap ignores imported comparison functions" \
+  "2" "$bootstrap_function_rc"
+
+relative_root="$TEST_TMPDIR/relative-home-root"
+relative_log="$TEST_TMPDIR/relative-home.log"
+mkdir -p "$relative_root/relative-home/.local/bin"
+cat >"$relative_root/relative-home/.local/bin/bash" <<EOF
+#!/bin/sh
+printf '%s\n' invoked >>"$relative_log"
+exit 0
+EOF
+chmod +x "$relative_root/relative-home/.local/bin/bash"
+set +e
+(
+  cd "$relative_root" || exit 1
+  printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+    HOME=relative-home "$legacy_shell" "$PRE_BASH"
+) >"$TEST_TMPDIR/hook-relative-home.out" 2>"$TEST_TMPDIR/hook-relative-home.err"
+relative_home_rc=$?
+set -e
+_assert_eq "pre-bash: a relative HOME cannot select a candidate" "2" "$relative_home_rc"
+_assert_file_missing "launcher: a relative HOME candidate is never invoked" "$relative_log"
+
+marker_install="$TEST_TMPDIR/marker-install"
+mkdir -p "$marker_install"
+ln -s "$PRE_BASH" "$marker_install/agent-hook-pre-bash"
+cat >"$marker_install/agent-hook-pre-bash-work" <<'EOF'
+if [ -n "${AGENTGUARD_HOOK_BASH_REEXEC:-}" ]; then
+  _hook_block "re-exec marker leaked into hook extensions"
+fi
+EOF
+set +e
+printf '%s' '{"tool_input":{"command":"true"}}' |
+  HOME="$modern_home" "$legacy_shell" "$marker_install/agent-hook-pre-bash" \
+    >"$TEST_TMPDIR/hook-marker.out" 2>"$TEST_TMPDIR/hook-marker.err"
+marker_hook_rc=$?
+set -e
+_assert_eq "pre-bash: re-exec marker is cleared before extensions" "0" "$marker_hook_rc"
+_assert_not_contains "pre-bash: extensions do not inherit the re-exec marker" \
+  "marker leaked" "$(cat "$TEST_TMPDIR/hook-marker.err")"
+
+set +e
+printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
+  AGENTGUARD_HOOK_BASH_REEXEC=1 "$legacy_shell" "$PRE_BASH" \
+    >"$TEST_TMPDIR/hook-no-modern.out" 2>"$TEST_TMPDIR/hook-no-modern.err"
+no_modern_hook_rc=$?
+AGENTGUARD_CLASSIFY_COMMAND_REEXEC=1 "$legacy_shell" "$CLASSIFY_COMMAND" --json -- 'rm -rf /' \
+  >"$TEST_TMPDIR/classifier-no-modern.out" 2>"$TEST_TMPDIR/classifier-no-modern.err"
+no_modern_classifier_rc=$?
+set -e
+_assert_eq "pre-bash: no modern Bash blocks execution" "2" "$no_modern_hook_rc"
+_assert_contains "pre-bash: no modern Bash failure is actionable" "Bash 4 or newer" \
+  "$(cat "$TEST_TMPDIR/hook-no-modern.err")"
+_assert_eq "classifier: no modern Bash is a usage failure" "2" "$no_modern_classifier_rc"
+_assert_contains "classifier: no modern Bash failure is actionable" "Bash 4 or newer" \
+  "$(cat "$TEST_TMPDIR/classifier-no-modern.err")"
+
+echo ""
+echo "=== fixed bootstrap tool failures ==="
+
+raw_function='() { printf PWNED; }'
+
+_run_missing_tool_entry() {
+  local source="$1" old_path="$2" label="$3" kind="$4"
+  local install="$TEST_TMPDIR/missing-$label-$kind" entry output error rc
+  mkdir -p "$install"
+  entry="$install/$(basename "$source")"
+  sed "s#$old_path#$install/definitely-missing#g" "$source" >"$entry"
+  chmod +x "$entry"
+  output="$install/output"
+  error="$install/error"
+  set +e
+  if [ "$kind" = hook ]; then
+    printf '%s' '{"tool_input":{"command":"true"}}' |
+      env "BASH_FUNC_agentguard_missing_tool%%=$raw_function" "$entry" \
+        >"$output" 2>"$error"
+  else
+    env "BASH_FUNC_agentguard_missing_tool%%=$raw_function" "$entry" \
+      --json -- 'printf ok' >"$output" 2>"$error"
+  fi
+  rc=$?
+  set -e
+  _assert_eq "$kind: missing $label exits with blocking status" "2" "$rc"
+  _assert_contains "$kind: missing $label is actionable" "refusing unguarded execution" \
+    "$(cat "$error")"
+  _assert_eq "$kind: missing $label emits no allow response" "" "$(cat "$output")"
+}
+
+for entry_kind in hook classifier; do
+  if [ "$entry_kind" = hook ]; then
+    fixed_tool_entry="$PRE_BASH"
+  else
+    fixed_tool_entry="$CLASSIFY_COMMAND"
+  fi
+  _run_missing_tool_entry "$fixed_tool_entry" /usr/bin/awk awk "$entry_kind"
+  _run_missing_tool_entry "$fixed_tool_entry" /bin/bash bash "$entry_kind"
+  _run_missing_tool_entry "$fixed_tool_entry" /usr/bin/env env "$entry_kind"
+done
+
+namespace_mode=""
+if command -v unshare >/dev/null 2>&1 && command -v mount >/dev/null 2>&1; then
+  if unshare -Urnm sh -c 'mount --make-rprivate /' >/dev/null 2>&1; then
+    namespace_mode=-Urnm
+  elif [ "$(id -u)" -eq 0 ] && unshare -mn sh -c 'mount --make-rprivate /' >/dev/null 2>&1; then
+    namespace_mode=-mn
+  fi
+fi
+
+if [ -n "$namespace_mode" ]; then
+  nonexec_tool="$TEST_TMPDIR/nonexec-fixed-tool"
+  printf '#!/bin/sh\nexit 0\n' >"$nonexec_tool"
+  chmod 0644 "$nonexec_tool"
+  failing_tool="$TEST_TMPDIR/failing-fixed-tool"
+  printf '#!/bin/sh\nexit 2\n' >"$failing_tool"
+  chmod +x "$failing_tool"
+
+  _run_namespace_entry() {
+    local fixed_path="$1" replacement="$2" kind="$3" expected_message="$4"
+    local input_file
+    input_file="$TEST_TMPDIR/namespace-$kind-$(basename "$fixed_path").input"
+    local output="$input_file.out" error="$input_file.err" remaining rc input_fd
+    if [ "$kind" = hook ]; then
+      printf '%s\n' '{"tool_input":{"command":"true"}}' >"$input_file"
+    else
+      printf '%s\n' 'printf ok' >"$input_file"
+    fi
+    exec {input_fd}<"$input_file"
+    set +e
+    # shellcheck disable=SC2016 # The isolated shell expands its positional arguments.
+    env "BASH_FUNC_agentguard_namespace_tool%%=$raw_function" \
+      unshare "$namespace_mode" /bin/sh -p -c '
+        mount --make-rprivate /
+        mount --bind "$2" "$1"
+        shift 2
+        exec "$@"
+      ' namespace-tool "$fixed_path" "$replacement" \
+      "$([ "$kind" = hook ] && printf '%s' "$PRE_BASH" || printf '%s' "$CLASSIFY_COMMAND")" \
+      >"$output" 2>"$error" <&"$input_fd"
+    rc=$?
+    set -e
+    IFS= read -r remaining <&"$input_fd" || true
+    exec {input_fd}<&-
+    _assert_eq "$kind: unusable $fixed_path exits with blocking status" "2" "$rc"
+    _assert_contains "$kind: unusable $fixed_path is actionable" "$expected_message" \
+      "$(cat "$error")"
+    _assert_eq "$kind: unusable $fixed_path emits no allow response" "" "$(cat "$output")"
+    _assert_eq "$kind: unusable $fixed_path leaves stdin unread" "$(cat "$input_file")" \
+      "$remaining"
+  }
+
+  _run_success_only_fixed_tool() {
+    local source="$1" fixed_path="$2" kind="$3"
+    local install entry output error rc
+    install="$TEST_TMPDIR/success-only-$kind-$(basename "$fixed_path")"
+    entry="$install/$(basename "$source")"
+    output="$install/output"
+    error="$install/error"
+    mkdir -p "$install"
+    sed "s#$fixed_path#/bin/true#g" "$source" >"$entry"
+    chmod +x "$entry"
+    set +e
+    if [ "$kind" = hook ]; then
+      printf '%s' '{"tool_input":{"command":"true"}}' |
+        env "BASH_FUNC_agentguard_success_only%%=$raw_function" \
+          unshare "$namespace_mode" "$entry" >"$output" 2>"$error"
+    else
+      env "BASH_FUNC_agentguard_success_only%%=$raw_function" \
+        unshare "$namespace_mode" "$entry" --json -- 'printf ok' \
+        >"$output" 2>"$error"
+    fi
+    rc=$?
+    set -e
+    _assert_eq "$kind: success-only $fixed_path exits with blocking status" "2" "$rc"
+    _assert_contains "$kind: success-only $fixed_path is rejected" \
+      "refusing unguarded execution" "$(cat "$error")"
+    _assert_eq "$kind: success-only $fixed_path emits no allow response" "" \
+      "$(cat "$output")"
+  }
+
+  for entry_kind in hook classifier; do
+    _run_namespace_entry /usr/bin/awk "$failing_tool" "$entry_kind" \
+      "cannot inspect the environment"
+    _run_namespace_entry /usr/bin/env "$nonexec_tool" "$entry_kind" \
+      "cannot rebuild a safe environment"
+    if [ "$entry_kind" = hook ]; then
+      fixed_tool_entry="$PRE_BASH"
+    else
+      fixed_tool_entry="$CLASSIFY_COMMAND"
+    fi
+    _run_success_only_fixed_tool "$fixed_tool_entry" /bin/bash "$entry_kind"
+    _run_success_only_fixed_tool "$fixed_tool_entry" /usr/bin/env "$entry_kind"
+  done
+
+  namespace_descendant_install="$TEST_TMPDIR/namespace-descendant-install"
+  namespace_descendant_marker="$TEST_TMPDIR/namespace-descendant.marker"
+  mkdir -p "$namespace_descendant_install"
+  ln -s "$PRE_BASH" "$namespace_descendant_install/agent-hook-pre-bash"
+  cat >"$namespace_descendant_install/agent-hook-pre-bash-work" <<EOF
+if [ "\$(/bin/bash --noprofile --norc -c 'type -t agentguard_namespace_import')" = function ]; then
+  : >"$namespace_descendant_marker"
+fi
+EOF
+  set +e
+  # shellcheck disable=SC2016 # The isolated shell expands its positional arguments.
+  printf '%s' '{"tool_input":{"command":"true"}}' |
+    env "BASH_FUNC_agentguard_namespace_import%%=$raw_function" \
+      unshare "$namespace_mode" /bin/sh -p -c '
+      mount --make-rprivate /
+      mount --bind "$2" /usr/bin/awk
+      exec "$1"
+    ' namespace-descendant "$namespace_descendant_install/agent-hook-pre-bash" \
+      "$failing_tool" \
+      >"$TEST_TMPDIR/namespace-descendant.out" \
+      2>"$TEST_TMPDIR/namespace-descendant.err"
+  namespace_descendant_rc=$?
+  set -e
+  _assert_eq "pre-bash: awk failure blocks before extensions" "2" "$namespace_descendant_rc"
+  _assert_file_missing "pre-bash: awk failure cannot leak functions to descendant Bash" \
+    "$namespace_descendant_marker"
+else
+  echo "  SKIP: fixed-tool mount namespace tests require unshare and mount"
+fi
+
+_test_summary
