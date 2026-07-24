@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-PRE-BASH 1 "2026-07-23" "agentguard" "User Commands"
+.TH AGENT-HOOK-PRE-BASH 1 "2026-07-24" "agentguard" "User Commands"
 .SH NAME
 agent-hook-pre-bash \- guard agent shell commands before execution
 .SH SYNOPSIS
@@ -26,7 +26,24 @@ Bash may process caller-controlled
 code that changes or forges behavior before the script's first instruction.
 No code in the script can undo or reliably detect those earlier effects.
 Rejection of an otherwise ordinary, detectable explicit invocation is
-best-effort only, not a security guarantee. When Bash 4 or newer is required,
+best-effort only, not a security guarantee. Direct execution also requires a
+trusted or sanitized dynamic-loader environment. On Linux, these controls
+include
+.BR LD_PRELOAD ,
+.BR LD_AUDIT ,
+and
+.BR LD_LIBRARY_PATH .
+These variables have platform equivalents, including macOS
+.BR DYLD_INSERT_LIBRARIES ,
+.BR DYLD_LIBRARY_PATH ,
+and related
+.B DYLD_*
+controls. Those controls must likewise be removed or trusted before process
+startup. The
+.B -p
+option changes Bash behavior only after the dynamic loader starts it;
+.B -p
+cannot protect before Bash loads. When Bash 4 or newer is required,
 the launcher considers only
 .BR /opt/homebrew/bin/bash ,
 .BR /usr/local/bin/bash ,
