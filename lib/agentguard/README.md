@@ -45,13 +45,19 @@ Use shdeps to locate sourceable files instead of reconstructing install paths:
   `/opt/homebrew/bin/bash`, `/usr/local/bin/bash`, `/bin/bash`, or
   `/usr/bin/bash`, in that order, from a fixed privileged `/bin/bash -p`
   bootstrap. `HOME` and `PATH` never select the interpreter. Direct executable
-  invocation through the privileged shebang is the supported security boundary.
-  Explicit interpreter invocation such as `bash script-path` is outside this
-  security boundary: Bash can run caller-controlled `BASH_ENV` code that changes
-  or forges behavior before the script's first instruction, and no shell script
-  can undo or reliably detect those earlier effects. Rejection of an otherwise
-  ordinary, detectable explicit invocation is best-effort only, not a security
-  guarantee. Before candidate discovery, `/usr/bin/awk` must return an exact
+  invocation through the privileged shebang is the supported security boundary,
+  but it also requires a trusted or sanitized dynamic-loader environment. On
+  Linux, this includes `LD_PRELOAD`, `LD_AUDIT`, and `LD_LIBRARY_PATH`; platform
+  equivalents such as macOS `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, and
+  related `DYLD_*` controls must likewise be removed or trusted before process
+  startup. The `-p` option changes Bash behavior only after the dynamic loader
+  starts it; `-p` cannot protect before Bash loads. Explicit interpreter
+  invocation such as `bash script-path` is outside this security boundary: Bash
+  can run caller-controlled `BASH_ENV` code that changes or forges behavior
+  before the script's first instruction, and no shell script can undo or reliably
+  detect those earlier effects. Rejection of an otherwise ordinary, detectable
+  explicit invocation is best-effort only, not a security guarantee. Before
+  candidate discovery, `/usr/bin/awk` must return an exact
   clean or dirty environment sentinel. Raw exported-function entries trigger a
   clean `/bin/bash` environment rebuild: valid ordinary exported names and
   values travel as NUL-delimited records over the clean process's initial stdin,

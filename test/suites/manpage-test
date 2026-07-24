@@ -41,6 +41,22 @@ for relative_path in \
     "outside this security boundary" "$normalized"
   _assert_contains "$relative_path: detectable rejection is best-effort" \
     "best-effort only" "$normalized"
+  _assert_contains "$relative_path: dynamic loader environment must be trusted" \
+    "trusted or sanitized dynamic-loader environment" "$normalized"
+  _assert_contains "$relative_path: names Linux LD_PRELOAD control" \
+    "LD_PRELOAD" "$normalized"
+  _assert_contains "$relative_path: names Linux LD_AUDIT control" \
+    "LD_AUDIT" "$normalized"
+  _assert_contains "$relative_path: names Linux LD_LIBRARY_PATH control" \
+    "LD_LIBRARY_PATH" "$normalized"
+  _assert_contains "$relative_path: covers other platform loader controls" \
+    "platform equivalents" "$normalized"
+  _assert_contains "$relative_path: names macOS injected-library control" \
+    "DYLD_INSERT_LIBRARIES" "$normalized"
+  _assert_contains "$relative_path: names macOS library-path control" \
+    "DYLD_LIBRARY_PATH" "$normalized"
+  _assert_contains "$relative_path: privileged mode starts after loader code" \
+    "cannot protect before Bash loads" "$normalized"
 done
 
 _test_summary
