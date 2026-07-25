@@ -83,6 +83,84 @@ _pre_edit_comment_reminder() {
   done <<<"$AGENTGUARD_EDIT_FILES"
 }
 
+# Maps an edited file to the agent-rule-id of the on-demand playbook (see
+# ~/.config/dot/agent-playbooks.d and agent-rule-id: global-on-demand-playbooks)
+# whose trigger the path matches. Data-driven and repo-agnostic on purpose:
+# this table is the shared substrate for reminding about ANY project's
+# playbook, not just the ones listed today — add a case arm whenever a new
+# playbook's trigger is recognizable from a file's extension or path, whether
+# it is language-scoped, dotfiles-scoped, or scoped to some other project
+# entirely.
+_pre_edit_playbook_rule_id() {
+  local fp="$1"
+  case "$fp" in
+    *.py) printf 'language-python-style\n' ;;
+    *.rs) printf 'language-rust-style\n' ;;
+    *.lua) printf 'language-lua-style\n' ;;
+    *.c | *.cc | *.cpp | *.cxx | *.h | *.hh | *.hpp | *.hxx | *.m | *.mm)
+      printf 'language-cpp-style\n'
+      ;;
+    *.sh | *.bash | *.zsh)
+      printf 'language-shell-style\n'
+      ;;
+    */.config/dot/*.json | */.config/dot/*.jsonc | */.config/dot/*.yaml | \
+      */.config/dot/*.yml | */.config/dot/*.toml | \
+      */.dotfiles*/*.json | */.dotfiles*/*.jsonc | */.dotfiles*/*.yaml | \
+      */.dotfiles*/*.yml | */.dotfiles*/*.toml)
+      printf 'checkrun-schema-association-review\n'
+      ;;
+    */.config/dot/* | */.dotfiles*/*)
+      printf 'dotfiles-testing-worktree-dot-test\n'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+_pre_edit_playbook_reminder() {
+  local fp rule_id
+  while IFS= read -r fp; do
+    [ -n "$fp" ] || continue
+    rule_id=$(_pre_edit_playbook_rule_id "$fp") || continue
+    # Keyed by rule-id (not a single shared marker) so distinct playbooks each
+    # get one reminder per prompt even when a multi-file apply_patch touches
+    # several of them at once.
+    _hook_once_per_prompt "playbook-reminder-$rule_id" || continue
+    _hook_remind "Apply agent-rule-id: $rule_id before this edit."
+  done <<<"$AGENTGUARD_EDIT_FILES"
+}
+
+# Warns about the git-worktree-default playbook the first time this prompt
+# edits a file in a repo's PRIMARY checkout (not an already-isolated linked
+# worktree), so isolation gets decided before edits pile up in a shared
+# checkout. Replicates the same git-dir vs git-common-dir comparison the
+# playbook itself teaches: they differ for a linked worktree (its git-dir is
+# an absolute .git/worktrees/<name> path) and match for the primary checkout,
+# so an agent already correctly isolated does not get re-warned. Applies to
+# any git repo on the machine, not just this one — deliberately not gated
+# behind _pre_edit_code_file, since worktree isolation is about repo-modifying
+# work in general, not just code. Uses _hook_warn rather than _hook_remind: an
+# unisolated checkout risks colliding with another concurrent agent's
+# in-flight work, which is a collision-risk warning, not a style/convention
+# nudge.
+_pre_edit_git_worktree_reminder() {
+  local fp dir git_dir common_dir
+  while IFS= read -r fp; do
+    [ -n "$fp" ] || continue
+    dir="${fp%/*}"
+    [ "$dir" != "$fp" ] || continue
+    # Only check an existing parent directory. Guessing via $PWD when it's
+    # missing would make this depend on the caller's cwd instead of the file
+    # actually being edited.
+    [ -d "$dir" ] || continue
+    git_dir=$(git -C "$dir" rev-parse --git-dir 2>/dev/null) || continue
+    common_dir=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || continue
+    [ "$git_dir" = "$common_dir" ] || continue
+    _hook_once_per_prompt "git-worktree-reminder" || return 0
+    _hook_warn 'Repo-modifying edit in the primary checkout, not a linked worktree: apply agent-rule-id: git-worktree-default now — isolate into a worktree (or confirm this is deliberately read-only/emergency/current-checkout work) before making further edits.'
+    return 0
+  done <<<"$AGENTGUARD_EDIT_FILES"
+}
+
 # Edit churn guard
 if ! _hook_flag_enabled "${AGENTGUARD_EDIT_CHURN_BYPASS:-}"; then
   while IFS= read -r _fp; do
@@ -135,5 +213,9 @@ done <<<"$AGENTGUARD_EDIT_FILES"
 _hook_source_extensions
 # Broad guidance should reinforce allowed code edits, not consume the
 # once-per-prompt marker on an edit that another guard already blocked.
-[ -z "$_HOOK_BLOCKED" ] && _pre_edit_comment_reminder
+if [ -z "$_HOOK_BLOCKED" ]; then
+  _pre_edit_git_worktree_reminder
+  _pre_edit_comment_reminder
+  _pre_edit_playbook_reminder
+fi
 _hook_finish

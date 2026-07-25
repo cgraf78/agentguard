@@ -3,6 +3,7 @@
 
 # shellcheck disable=SC2154 # shared apply_patch fixture is defined by agent-hook-helpers.sh.
 # shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+# shellcheck disable=SC2030,SC2031 # GIT_CONFIG_GLOBAL is intentionally subshell-scoped per fixture repo.
 AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
 . "$AGENTGUARD_TEST_HELPERS"
 
@@ -118,6 +119,83 @@ if jq -e '(has("suppressOutput") | not) and (.hookSpecificOutput.additionalConte
 else
   _fail "codex apply_patch reminder: context includes steer (got '$(cat "$codex_out")')"
 fi
+
+echo ""
+echo "=== pre-edit: playbook rule-id reminders ==="
+
+_reset_state
+playbook_dir=$(_tmpdir)
+
+_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$playbook_dir/thing.py\"}}"
+_assert_eq "playbook rule-id: python exit 0" "0" "$HOOK_EXIT"
+_assert_contains "playbook rule-id: python names rule-id" "agent-rule-id: language-python-style" "$HOOK_STDERR"
+
+_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$playbook_dir/other.py\"}}"
+_assert_not_contains "playbook rule-id: python once per prompt" "language-python-style" "$HOOK_STDERR"
+
+_reset_state
+_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$playbook_dir/thing.rs\"}}"
+_assert_contains "playbook rule-id: rust names rule-id" "agent-rule-id: language-rust-style" "$HOOK_STDERR"
+
+_reset_state
+_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$playbook_dir/thing.txt\"}}"
+_assert_not_contains "playbook rule-id: unmapped extension has no rule-id reminder" "agent-rule-id:" "$HOOK_STDERR"
+
+_reset_state
+dotfiles_dir="$playbook_dir/.config/dot"
+mkdir -p "$dotfiles_dir"
+_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$dotfiles_dir/settings.toml\"}}"
+_assert_contains "playbook rule-id: dotfiles structured config names schema rule" \
+  "agent-rule-id: checkrun-schema-association-review" "$HOOK_STDERR"
+
+_reset_state
+_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$dotfiles_dir/README.md\"}}"
+_assert_contains "playbook rule-id: dotfiles catch-all names testing rule" \
+  "agent-rule-id: dotfiles-testing-worktree-dot-test" "$HOOK_STDERR"
+
+echo ""
+echo "=== pre-edit: git worktree isolation warning ==="
+
+_reset_state
+worktree_repo=$(_tmpdir)
+(
+  cd "$worktree_repo" || exit 1
+  export GIT_CONFIG_GLOBAL="$worktree_repo/.gitconfig-test"
+  : >"$GIT_CONFIG_GLOBAL"
+  git init -q
+  git config user.email test@test.local
+  git config user.name "Test User"
+  printf 'x = 1\n' >tracked.py
+  git add tracked.py
+  git commit -q -m seed
+)
+
+_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$worktree_repo/tracked.py\"}}"
+_assert_eq "git worktree warning: exit 0" "0" "$HOOK_EXIT"
+_assert_contains "git worktree warning: WARNING in stderr" "WARNING" "$HOOK_STDERR"
+_assert_contains "git worktree warning: names rule-id" "agent-rule-id: git-worktree-default" "$HOOK_STDERR"
+_assert_contains "git worktree warning: emits hook context" "additionalContext" "$HOOK_STDOUT"
+
+_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$worktree_repo/tracked.py\"}}"
+_assert_not_contains "git worktree warning: once per prompt" "git-worktree-default" "$HOOK_STDERR"
+
+_reset_state
+non_repo_dir=$(_tmpdir)
+_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$non_repo_dir/plain.py\"}}"
+_assert_not_contains "git worktree warning: no warning outside a repo" "git-worktree-default" "$HOOK_STDERR"
+
+_reset_state
+linked_worktree=$(mktemp -d "$TEST_TMPDIR/linked-worktree.XXXXXX")
+rmdir "$linked_worktree"
+(
+  cd "$worktree_repo" || exit 1
+  export GIT_CONFIG_GLOBAL="$worktree_repo/.gitconfig-test"
+  git worktree add -q -b linked-worktree-branch "$linked_worktree" >/dev/null
+)
+_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$linked_worktree/tracked.py\"}}"
+_assert_eq "git worktree warning: linked worktree exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "git worktree warning: no warning already inside a linked worktree" \
+  "git-worktree-default" "$HOOK_STDERR"
 
 # ---------------------------------------------------------------------------
 # Tests: agent-hook-pre-edit + post-edit — edit churn detection
