@@ -218,11 +218,12 @@ To add a new managed agent runtime:
 - `agent-hook-post-bash` scans command stdout for high-confidence credential
   patterns. Stdout extraction is centralized so agent-specific payload names do
   not leak into the base hook.
-- `agent-hook-pre-edit` parses edited paths, reminds once per user prompt on
-  code/config edits to apply AGENTS.md design/workflow/code-style guidance plus
-  any loaded language-specific rule fragments, warns or blocks repeated edits to
-  the same file unless `AGENTGUARD_EDIT_CHURN_BYPASS` is enabled, and leaves
-  room for environment-specific generated-file or readonly-file guards.
+- `agent-hook-pre-edit` parses edited paths, reminds on code/config edits to
+  apply AGENTS.md design/workflow/code-style guidance, reminds about any
+  on-demand playbook whose trigger the edited file matches, warns or blocks
+  repeated edits to the same file unless `AGENTGUARD_EDIT_CHURN_BYPASS` is
+  enabled, and leaves room for environment-specific generated-file or
+  readonly-file guards.
 - `agent-hook-post-edit` formats changed files through
   `sley hook format-file`. Broader lint and verification policy stays in the
   native commit hooks.
@@ -260,6 +261,39 @@ projects without collapsing context onto the home directory itself.
 
 Claude-specific extensions auto-name untitled sessions and run the daily
 `claude-templates update` refresh in the background.
+
+## On-Demand Playbook Reminders
+
+`agent-hook-pre-edit` reminds about on-demand playbooks, but holds no list of
+languages, extensions, or project paths itself. It reads a machine index that
+whatever tool manages the user's agent rules generates, so a new playbook takes
+effect as soon as its owner regenerates the index and AgentGuard needs no
+release to learn about it. A guard installed across every repo on a machine
+should not carry any one project's trigger table.
+
+Set `AGENTGUARD_PLAYBOOK_INDEX` to point at the index; it defaults to
+`$XDG_DATA_HOME/dot/agent-playbook-index`. With no index present the hook stays
+silent. The first line declares the grammar version, rows are tab-separated,
+and `#` lines are comments:
+
+```text
+# agent-playbook-index-v1
+<rule-id> <TAB> <path> <TAB> <trigger> <TAB> <severity> <TAB> <alternative>...
+```
+
+Alternatives are OR-ed; whitespace-separated terms inside one alternative are
+AND-ed. Severity `warn` emits a warning, anything else a reminder. Supported
+terms are `glob:<pattern>`, `shebang:<interpreter>` (with `env` skipped and
+version suffixes stripped, so extensionless scripts still match),
+`git-tracked:<git-dir>|<work-tree>`, and `repo-primary-checkout`. An unknown
+term never matches, and an index declaring a version this hook does not speak
+is skipped entirely, so a newer index degrades to silence rather than to
+confident nonsense.
+
+Reminders are deduplicated per rule id and re-armed every
+`AGENTGUARD_PLAYBOOK_REMINDER_WINDOW` edits (default `25`). A single
+once-per-prompt marker assumes a prompt is short; one turn can run hundreds of
+tool calls, and a reminder that fired at call 5 is out of context by call 180.
 
 ## Script Notes
 

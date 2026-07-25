@@ -72,10 +72,11 @@ _pre_edit_comment_reminder() {
     [ -n "$fp" ] || continue
     _pre_edit_code_file "$fp" || continue
     # This is deliberately a reminder, not a lint. The durable rule text lives
-    # in the agent-agnostic AGENTS.md. Emit it once per user prompt so it stays
-    # near the first code edit without becoming repetitive hook noise during a
-    # multi-file refactor.
-    _hook_once_per_prompt "code-edit-reminder" || return 0
+    # in the agent-agnostic AGENTS.md. Emit it once per window so it stays near
+    # the first code edit without becoming repetitive hook noise during a
+    # multi-file refactor, while still re-surfacing in a long turn.
+    _hook_once_per_window "code-edit-reminder" \
+      "${AGENTGUARD_PLAYBOOK_REMINDER_WINDOW:-25}" || return 0
     # _hook_remind handles both human-visible stderr and model-visible hook
     # context, so callers do not need to duplicate those channels.
     _hook_remind "$reminder"
@@ -83,81 +84,244 @@ _pre_edit_comment_reminder() {
   done <<<"$AGENTGUARD_EDIT_FILES"
 }
 
-# Maps an edited file to the agent-rule-id of the on-demand playbook (see
-# ~/.config/dot/agent-playbooks.d and agent-rule-id: global-on-demand-playbooks)
-# whose trigger the path matches. Data-driven and repo-agnostic on purpose:
-# this table is the shared substrate for reminding about ANY project's
-# playbook, not just the ones listed today — add a case arm whenever a new
-# playbook's trigger is recognizable from a file's extension or path, whether
-# it is language-scoped, dotfiles-scoped, or scoped to some other project
-# entirely.
-_pre_edit_playbook_rule_id() {
-  local fp="$1"
-  case "$fp" in
-    *.py) printf 'language-python-style\n' ;;
-    *.rs) printf 'language-rust-style\n' ;;
-    *.lua) printf 'language-lua-style\n' ;;
-    *.c | *.cc | *.cpp | *.cxx | *.h | *.hh | *.hpp | *.hxx | *.m | *.mm)
-      printf 'language-cpp-style\n'
+# ---------------------------------------------------------------------------
+# On-demand playbook reminders
+#
+# Playbooks are owned by whatever tool manages the user's agent rules; this hook
+# only consumes the machine index that tool generates. AgentGuard therefore
+# holds NO list of languages, extensions, or project paths: a new playbook shows
+# up here the moment its owner regenerates the index, and AgentGuard needs no
+# release to learn about it. That split is deliberate — a guard shared across
+# every repo on the machine must not carry one project's trigger table.
+#
+# Index grammar (tab-separated, `#` comment lines ignored). The first line must
+# declare the version this hook speaks:
+#   # agent-playbook-index-v1
+#   <rule-id> <TAB> <path> <TAB> <trigger> <TAB> <severity> <TAB> <alternative>...
+# Alternatives are OR-ed. Whitespace-separated terms inside one alternative are
+# AND-ed. Unknown term types never match and an unrecognized version is skipped
+# outright, so a newer index degrades to silence rather than to false reminders.
+# ---------------------------------------------------------------------------
+
+_playbook_index_path() {
+  if [ -n "${AGENTGUARD_PLAYBOOK_INDEX:-}" ]; then
+    printf '%s\n' "$AGENTGUARD_PLAYBOOK_INDEX"
+    return 0
+  fi
+  printf '%s/dot/agent-playbook-index\n' "${XDG_DATA_HOME:-$HOME/.local/share}"
+}
+
+# Print the interpreter name from a file's shebang, with any version suffix
+# stripped so `shebang:python` covers python3 and python3.12 alike.
+#
+# This is what makes extensionless scripts visible. Most hook, CLI, and
+# git-hook files carry no extension at all, so an extension-only matcher would
+# silently skip exactly the files most likely to need a style playbook.
+_playbook_shebang_interpreter() {
+  local fp="$1" first interp
+  [ -f "$fp" ] || return 1
+  [ -r "$fp" ] || return 1
+  IFS= read -r first <"$fp" 2>/dev/null || return 1
+  case "$first" in
+    '#!'*) ;;
+    *) return 1 ;;
+  esac
+
+  first="${first#\#!}"
+  # `env` forwards to the real interpreter, optionally after its own switches.
+  # shellcheck disable=SC2086 # splitting the shebang into words is the point.
+  set -- $first
+  while [ "$#" -gt 0 ]; do
+    interp="${1##*/}"
+    case "$interp" in
+      env | -*) shift ;;
+      *=*) shift ;;
+      *) break ;;
+    esac
+  done
+  [ -n "${interp:-}" ] || return 1
+
+  # Trailing version digits and dots only; `sh` and `bash` keep their names.
+  while :; do
+    case "$interp" in
+      *[0-9] | *.) interp="${interp%?}" ;;
+      *) break ;;
+    esac
+  done
+  [ -n "$interp" ] || return 1
+  printf '%s\n' "$interp"
+}
+
+# True when the file belongs to the given repo, addressed as <git-dir>|<work-tree>.
+#
+# Repo membership, not path shape, is what identifies a managed file: a bare
+# dotfiles repo checked out over $HOME tracks ~/.zshrc, whose path says nothing
+# about dotfiles. An untracked file still matches when its directory already
+# holds tracked files, so creating a new file in a managed tree is covered too.
+_playbook_git_tracked() {
+  local spec="$1" fp="$2" git_dir work_tree dir
+  git_dir="${spec%%|*}"
+  work_tree="${spec#*|}"
+  [ -n "$git_dir" ] && [ -n "$work_tree" ] || return 1
+  [ "$git_dir" != "$spec" ] || return 1
+  # The index may carry `~/`-relative repo paths; expand them here rather than
+  # requiring the generator to bake in one machine's absolute home.
+  case "$git_dir" in
+    \~/*) git_dir="$HOME/${git_dir#\~/}" ;;
+  esac
+  case "$work_tree" in
+    \~/*) work_tree="$HOME/${work_tree#\~/}" ;;
+  esac
+  [ -d "$git_dir" ] || return 1
+
+  git --git-dir="$git_dir" --work-tree="$work_tree" \
+    ls-files --error-unmatch -- "$fp" >/dev/null 2>&1 && return 0
+
+  dir="${fp%/*}"
+  [ "$dir" != "$fp" ] || return 1
+  [ -n "$(git --git-dir="$git_dir" --work-tree="$work_tree" \
+    ls-files -- "$dir" 2>/dev/null | head -n 1)" ]
+}
+
+# Resolve one git rev-parse directory answer to a canonical absolute path.
+#
+# rev-parse mixes relative and absolute answers depending on where it runs:
+# from a repo's top level both --git-dir and --git-common-dir print `.git`, but
+# from a subdirectory --git-dir prints an absolute path while --git-common-dir
+# prints `../.git`. Comparing the raw strings therefore reports "linked
+# worktree" for every file below the repo root. Canonicalize before comparing.
+_playbook_git_abs_dir() {
+  local dir="$1" query="$2" answer
+  answer=$(git -C "$dir" rev-parse "$query" 2>/dev/null) || return 1
+  [ -n "$answer" ] || return 1
+  (cd "$dir" && cd "$answer" && pwd -P) 2>/dev/null
+}
+
+# True when the file sits in a repo's primary checkout rather than a linked
+# worktree. git-dir and git-common-dir diverge inside a linked worktree, which
+# is the same comparison the worktree playbook itself teaches.
+_playbook_repo_primary_checkout() {
+  local fp="$1" dir git_dir common_dir
+  dir="${fp%/*}"
+  [ "$dir" != "$fp" ] || return 1
+  # Only probe an existing parent directory. Falling back to $PWD would make the
+  # answer depend on the caller's cwd instead of the file being edited.
+  [ -d "$dir" ] || return 1
+  git_dir=$(_playbook_git_abs_dir "$dir" --git-dir) || return 1
+  common_dir=$(_playbook_git_abs_dir "$dir" --git-common-dir) || return 1
+  [ -n "$git_dir" ] && [ "$git_dir" = "$common_dir" ]
+}
+
+_playbook_term_matches() {
+  local term="$1" fp="$2" interp
+  case "$term" in
+    glob:*)
+      # shellcheck disable=SC2254 # the index supplies the pattern deliberately.
+      case "$fp" in
+        ${term#glob:}) return 0 ;;
+        *) return 1 ;;
+      esac
       ;;
-    *.sh | *.bash | *.zsh)
-      printf 'language-shell-style\n'
+    shebang:*)
+      interp=$(_playbook_shebang_interpreter "$fp") || return 1
+      [ "$interp" = "${term#shebang:}" ]
       ;;
-    */.config/dot/*.json | */.config/dot/*.jsonc | */.config/dot/*.yaml | \
-      */.config/dot/*.yml | */.config/dot/*.toml | \
-      */.dotfiles*/*.json | */.dotfiles*/*.jsonc | */.dotfiles*/*.yaml | \
-      */.dotfiles*/*.yml | */.dotfiles*/*.toml)
-      printf 'checkrun-schema-association-review\n'
-      ;;
-    */.config/dot/* | */.dotfiles*/*)
-      printf 'dotfiles-testing-worktree-dot-test\n'
-      ;;
+    git-tracked:*) _playbook_git_tracked "${term#git-tracked:}" "$fp" ;;
+    repo-primary-checkout) _playbook_repo_primary_checkout "$fp" ;;
     *) return 1 ;;
   esac
 }
 
-_pre_edit_playbook_reminder() {
-  local fp rule_id
-  while IFS= read -r fp; do
-    [ -n "$fp" ] || continue
-    rule_id=$(_pre_edit_playbook_rule_id "$fp") || continue
-    # Keyed by rule-id (not a single shared marker) so distinct playbooks each
-    # get one reminder per prompt even when a multi-file apply_patch touches
-    # several of them at once.
-    _hook_once_per_prompt "playbook-reminder-$rule_id" || continue
-    _hook_remind "Apply agent-rule-id: $rule_id before this edit."
-  done <<<"$AGENTGUARD_EDIT_FILES"
+_playbook_alternative_matches() {
+  local alternative="$1" fp="$2" term rc=0 glob_state
+  [ -n "$alternative" ] || return 1
+
+  # Splitting the alternative into terms must not also glob them: a term like
+  # `glob:*.py` would otherwise be pathname-expanded against the cwd.
+  case "$-" in
+    *f*) glob_state=off ;;
+    *) glob_state=on ;;
+  esac
+  set -f
+  # shellcheck disable=SC2086 # splitting into terms is the point; globbing is off.
+  set -- $alternative
+  [ "$glob_state" = "on" ] && set +f
+
+  # Cheapest terms first. glob and shebang are a string test and one file read;
+  # the repo terms fork git. Ordering by cost lets a non-matching alternative
+  # bail before paying for a subprocess, which matters because this runs on
+  # every edit.
+  for term in "$@"; do
+    case "$term" in
+      glob:*) _playbook_term_matches "$term" "$fp" || return 1 ;;
+    esac
+  done
+  for term in "$@"; do
+    case "$term" in
+      shebang:*) _playbook_term_matches "$term" "$fp" || return 1 ;;
+    esac
+  done
+  for term in "$@"; do
+    case "$term" in
+      glob:* | shebang:*) ;;
+      *) _playbook_term_matches "$term" "$fp" || rc=1 ;;
+    esac
+    [ "$rc" -eq 0 ] || return 1
+  done
+  return 0
 }
 
-# Warns about the git-worktree-default playbook the first time this prompt
-# edits a file in a repo's PRIMARY checkout (not an already-isolated linked
-# worktree), so isolation gets decided before edits pile up in a shared
-# checkout. Replicates the same git-dir vs git-common-dir comparison the
-# playbook itself teaches: they differ for a linked worktree (its git-dir is
-# an absolute .git/worktrees/<name> path) and match for the primary checkout,
-# so an agent already correctly isolated does not get re-warned. Applies to
-# any git repo on the machine, not just this one — deliberately not gated
-# behind _pre_edit_code_file, since worktree isolation is about repo-modifying
-# work in general, not just code. Uses _hook_warn rather than _hook_remind: an
-# unisolated checkout risks colliding with another concurrent agent's
-# in-flight work, which is a collision-risk warning, not a style/convention
-# nudge.
-_pre_edit_git_worktree_reminder() {
-  local fp dir git_dir common_dir
+# Emit one reminder per matching playbook, at the severity the index declares.
+#
+# The message is built entirely from index data — trigger, rule id, path — so
+# the reminder text stays owned by the playbook rather than duplicated here.
+# Including the resolved path matters: hooks name playbooks by rule id, and an
+# agent that has to search for the file is an agent that skips reading it.
+_pre_edit_playbook_reminder() {
+  local index fp rule_id path trigger severity alternatives matched line header
+
+  index="$(_playbook_index_path)"
+  [ -f "$index" ] || return 0
+
+  # Unknown terms already degrade to silence, but a future grammar could also
+  # reorder columns, and misreading those as rule ids and paths would produce
+  # confident nonsense. Refuse an index whose declared version we do not speak.
+  IFS= read -r header <"$index" 2>/dev/null || return 0
+  case "$header" in
+    '# agent-playbook-index-v1') ;;
+    *) return 0 ;;
+  esac
+
   while IFS= read -r fp; do
     [ -n "$fp" ] || continue
-    dir="${fp%/*}"
-    [ "$dir" != "$fp" ] || continue
-    # Only check an existing parent directory. Guessing via $PWD when it's
-    # missing would make this depend on the caller's cwd instead of the file
-    # actually being edited.
-    [ -d "$dir" ] || continue
-    git_dir=$(git -C "$dir" rev-parse --git-dir 2>/dev/null) || continue
-    common_dir=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || continue
-    [ "$git_dir" = "$common_dir" ] || continue
-    _hook_once_per_prompt "git-worktree-reminder" || return 0
-    _hook_warn 'Repo-modifying edit in the primary checkout, not a linked worktree: apply agent-rule-id: git-worktree-default now — isolate into a worktree (or confirm this is deliberately read-only/emergency/current-checkout work) before making further edits.'
-    return 0
+    while IFS=$'\t' read -r rule_id path trigger severity alternatives; do
+      case "$rule_id" in
+        '' | '#'*) continue ;;
+      esac
+      [ -n "$alternatives" ] || continue
+
+      matched=1
+      while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        if _playbook_alternative_matches "$line" "$fp"; then
+          matched=0
+          break
+        fi
+      done <<<"$(printf '%s' "$alternatives" | tr '\t' '\n')"
+      [ "$matched" -eq 0 ] || continue
+
+      # Keyed per rule-id so distinct playbooks each get their own reminder even
+      # when one multi-file apply_patch touches several at once, and re-armed on
+      # a window so a long turn does not lose the reminder after a single fire.
+      _hook_once_per_window "playbook-reminder-$rule_id" \
+        "${AGENTGUARD_PLAYBOOK_REMINDER_WINDOW:-25}" || continue
+
+      if [ "$severity" = "warn" ]; then
+        _hook_warn "$trigger: apply agent-rule-id: $rule_id before continuing — $path"
+      else
+        _hook_remind "$trigger: apply agent-rule-id: $rule_id before this edit — $path"
+      fi
+    done <"$index"
   done <<<"$AGENTGUARD_EDIT_FILES"
 }
 
@@ -214,7 +378,9 @@ _hook_source_extensions
 # Broad guidance should reinforce allowed code edits, not consume the
 # once-per-prompt marker on an edit that another guard already blocked.
 if [ -z "$_HOOK_BLOCKED" ]; then
-  _pre_edit_git_worktree_reminder
+  # Ticked once per allowed edit, before any windowed check, so every reminder
+  # ages against the same clock and a blocked edit does not advance it.
+  _hook_activity_tick
   _pre_edit_comment_reminder
   _pre_edit_playbook_reminder
 fi

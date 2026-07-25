@@ -121,81 +121,201 @@ else
 fi
 
 echo ""
-echo "=== pre-edit: playbook rule-id reminders ==="
+echo "=== pre-edit: playbook index reminders ==="
 
-_reset_state
+# The hook holds no trigger table of its own, so every case below is driven by
+# a fixture index. That is the contract worth testing: whatever generates the
+# index owns the triggers, and AgentGuard only has to match them.
 playbook_dir=$(_tmpdir)
-
-_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$playbook_dir/thing.py\"}}"
-_assert_eq "playbook rule-id: python exit 0" "0" "$HOOK_EXIT"
-_assert_contains "playbook rule-id: python names rule-id" "agent-rule-id: language-python-style" "$HOOK_STDERR"
-
-_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$playbook_dir/other.py\"}}"
-_assert_not_contains "playbook rule-id: python once per prompt" "language-python-style" "$HOOK_STDERR"
-
-_reset_state
-_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$playbook_dir/thing.rs\"}}"
-_assert_contains "playbook rule-id: rust names rule-id" "agent-rule-id: language-rust-style" "$HOOK_STDERR"
-
-_reset_state
-_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$playbook_dir/thing.txt\"}}"
-_assert_not_contains "playbook rule-id: unmapped extension has no rule-id reminder" "agent-rule-id:" "$HOOK_STDERR"
-
-_reset_state
-dotfiles_dir="$playbook_dir/.config/dot"
-mkdir -p "$dotfiles_dir"
-_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$dotfiles_dir/settings.toml\"}}"
-_assert_contains "playbook rule-id: dotfiles structured config names schema rule" \
-  "agent-rule-id: checkrun-schema-association-review" "$HOOK_STDERR"
-
-_reset_state
-_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$dotfiles_dir/README.md\"}}"
-_assert_contains "playbook rule-id: dotfiles catch-all names testing rule" \
-  "agent-rule-id: dotfiles-testing-worktree-dot-test" "$HOOK_STDERR"
-
-echo ""
-echo "=== pre-edit: git worktree isolation warning ==="
-
-_reset_state
-worktree_repo=$(_tmpdir)
+playbook_repo=$(_tmpdir)
 (
-  cd "$worktree_repo" || exit 1
-  export GIT_CONFIG_GLOBAL="$worktree_repo/.gitconfig-test"
+  cd "$playbook_repo" || exit 1
+  export GIT_CONFIG_GLOBAL="$playbook_repo/.gitconfig-test"
   : >"$GIT_CONFIG_GLOBAL"
   git init -q
   git config user.email test@test.local
   git config user.name "Test User"
-  printf 'x = 1\n' >tracked.py
-  git add tracked.py
+  mkdir -p nested
+  printf 'x = 1\n' >nested/tracked.conf
+  git add nested/tracked.conf
   git commit -q -m seed
 )
 
-_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$worktree_repo/tracked.py\"}}"
-_assert_eq "git worktree warning: exit 0" "0" "$HOOK_EXIT"
-_assert_contains "git worktree warning: WARNING in stderr" "WARNING" "$HOOK_STDERR"
-_assert_contains "git worktree warning: names rule-id" "agent-rule-id: git-worktree-default" "$HOOK_STDERR"
-_assert_contains "git worktree warning: emits hook context" "additionalContext" "$HOOK_STDOUT"
+playbook_index="$playbook_dir/playbook-index"
+{
+  printf '# agent-playbook-index-v1\n'
+  printf 'language-python-style\t/pb/python.md\tEditing Python\tremind\tglob:*.py\tshebang:python\n'
+  printf 'language-shell-style\t/pb/shell.md\tEditing shell\tremind\tglob:*.sh\tshebang:bash\n'
+  printf 'dotfiles-testing\t/pb/dotfiles.md\tChanging dotfiles\tremind\tgit-tracked:%s/.git|%s\n' \
+    "$playbook_repo" "$playbook_repo"
+  printf 'schema-review\t/pb/schema.md\tEditing dotfiles config\tremind\tgit-tracked:%s/.git|%s glob:*.conf\n' \
+    "$playbook_repo" "$playbook_repo"
+  printf 'git-worktree-default\t/pb/worktrees.md\tModifying a Git repository\twarn\trepo-primary-checkout\n'
+  printf 'future-rule\t/pb/future.md\tSomething newer\tremind\tnot-a-known-term:x\n'
+} >"$playbook_index"
 
-_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$worktree_repo/tracked.py\"}}"
-_assert_not_contains "git worktree warning: once per prompt" "git-worktree-default" "$HOOK_STDERR"
+# Wrapper mirroring _run_hook, plus the index location and a small reminder
+# window so the re-arm behavior is testable without dozens of hook runs.
+_run_pre_edit_playbook() {
+  # shellcheck disable=SC2034 # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    AGENTGUARD_SESSION_ID="$TEST_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="agent"
+    CODEX_THREAD_ID=
+    AGENTGUARD_PLAYBOOK_INDEX="${2:-$playbook_index}"
+    AGENTGUARD_PLAYBOOK_REMINDER_WINDOW="${3:-2}"
+  )
+  _run_hook_env "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$1\"}}"
+}
+
+_reset_state
+_run_pre_edit_playbook "$playbook_dir/thing.py"
+_assert_eq "playbook index: glob match exit 0" "0" "$HOOK_EXIT"
+_assert_contains "playbook index: glob match names rule-id" \
+  "agent-rule-id: language-python-style" "$HOOK_STDERR"
+_assert_contains "playbook index: reminder carries the resolved path" \
+  "/pb/python.md" "$HOOK_STDERR"
+_assert_contains "playbook index: reminder carries the trigger" \
+  "Editing Python" "$HOOK_STDERR"
+_assert_contains "playbook index: reminder reaches hook context" \
+  "language-python-style" "$HOOK_STDOUT"
+
+_reset_state
+_run_pre_edit_playbook "$playbook_dir/thing.txt"
+_assert_not_contains "playbook index: unmatched file gets no reminder" \
+  "agent-rule-id:" "$HOOK_STDERR"
+
+# An extension-only matcher would miss extensionless scripts, which is most
+# hook, CLI, and git-hook files.
+_reset_state
+printf '#!/usr/bin/env bash\ntrue\n' >"$playbook_dir/extensionless-tool"
+_run_pre_edit_playbook "$playbook_dir/extensionless-tool"
+_assert_contains "playbook index: shebang matches an extensionless script" \
+  "agent-rule-id: language-shell-style" "$HOOK_STDERR"
+
+_reset_state
+printf '#!/usr/bin/env python3.12\nx = 1\n' >"$playbook_dir/versioned-tool"
+_run_pre_edit_playbook "$playbook_dir/versioned-tool"
+_assert_contains "playbook index: shebang strips the interpreter version" \
+  "agent-rule-id: language-python-style" "$HOOK_STDERR"
+
+_reset_state
+printf 'no shebang here\n' >"$playbook_dir/plain-tool"
+_run_pre_edit_playbook "$playbook_dir/plain-tool"
+_assert_not_contains "playbook index: no shebang means no shebang match" \
+  "agent-rule-id:" "$HOOK_STDERR"
+
+# Repo membership, not path shape: nothing in this path says "dotfiles".
+_reset_state
+_run_pre_edit_playbook "$playbook_repo/nested/tracked.conf"
+_assert_contains "playbook index: git-tracked matches a tracked file" \
+  "agent-rule-id: dotfiles-testing" "$HOOK_STDERR"
+_assert_contains "playbook index: AND terms match together" \
+  "agent-rule-id: schema-review" "$HOOK_STDERR"
+
+_reset_state
+_run_pre_edit_playbook "$playbook_repo/nested/brand-new.conf"
+_assert_contains "playbook index: git-tracked covers a new file in a tracked dir" \
+  "agent-rule-id: dotfiles-testing" "$HOOK_STDERR"
+
+_reset_state
+_run_pre_edit_playbook "$playbook_dir/outside.conf"
+_assert_not_contains "playbook index: git-tracked ignores files outside the repo" \
+  "agent-rule-id: dotfiles-testing" "$HOOK_STDERR"
+_assert_not_contains "playbook index: AND term fails outside the repo" \
+  "agent-rule-id: schema-review" "$HOOK_STDERR"
+
+_reset_state
+_run_pre_edit_playbook "$playbook_dir/thing.py"
+_assert_not_contains "playbook index: unknown term type never matches" \
+  "agent-rule-id: future-rule" "$HOOK_STDERR"
+
+echo ""
+echo "=== pre-edit: playbook severity and worktree isolation ==="
+
+_reset_state
+_run_pre_edit_playbook "$playbook_repo/nested/tracked.conf"
+_assert_contains "playbook severity: warn severity emits WARNING" "WARNING" "$HOOK_STDERR"
+_assert_contains "playbook severity: warn names the worktree rule-id" \
+  "agent-rule-id: git-worktree-default" "$HOOK_STDERR"
+_assert_contains "playbook severity: warn reaches hook context" \
+  "additionalContext" "$HOOK_STDOUT"
+
+# rev-parse answers --git-dir absolutely but --git-common-dir relatively when it
+# runs below the repo root, so a raw string comparison reports "linked worktree"
+# for every file in a subdirectory. Pin both depths.
+_reset_state
+_run_pre_edit_playbook "$playbook_repo/root-level.py"
+_assert_contains "playbook severity: warn fires at the repo root" \
+  "agent-rule-id: git-worktree-default" "$HOOK_STDERR"
+
+_reset_state
+_run_pre_edit_playbook "$playbook_repo/nested/deeper.py"
+_assert_contains "playbook severity: warn fires below the repo root" \
+  "agent-rule-id: git-worktree-default" "$HOOK_STDERR"
+
+_reset_state
+playbook_linked=$(mktemp -d "$TEST_TMPDIR/pb-linked.XXXXXX")
+rmdir "$playbook_linked"
+(
+  cd "$playbook_repo" || exit 1
+  export GIT_CONFIG_GLOBAL="$playbook_repo/.gitconfig-test"
+  git worktree add -q -b pb-linked-branch "$playbook_linked" >/dev/null
+)
+_run_pre_edit_playbook "$playbook_linked/nested/tracked.conf"
+_assert_eq "playbook severity: linked worktree exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "playbook severity: no warning inside a linked worktree" \
+  "git-worktree-default" "$HOOK_STDERR"
 
 _reset_state
 non_repo_dir=$(_tmpdir)
-_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$non_repo_dir/plain.py\"}}"
-_assert_not_contains "git worktree warning: no warning outside a repo" "git-worktree-default" "$HOOK_STDERR"
+_run_pre_edit_playbook "$non_repo_dir/plain.py"
+_assert_not_contains "playbook severity: no worktree warning outside a repo" \
+  "git-worktree-default" "$HOOK_STDERR"
+
+echo ""
+echo "=== pre-edit: playbook reminder dedup and re-arm ==="
 
 _reset_state
-linked_worktree=$(mktemp -d "$TEST_TMPDIR/linked-worktree.XXXXXX")
-rmdir "$linked_worktree"
-(
-  cd "$worktree_repo" || exit 1
-  export GIT_CONFIG_GLOBAL="$worktree_repo/.gitconfig-test"
-  git worktree add -q -b linked-worktree-branch "$linked_worktree" >/dev/null
-)
-_run_hook "$PRE_EDIT" "{\"tool_input\":{\"file_path\":\"$linked_worktree/tracked.py\"}}"
-_assert_eq "git worktree warning: linked worktree exit 0" "0" "$HOOK_EXIT"
-_assert_not_contains "git worktree warning: no warning already inside a linked worktree" \
-  "git-worktree-default" "$HOOK_STDERR"
+_run_pre_edit_playbook "$playbook_dir/thing.py"
+_assert_contains "playbook dedup: first edit reminds" \
+  "language-python-style" "$HOOK_STDERR"
+_run_pre_edit_playbook "$playbook_dir/other.py"
+_assert_not_contains "playbook dedup: second edit inside the window is quiet" \
+  "language-python-style" "$HOOK_STDERR"
+# A prompt can run hundreds of tool calls; a reminder that fired once at the
+# start is long out of context by the end of a long turn.
+_run_pre_edit_playbook "$playbook_dir/third.py"
+_assert_contains "playbook dedup: reminder re-arms after the window" \
+  "language-python-style" "$HOOK_STDERR"
+
+_reset_state
+_run_pre_edit_playbook "$playbook_dir/thing.py" "$playbook_dir/missing-index"
+_assert_eq "playbook index: missing index exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "playbook index: missing index emits no rule-id reminder" \
+  "agent-rule-id:" "$HOOK_STDERR"
+
+# A future grammar could reorder columns. Reading those as rule ids and paths
+# would produce confident nonsense, so an unknown version is skipped outright.
+_reset_state
+playbook_future_index="$playbook_dir/future-index"
+{
+  printf '# agent-playbook-index-v99\n'
+  printf 'language-python-style\t/pb/python.md\tEditing Python\tremind\tglob:*.py\n'
+} >"$playbook_future_index"
+_run_pre_edit_playbook "$playbook_dir/thing.py" "$playbook_future_index"
+_assert_eq "playbook index: unknown grammar version exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "playbook index: unknown grammar version is skipped" \
+  "agent-rule-id:" "$HOOK_STDERR"
+
+_reset_state
+playbook_headerless_index="$playbook_dir/headerless-index"
+printf 'language-python-style\t/pb/python.md\tEditing Python\tremind\tglob:*.py\n' \
+  >"$playbook_headerless_index"
+_run_pre_edit_playbook "$playbook_dir/thing.py" "$playbook_headerless_index"
+_assert_not_contains "playbook index: missing version header is skipped" \
+  "agent-rule-id:" "$HOOK_STDERR"
 
 # ---------------------------------------------------------------------------
 # Tests: agent-hook-pre-edit + post-edit — edit churn detection

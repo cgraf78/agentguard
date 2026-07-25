@@ -23,6 +23,11 @@ another tool that follows the same hook protocol.
   file and blocks after `AGENTGUARD_EDIT_CHURN_BLOCK` edits. Defaults are `5`
   and `10`. Set `AGENTGUARD_EDIT_CHURN_BYPASS=1` to bypass the churn warning
   and block for a deliberate edit pass.
+- `agent-hook-pre-edit` reminds about on-demand playbooks from the index at
+  `AGENTGUARD_PLAYBOOK_INDEX` (default
+  `$XDG_DATA_HOME/dot/agent-playbook-index`), re-arming each reminder every
+  `AGENTGUARD_PLAYBOOK_REMINDER_WINDOW` edits (default `25`). The hook holds no
+  trigger table of its own; see the root README for the index grammar.
 - `agent-hook-pre-bash` can guard a broad bare-Git work tree when an integration
   sets `AGENTGUARD_PROTECTED_BARE_GIT_DIR`. Optional companion settings are
   `AGENTGUARD_PROTECTED_BARE_GIT_WORK_TREE` (defaults to `$HOME`),

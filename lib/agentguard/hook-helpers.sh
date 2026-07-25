@@ -218,6 +218,38 @@ _hook_once_per_session() {
   _hook_mark_once "$_HOOK_STATE_DIR" "$1"
 }
 
+# Path of the per-prompt activity counter a caller advances to age its markers.
+_hook_activity_counter_file() {
+  printf '%s/prompt-cycle/activity-count\n' "$_HOOK_STATE_DIR"
+}
+
+# Advance the per-prompt activity counter. Call once per hook invocation, before
+# any _hook_once_per_window check, so every guard ages against the same clock.
+_hook_activity_tick() {
+  _hook_counter_increment "$(_hook_activity_counter_file)"
+}
+
+# Like _hook_once_per_prompt, but re-arms every <window> units of activity.
+#
+# A pure once-per-prompt marker assumes a prompt is short. It is not: one turn
+# can run hundreds of tool calls, and a reminder that fired at call 5 is far out
+# of context by call 180 — possibly past a compaction boundary. Bucketing the
+# marker key by activity keeps a single burst of edits quiet while still
+# re-surfacing durable guidance across a long turn.
+_hook_once_per_window() {
+  local key="$1" window="${2:-1}" count bucket
+  case "$window" in
+    '' | *[!0-9]* | 0) window=1 ;;
+  esac
+  count=$(_hook_counter_read "$(_hook_activity_counter_file)")
+  # Callers tick before checking, so the first check of a prompt sees count 1.
+  # Biasing by one keeps that first check in bucket 0 and makes the bucket roll
+  # over exactly every <window> units, rather than one unit into the prompt.
+  [ "$count" -ge 1 ] || count=1
+  bucket=$(((count - 1) / window))
+  _hook_once_per_prompt "$key#$bucket"
+}
+
 _hook_flag_enabled() {
   case "${1:-}" in
     1 | true | TRUE | yes | YES | on | ON) return 0 ;;
