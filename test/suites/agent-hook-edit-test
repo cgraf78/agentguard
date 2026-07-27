@@ -420,6 +420,10 @@ echo "=== post-edit: missing sley is a broken install ==="
 
 broken_home=$(_tmpdir)
 _install_hook_fixture "$broken_home/.local" agent-hook-post-edit
+broken_bin=$(_tmpdir)
+for broken_tool in bash dirname jq readlink; do
+  ln -s "$(command -v "$broken_tool")" "$broken_bin/$broken_tool"
+done
 repo=$(_tmpdir)
 printf 'x = 1\n' >"$repo/edited.py"
 HOOK_EXIT=0
@@ -427,7 +431,7 @@ out_file=$(mktemp "$TEST_TMPDIR/out.XXXXXX")
 err_file=$(mktemp "$TEST_TMPDIR/err.XXXXXX")
 printf '%s' "{\"tool_input\":{\"file_path\":\"$repo/edited.py\"}}" |
   HOME="$broken_home" \
-    PATH="/usr/bin:/bin" \
+    PATH="$broken_bin" \
     AGENTGUARD_SESSION_ID="$TEST_SID" \
     AGENTGUARD_NAME="agent" \
     TMPDIR="$TEST_TMPDIR" \
