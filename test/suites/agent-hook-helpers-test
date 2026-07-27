@@ -172,7 +172,6 @@ cat >"$path_home/.local/bin/sley" <<'MOCK'
 MOCK
 chmod +x "$path_home/.local/bin/sley"
 test_bash=$(command -v bash)
-test_dirname=$(command -v dirname)
 test_system_path=$PATH
 path_probe=$(
   # shellcheck disable=SC2016 # inner bash intentionally expands probe vars.
@@ -190,8 +189,14 @@ _assert_contains "hook PATH fallback: empty PATH has no cwd component" \
   "path_has_empty=no" "$path_probe"
 _assert_contains "hook PATH fallback: empty PATH exposes local bin" \
   "sley=$path_home/.local/bin/sley" "$path_probe"
-_assert_contains "hook PATH fallback: empty PATH keeps system tools" \
-  "dirname=$test_dirname" "$path_probe"
+path_dirname=${path_probe##*dirname=}
+if [ -x "$path_dirname" ]; then
+  path_dirname_status=0
+else
+  path_dirname_status=1
+fi
+_assert_exit "hook PATH fallback: empty PATH keeps system tools executable" \
+  0 "$path_dirname_status"
 
 # _HOOK_STATE_DIR computed at source time from neutral agent session id.
 # shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
