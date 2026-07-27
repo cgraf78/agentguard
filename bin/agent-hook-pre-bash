@@ -225,13 +225,13 @@ case "$-" in
         _agentguard_scrub_status=$?
         _agentguard_close_private_descriptors
         if [ "$_agentguard_scrub_handshake" != agentguard-environment-scrub-v2 ]; then
-          echo "agent-hook-pre-bash: cannot rebuild a safe environment with /usr/bin/env and /bin/bash; refusing unguarded execution" >&2
+          echo "agent-hook-pre-bash: cannot rebuild a safe environment with $_agentguard_fixed_env and $_agentguard_fixed_bash; refusing unguarded execution" >&2
           exit 2
         fi
         exit "$_agentguard_scrub_status"
         ;;
       *)
-        echo "agent-hook-pre-bash: cannot inspect the environment with /usr/bin/awk; refusing unguarded execution" >&2
+        echo "agent-hook-pre-bash: cannot inspect the environment with $_agentguard_fixed_awk; refusing unguarded execution" >&2
         exit 2
         ;;
     esac
@@ -320,6 +320,7 @@ case "$-" in
       _AGENTGUARD_ENV_CLEAN
     unset _agentguard_private_fd_limit _agentguard_probe \
       _agentguard_environment_scan _agentguard_environment_scan_status \
+      _agentguard_fixed_awk _agentguard_fixed_env _agentguard_fixed_bash \
       _agentguard_bash_entry_declaration _agentguard_env_clean_declaration \
       _agentguard_scrub_handshake _agentguard_scrub_status \
       _agentguard_needs_modern_bash _agentguard_bash_major \

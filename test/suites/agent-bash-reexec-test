@@ -962,6 +962,7 @@ for _agentguard_control_name in \
 	_agentguard_stdin_state _agentguard_stdin_status \
 	_agentguard_complete _agentguard_name _agentguard_value _agentguard_end \
 	_agentguard_environment_scan _agentguard_environment_scan_status \
+  _agentguard_fixed_awk _agentguard_fixed_env _agentguard_fixed_bash \
   _agentguard_bash_entry_declaration _agentguard_env_clean_declaration \
   _agentguard_scrub_handshake _agentguard_scrub_status \
   _agentguard_needs_modern_bash _agentguard_bash_major \
@@ -1009,6 +1010,7 @@ for _agentguard_control_name in \
 	_agentguard_stdin_state _agentguard_stdin_status \
 	_agentguard_complete _agentguard_name _agentguard_value _agentguard_end \
 	_agentguard_environment_scan _agentguard_environment_scan_status \
+  _agentguard_fixed_awk _agentguard_fixed_env _agentguard_fixed_bash \
   _agentguard_bash_entry_declaration _agentguard_env_clean_declaration \
   _agentguard_scrub_handshake _agentguard_scrub_status \
   _agentguard_needs_modern_bash _agentguard_bash_major \

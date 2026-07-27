@@ -91,9 +91,9 @@ command is installed.
 The launcher trusts the fixed platform Bash, awk, and env paths and the
 absolute Bash candidate files above. Termux uses its corresponding fixed
 paths below `/data/data/com.termux/files/usr/bin`; other platforms use
-`/bin/bash -p`, `/usr/bin/awk`, and `/usr/bin/env`. The fixed
-`/bin/bash` interpreter is the bootstrap trust anchor and must be a working
-Bash. Candidate entry programs detect accidental non-Bash executables and
+`/bin/bash -p`, `/usr/bin/awk`, and `/usr/bin/env`. The selected fixed Bash
+interpreter is the bootstrap trust anchor and must be a working Bash.
+Candidate entry programs detect accidental non-Bash executables and
 avoid a validate-then-reopen race, but cannot authenticate a deliberately
 malicious file already installed at a trusted path. The `HOME` and `PATH`
 variables cannot add candidate paths; normal PATH-visible hook dependencies
