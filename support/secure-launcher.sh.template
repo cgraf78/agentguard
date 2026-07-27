@@ -7,6 +7,17 @@ case "$-" in
     unset FUNCNEST POSIXLY_CORRECT BASH_COMPAT
     export -n BASH_XTRACEFD 2>/dev/null || :
 
+    _agentguard_fixed_awk=/usr/bin/awk
+    _agentguard_fixed_env=/usr/bin/env
+    _agentguard_fixed_bash=/bin/bash
+    if [ -x /data/data/com.termux/files/usr/bin/awk ] &&
+      [ -x /data/data/com.termux/files/usr/bin/env ] &&
+      [ -x /data/data/com.termux/files/usr/bin/bash ]; then
+      _agentguard_fixed_awk=/data/data/com.termux/files/usr/bin/awk
+      _agentguard_fixed_env=/data/data/com.termux/files/usr/bin/env
+      _agentguard_fixed_bash=/data/data/com.termux/files/usr/bin/bash
+    fi
+
     # Bash uses fd 255 internally and older supported releases can crash when a
     # bootstrap redirection selects 256 or above. Treat 254 as the portable
     # ceiling and fail closed when two private descriptors are unavailable.
@@ -92,7 +103,7 @@ case "$-" in
         _agentguard_stdin_state
     }
 
-    _agentguard_environment_scan=$(/usr/bin/awk '
+    _agentguard_environment_scan=$("$_agentguard_fixed_awk" '
   BEGIN {
     dirty = 0
     for (name in ENVIRON) {
@@ -154,7 +165,8 @@ case "$-" in
         # shellcheck disable=SC2016 # The clean Bash expands the receiver body.
         _agentguard_scrub_handshake=$(
           _agentguard_write_environment |
-            /usr/bin/env -i /bin/bash --noprofile --norc -p -c '
+            "$_agentguard_fixed_env" -i "$_agentguard_fixed_bash" \
+              --noprofile --norc -p -c '
         set +o posix
         unset FUNCNEST POSIXLY_CORRECT BASH_COMPAT
         export -n BASH_XTRACEFD 2>/dev/null || :
@@ -239,12 +251,12 @@ case "$-" in
         echo "@ENTRY_NAME@: cannot reserve private bootstrap descriptors; refusing unguarded execution" >&2
         exit 2
       fi
-      for _agentguard_bash in \
-        /opt/homebrew/bin/bash /usr/local/bin/bash /bin/bash /usr/bin/bash; do
+      for _agentguard_bash in /opt/homebrew/bin/bash /usr/local/bin/bash /data/data/com.termux/files/usr/bin/bash /bin/bash /usr/bin/bash; do
         [ -x "$_agentguard_bash" ] || continue
         _agentguard_bash_handshake=$(
           # shellcheck disable=SC2016 # The candidate Bash expands the entry body.
-          /usr/bin/env -u FUNCNEST -u POSIXLY_CORRECT -u BASH_COMPAT \
+          "$_agentguard_fixed_env" \
+            -u FUNCNEST -u POSIXLY_CORRECT -u BASH_COMPAT \
             -u BASH_XTRACEFD -u _AGENTGUARD_BASH_ENTRY -u _AGENTGUARD_ENV_CLEAN \
             BASH_ENV='' ENV='' \
             "$_agentguard_bash" --noprofile --norc -p -c '

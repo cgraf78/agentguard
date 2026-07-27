@@ -57,7 +57,8 @@ Use shdeps to locate sourceable files instead of reconstructing install paths:
   before the script's first instruction, and no shell script can undo or reliably
   detect those earlier effects. Rejection of an otherwise ordinary, detectable
   explicit invocation is best-effort only, not a security guarantee. Before
-  candidate discovery, `/usr/bin/awk` must return an exact
+  candidate discovery, the fixed platform awk (`/usr/bin/awk`, or Termux's
+  `/data/data/com.termux/files/usr/bin/awk`) must return an exact
   clean or dirty environment sentinel. Raw exported-function entries trigger a
   clean `/bin/bash` environment rebuild: valid ordinary exported names and
   values travel as NUL-delimited records over the clean process's initial stdin,
@@ -87,8 +88,10 @@ status context, and
 `claude-templates` enables a Claude-specific maintenance hook when that
 command is installed.
 
-The launcher trusts the platform `/bin/bash -p`, `/usr/bin/awk`,
-`/usr/bin/env`, and the absolute Bash candidate files above. The fixed
+The launcher trusts the fixed platform Bash, awk, and env paths and the
+absolute Bash candidate files above. Termux uses its corresponding fixed
+paths below `/data/data/com.termux/files/usr/bin`; other platforms use
+`/bin/bash -p`, `/usr/bin/awk`, and `/usr/bin/env`. The fixed
 `/bin/bash` interpreter is the bootstrap trust anchor and must be a working
 Bash. Candidate entry programs detect accidental non-Bash executables and
 avoid a validate-then-reopen race, but cannot authenticate a deliberately

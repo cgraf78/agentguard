@@ -258,7 +258,7 @@ _install_hook_fixture \
   "$closing_install" agent-hook-pre-bash agentguard-classify-command
 for closing_entry in agent-hook-pre-bash agentguard-classify-command; do
   closing_path="$closing_install/bin/$closing_entry"
-  sed "s#/opt/homebrew/bin/bash /usr/local/bin/bash /bin/bash /usr/bin/bash#$closing_candidate $closing_candidate $closing_candidate $closing_candidate#" \
+  sed "s#/opt/homebrew/bin/bash /usr/local/bin/bash /data/data/com.termux/files/usr/bin/bash /bin/bash /usr/bin/bash#$closing_candidate $closing_candidate $closing_candidate $closing_candidate $closing_candidate#" \
     "$closing_path" >"$closing_path.tmp"
   command cat "$closing_path.tmp" >"$closing_path"
   rm -f "$closing_path.tmp"
@@ -1423,10 +1423,10 @@ _assert_contains "classifier: truncated environment failure is actionable" \
 no_modern_hook="$TEST_TMPDIR/agent-hook-pre-bash-no-modern"
 no_modern_classifier="$TEST_TMPDIR/agentguard-classify-command-no-modern"
 # shellcheck disable=SC2016 # The single quotes preserve the literal variable name.
-sed 's#/opt/homebrew/bin/bash /usr/local/bin/bash /bin/bash /usr/bin/bash#/definitely-missing-homebrew-bash /definitely-missing-local-bash /definitely-missing-bin-bash /definitely-missing-usr-bin-bash#' \
+sed 's#/opt/homebrew/bin/bash /usr/local/bin/bash /data/data/com.termux/files/usr/bin/bash /bin/bash /usr/bin/bash#/definitely-missing-homebrew-bash /definitely-missing-local-bash /definitely-missing-termux-bash /definitely-missing-bin-bash /definitely-missing-usr-bin-bash#' \
   "$PRE_BASH" >"$no_modern_hook"
 # shellcheck disable=SC2016 # The single quotes preserve the literal variable name.
-sed 's#/opt/homebrew/bin/bash /usr/local/bin/bash /bin/bash /usr/bin/bash#/definitely-missing-homebrew-bash /definitely-missing-local-bash /definitely-missing-bin-bash /definitely-missing-usr-bin-bash#' \
+sed 's#/opt/homebrew/bin/bash /usr/local/bin/bash /data/data/com.termux/files/usr/bin/bash /bin/bash /usr/bin/bash#/definitely-missing-homebrew-bash /definitely-missing-local-bash /definitely-missing-termux-bash /definitely-missing-bin-bash /definitely-missing-usr-bin-bash#' \
   "$CLASSIFY_COMMAND" >"$no_modern_classifier"
 chmod +x "$no_modern_hook" "$no_modern_classifier"
 set +e
