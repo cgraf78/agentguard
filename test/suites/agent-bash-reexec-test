@@ -73,7 +73,7 @@ explicit_classifier="$explicit_install/bin/agentguard-classify-command"
 explicit_application_capture="$TEST_TMPDIR/explicit-application.capture"
 explicit_startup_capture="$TEST_TMPDIR/explicit-startup.capture"
 explicit_input="$TEST_TMPDIR/explicit.input"
-_install_hook_fixture "$explicit_install" agent-hook-pre-bash agentguard-classify-command
+_install_candidate_fixture "$explicit_install" "$REAL_BASH"
 cat >"$explicit_install/bin/agent-hook-pre-bash-work" <<'EOF'
 : >"$AGENTGUARD_APPLICATION_CAPTURE"
 EOF
