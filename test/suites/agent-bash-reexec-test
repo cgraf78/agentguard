@@ -645,7 +645,8 @@ if [ "$#" -ne 3 ] || [ "$1" != 'first argument' ] || [ "$2" != '' ] ||
 fi
 printf '%s\n' exact >"$AGENTGUARD_ARGV_CAPTURE"
 EOF
-sed "s#/usr/bin/env#$argv_env#g" "$PRE_BASH" >"$argv_source"
+sed "s#^    _agentguard_fixed_env=/usr/bin/env\$#    _agentguard_fixed_env=$argv_env#" \
+  "$PRE_BASH" >"$argv_source"
 awk '
   NR == FNR { probe = probe $0 "\n"; next }
   !inserted && $0 ~ /^[[:space:]]*set -u$/ { printf "%s", probe; inserted = 1 }
