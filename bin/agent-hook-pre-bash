@@ -13,6 +13,17 @@ case "$-" in
     unset FUNCNEST POSIXLY_CORRECT BASH_COMPAT
     export -n BASH_XTRACEFD 2>/dev/null || :
 
+    _agentguard_fixed_awk=/usr/bin/awk
+    _agentguard_fixed_env=/usr/bin/env
+    _agentguard_fixed_bash=/bin/bash
+    if [ -x /data/data/com.termux/files/usr/bin/awk ] &&
+      [ -x /data/data/com.termux/files/usr/bin/env ] &&
+      [ -x /data/data/com.termux/files/usr/bin/bash ]; then
+      _agentguard_fixed_awk=/data/data/com.termux/files/usr/bin/awk
+      _agentguard_fixed_env=/data/data/com.termux/files/usr/bin/env
+      _agentguard_fixed_bash=/data/data/com.termux/files/usr/bin/bash
+    fi
+
     # Bash uses fd 255 internally and older supported releases can crash when a
     # bootstrap redirection selects 256 or above. Treat 254 as the portable
     # ceiling and fail closed when two private descriptors are unavailable.
@@ -98,7 +109,7 @@ case "$-" in
         _agentguard_stdin_state
     }
 
-    _agentguard_environment_scan=$(/usr/bin/awk '
+    _agentguard_environment_scan=$("$_agentguard_fixed_awk" '
   BEGIN {
     dirty = 0
     for (name in ENVIRON) {
@@ -160,7 +171,8 @@ case "$-" in
         # shellcheck disable=SC2016 # The clean Bash expands the receiver body.
         _agentguard_scrub_handshake=$(
           _agentguard_write_environment |
-            /usr/bin/env -i /bin/bash --noprofile --norc -p -c '
+            "$_agentguard_fixed_env" -i "$_agentguard_fixed_bash" \
+              --noprofile --norc -p -c '
         set +o posix
         unset FUNCNEST POSIXLY_CORRECT BASH_COMPAT
         export -n BASH_XTRACEFD 2>/dev/null || :
@@ -213,13 +225,13 @@ case "$-" in
         _agentguard_scrub_status=$?
         _agentguard_close_private_descriptors
         if [ "$_agentguard_scrub_handshake" != agentguard-environment-scrub-v2 ]; then
-          echo "agent-hook-pre-bash: cannot rebuild a safe environment with /usr/bin/env and /bin/bash; refusing unguarded execution" >&2
+          echo "agent-hook-pre-bash: cannot rebuild a safe environment with $_agentguard_fixed_env and $_agentguard_fixed_bash; refusing unguarded execution" >&2
           exit 2
         fi
         exit "$_agentguard_scrub_status"
         ;;
       *)
-        echo "agent-hook-pre-bash: cannot inspect the environment with /usr/bin/awk; refusing unguarded execution" >&2
+        echo "agent-hook-pre-bash: cannot inspect the environment with $_agentguard_fixed_awk; refusing unguarded execution" >&2
         exit 2
         ;;
     esac
@@ -245,12 +257,12 @@ case "$-" in
         echo "agent-hook-pre-bash: cannot reserve private bootstrap descriptors; refusing unguarded execution" >&2
         exit 2
       fi
-      for _agentguard_bash in \
-        /opt/homebrew/bin/bash /usr/local/bin/bash /bin/bash /usr/bin/bash; do
+      for _agentguard_bash in /opt/homebrew/bin/bash /usr/local/bin/bash /data/data/com.termux/files/usr/bin/bash /bin/bash /usr/bin/bash; do
         [ -x "$_agentguard_bash" ] || continue
         _agentguard_bash_handshake=$(
           # shellcheck disable=SC2016 # The candidate Bash expands the entry body.
-          /usr/bin/env -u FUNCNEST -u POSIXLY_CORRECT -u BASH_COMPAT \
+          "$_agentguard_fixed_env" \
+            -u FUNCNEST -u POSIXLY_CORRECT -u BASH_COMPAT \
             -u BASH_XTRACEFD -u _AGENTGUARD_BASH_ENTRY -u _AGENTGUARD_ENV_CLEAN \
             BASH_ENV='' ENV='' \
             "$_agentguard_bash" --noprofile --norc -p -c '
@@ -308,6 +320,7 @@ case "$-" in
       _AGENTGUARD_ENV_CLEAN
     unset _agentguard_private_fd_limit _agentguard_probe \
       _agentguard_environment_scan _agentguard_environment_scan_status \
+      _agentguard_fixed_awk _agentguard_fixed_env _agentguard_fixed_bash \
       _agentguard_bash_entry_declaration _agentguard_env_clean_declaration \
       _agentguard_scrub_handshake _agentguard_scrub_status \
       _agentguard_needs_modern_bash _agentguard_bash_major \

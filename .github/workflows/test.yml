@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   shell:
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@1db322ef8a998a904974d0c81fb94515d1b16973
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@be8dd5a8da32120f0a97c9a8e30d9b07805c90bc
     with:
       matrix-set: full
       profiles: base,shellcheck,jq,python

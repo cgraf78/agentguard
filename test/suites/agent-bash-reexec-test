@@ -73,7 +73,7 @@ explicit_classifier="$explicit_install/bin/agentguard-classify-command"
 explicit_application_capture="$TEST_TMPDIR/explicit-application.capture"
 explicit_startup_capture="$TEST_TMPDIR/explicit-startup.capture"
 explicit_input="$TEST_TMPDIR/explicit.input"
-_install_hook_fixture "$explicit_install" agent-hook-pre-bash agentguard-classify-command
+_install_candidate_fixture "$explicit_install" "$REAL_BASH"
 cat >"$explicit_install/bin/agent-hook-pre-bash-work" <<'EOF'
 : >"$AGENTGUARD_APPLICATION_CAPTURE"
 EOF
@@ -258,7 +258,7 @@ _install_hook_fixture \
   "$closing_install" agent-hook-pre-bash agentguard-classify-command
 for closing_entry in agent-hook-pre-bash agentguard-classify-command; do
   closing_path="$closing_install/bin/$closing_entry"
-  sed "s#/opt/homebrew/bin/bash /usr/local/bin/bash /bin/bash /usr/bin/bash#$closing_candidate $closing_candidate $closing_candidate $closing_candidate#" \
+  sed "s#/opt/homebrew/bin/bash /usr/local/bin/bash /data/data/com.termux/files/usr/bin/bash /bin/bash /usr/bin/bash#$closing_candidate $closing_candidate $closing_candidate $closing_candidate $closing_candidate#" \
     "$closing_path" >"$closing_path.tmp"
   command cat "$closing_path.tmp" >"$closing_path"
   rm -f "$closing_path.tmp"
@@ -645,7 +645,8 @@ if [ "$#" -ne 3 ] || [ "$1" != 'first argument' ] || [ "$2" != '' ] ||
 fi
 printf '%s\n' exact >"$AGENTGUARD_ARGV_CAPTURE"
 EOF
-sed "s#/usr/bin/env#$argv_env#g" "$PRE_BASH" >"$argv_source"
+sed "s#^    _agentguard_fixed_env=/usr/bin/env\$#    _agentguard_fixed_env=$argv_env#" \
+  "$PRE_BASH" >"$argv_source"
 awk '
   NR == FNR { probe = probe $0 "\n"; next }
   !inserted && $0 ~ /^[[:space:]]*set -u$/ { printf "%s", probe; inserted = 1 }
@@ -961,6 +962,7 @@ for _agentguard_control_name in \
 	_agentguard_stdin_state _agentguard_stdin_status \
 	_agentguard_complete _agentguard_name _agentguard_value _agentguard_end \
 	_agentguard_environment_scan _agentguard_environment_scan_status \
+  _agentguard_fixed_awk _agentguard_fixed_env _agentguard_fixed_bash \
   _agentguard_bash_entry_declaration _agentguard_env_clean_declaration \
   _agentguard_scrub_handshake _agentguard_scrub_status \
   _agentguard_needs_modern_bash _agentguard_bash_major \
@@ -1008,6 +1010,7 @@ for _agentguard_control_name in \
 	_agentguard_stdin_state _agentguard_stdin_status \
 	_agentguard_complete _agentguard_name _agentguard_value _agentguard_end \
 	_agentguard_environment_scan _agentguard_environment_scan_status \
+  _agentguard_fixed_awk _agentguard_fixed_env _agentguard_fixed_bash \
   _agentguard_bash_entry_declaration _agentguard_env_clean_declaration \
   _agentguard_scrub_handshake _agentguard_scrub_status \
   _agentguard_needs_modern_bash _agentguard_bash_major \
@@ -1423,10 +1426,10 @@ _assert_contains "classifier: truncated environment failure is actionable" \
 no_modern_hook="$TEST_TMPDIR/agent-hook-pre-bash-no-modern"
 no_modern_classifier="$TEST_TMPDIR/agentguard-classify-command-no-modern"
 # shellcheck disable=SC2016 # The single quotes preserve the literal variable name.
-sed 's#/opt/homebrew/bin/bash /usr/local/bin/bash /bin/bash /usr/bin/bash#/definitely-missing-homebrew-bash /definitely-missing-local-bash /definitely-missing-bin-bash /definitely-missing-usr-bin-bash#' \
+sed 's#/opt/homebrew/bin/bash /usr/local/bin/bash /data/data/com.termux/files/usr/bin/bash /bin/bash /usr/bin/bash#/definitely-missing-homebrew-bash /definitely-missing-local-bash /definitely-missing-termux-bash /definitely-missing-bin-bash /definitely-missing-usr-bin-bash#' \
   "$PRE_BASH" >"$no_modern_hook"
 # shellcheck disable=SC2016 # The single quotes preserve the literal variable name.
-sed 's#/opt/homebrew/bin/bash /usr/local/bin/bash /bin/bash /usr/bin/bash#/definitely-missing-homebrew-bash /definitely-missing-local-bash /definitely-missing-bin-bash /definitely-missing-usr-bin-bash#' \
+sed 's#/opt/homebrew/bin/bash /usr/local/bin/bash /data/data/com.termux/files/usr/bin/bash /bin/bash /usr/bin/bash#/definitely-missing-homebrew-bash /definitely-missing-local-bash /definitely-missing-termux-bash /definitely-missing-bin-bash /definitely-missing-usr-bin-bash#' \
   "$CLASSIFY_COMMAND" >"$no_modern_classifier"
 chmod +x "$no_modern_hook" "$no_modern_classifier"
 set +e

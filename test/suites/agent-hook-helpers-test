@@ -172,6 +172,7 @@ cat >"$path_home/.local/bin/sley" <<'MOCK'
 MOCK
 chmod +x "$path_home/.local/bin/sley"
 test_bash=$(command -v bash)
+test_system_path=$PATH
 path_probe=$(
   # shellcheck disable=SC2016 # inner bash intentionally expands probe vars.
   HOME="$path_home" PATH='' "$test_bash" -c '
@@ -188,8 +189,14 @@ _assert_contains "hook PATH fallback: empty PATH has no cwd component" \
   "path_has_empty=no" "$path_probe"
 _assert_contains "hook PATH fallback: empty PATH exposes local bin" \
   "sley=$path_home/.local/bin/sley" "$path_probe"
-_assert_contains "hook PATH fallback: empty PATH keeps system tools" \
-  "dirname=/usr/bin/dirname" "$path_probe"
+path_dirname=${path_probe##*dirname=}
+if [ -x "$path_dirname" ]; then
+  path_dirname_status=0
+else
+  path_dirname_status=1
+fi
+_assert_exit "hook PATH fallback: empty PATH keeps system tools executable" \
+  0 "$path_dirname_status"
 
 # _HOOK_STATE_DIR computed at source time from neutral agent session id.
 # shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
@@ -626,16 +633,16 @@ _assert_eq "hm config: explicit override stays authoritative and unchanged" \
 
 env -u HIVE_MEMORY_CONFIG \
   HOME="$hm_xdg_home" XDG_CONFIG_HOME="$hm_xdg_config" \
-  PATH="$HM_BIN:/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
-  bash -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
+  PATH="$HM_BIN:$test_system_path" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  "$test_bash" -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
 _assert_eq "hm config: availability accepts the absolute XDG config" "0" "$?"
 
 : >"$HM_LOG"
 HOME="$hm_xdg_home" XDG_CONFIG_HOME="$hm_xdg_config" \
-  PATH="$HM_BIN:/usr/bin:/bin" HM_LOG="$HM_LOG" \
+  PATH="$HM_BIN:$test_system_path" HM_LOG="$HM_LOG" \
   AGENTGUARD_HIVE_MEMORY_HOOKS=1 AGENTGUARD_NAME=codex \
   CODEX_THREAD_ID="hm-xdg-session" \
-  bash -c '
+  "$test_bash" -c '
     source "$1"
     _HOOK_INPUT='"'"'{"prompt":"remember this"}'"'"'
     _hook_hm_prompt_submit
@@ -645,39 +652,39 @@ _assert_contains "hm config: XDG path is passed to the Hive subprocess" \
 
 HIVE_MEMORY_CONFIG="$hm_explicit_config" \
   HOME="$hm_xdg_home" XDG_CONFIG_HOME="$hm_xdg_config" \
-  PATH="$HM_BIN:/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
-  bash -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
+  PATH="$HM_BIN:$test_system_path" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  "$test_bash" -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
 _assert_eq "hm config: availability accepts an explicit config" "0" "$?"
 
 HIVE_MEMORY_CONFIG="$hm_newline_config" \
   HOME="$hm_xdg_home" XDG_CONFIG_HOME="$hm_xdg_config" \
-  PATH="$HM_BIN:/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
-  bash -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
+  PATH="$HM_BIN:$test_system_path" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  "$test_bash" -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
 _assert_eq "hm config: explicit override preserves trailing newlines" "0" "$?"
 
 HIVE_MEMORY_CONFIG="$HM_MOCK_ROOT/missing.toml" \
   HOME="$HM_HOME" XDG_CONFIG_HOME="$hm_xdg_config" \
-  PATH="$HM_BIN:/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
-  bash -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
+  PATH="$HM_BIN:$test_system_path" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  "$test_bash" -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
 _assert_eq "hm config: missing explicit override fails closed" "1" "$?"
 
 HIVE_MEMORY_CONFIG='' \
   HOME="$HM_HOME" XDG_CONFIG_HOME="$hm_xdg_config" \
-  PATH="$HM_BIN:/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
-  bash -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
+  PATH="$HM_BIN:$test_system_path" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  "$test_bash" -c 'source "$1"; _hook_hm_available' _ "$HELPERS"
 _assert_eq "hm config: empty explicit override does not fall through" "1" "$?"
 
 env -u HIVE_MEMORY_CONFIG -u XDG_CONFIG_HOME -u HOME \
-  PATH="/usr/bin:/bin" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
-  bash -c 'source "$1"; _hook_hm_resolve_config' _ "$HELPERS" >/dev/null 2>&1
+  PATH="$test_system_path" AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  "$test_bash" -c 'source "$1"; _hook_hm_resolve_config' _ "$HELPERS" >/dev/null 2>&1
 _assert_eq "hm config: no valid config root fails closed" "1" "$?"
 
 : >"$HM_LOG"
 env -u HIVE_MEMORY_CONFIG -u HOME \
-  XDG_CONFIG_HOME="$hm_xdg_config" PATH="$HM_BIN:/usr/bin:/bin" \
+  XDG_CONFIG_HOME="$hm_xdg_config" PATH="$HM_BIN:$test_system_path" \
   HM_LOG="$HM_LOG" AGENTGUARD_HIVE_MEMORY_HOOKS=1 AGENTGUARD_NAME=codex \
   CODEX_THREAD_ID="hm-xdg-no-home-session" \
-  bash -uc '
+  "$test_bash" -uc '
     source "$1"
     _HOOK_INPUT='"'"'{"prompt":"remember this","cwd":"/tmp/project"}'"'"'
     _hook_hm_prompt_submit
