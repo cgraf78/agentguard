@@ -948,8 +948,9 @@ _hook_executable_fragments_uncached() {
         # payloads. Avoid three process substitutions per ordinary fragment;
         # wrappers and any shell syntax deliberately fall through to the full
         # scanners so conservative classification is unchanged.
-        if _agentguard_command_text_is_plain_fragment "$fragment" &&
-          _agentguard_plain_fragment_command_word "$fragment" >/dev/null; then
+        if _agentguard_direct_simple_fragment_command_word "$fragment" >/dev/null ||
+          { _agentguard_command_text_is_plain_fragment "$fragment" &&
+            _agentguard_plain_fragment_command_word "$fragment" >/dev/null; }; then
           continue
         fi
         while IFS= read -r payload; do
@@ -1093,6 +1094,70 @@ _agentguard_command_text_is_plain_fragment() {
   [[ "$text" == *"'"* ]] && return 1
   [[ "$text" == *'"'* ]] && return 1
   return 0
+}
+
+# Extract an unquoted direct command word from a structurally simple fragment.
+# Quote-only argv without executable expansions are inert for recursive command
+# discovery, so calls such as `printf '%s\n' x` need not pay the nested-shell
+# scanners. Keep assignments, command prefixes, and execution wrappers on the
+# full path: their effective command can occur after argv that needs real
+# tokenization.
+_agentguard_direct_simple_fragment_command_word() {
+  local text="$1" output_name="${2:-}" word rest base ch next quote=""
+  local i
+
+  read -r word rest <<<"$text"
+  case "$word" in
+    "" | *=* | *"'"* | *'"'* | *'$'* | *"["* | *"]"* | *"*"* | *"?"*)
+      return 1
+      ;;
+  esac
+
+  # Control syntax outside quotes and substitutions inside double quotes can
+  # introduce another command. A backslash inside a single-quoted format string
+  # is inert; double-quoted escapes remain on the conservative parser path.
+  for ((i = 0; i < ${#text}; i++)); do
+    ch="${text:i:1}"
+    next="${text:i+1:1}"
+    if [ "$quote" = "'" ]; then
+      [ "$ch" = "'" ] && quote=""
+      continue
+    fi
+    if [ "$quote" = '"' ]; then
+      case "$ch" in
+        '"') quote="" ;;
+        \\ | \`) return 1 ;;
+        '$') [ "$next" = "(" ] && return 1 ;;
+      esac
+      continue
+    fi
+
+    case "$ch" in
+      "'") quote="'" ;;
+      '"') quote='"' ;;
+      \\ | \`) return 1 ;;
+      '$') [ "$next" = "(" ] && return 1 ;;
+      ';' | '|' | '&' | '<' | '>' | '(' | ')' | '{' | '}' | $'\n')
+        return 1
+        ;;
+    esac
+  done
+
+  base="${word##*/}"
+  case "$base" in
+    "!" | if | then | elif | while | until | do | else | coproc | \
+      command | builtin | exec | time | noglob | \
+      env | sudo | doas | nohup | nice | timeout | xargs | \
+      bash | sh | zsh | fish | eval)
+      return 1
+      ;;
+  esac
+
+  if [ -n "$output_name" ]; then
+    printf -v "$output_name" '%s' "$word"
+  else
+    printf '%s' "$word"
+  fi
 }
 
 _agentguard_plain_fragment_command_word() {

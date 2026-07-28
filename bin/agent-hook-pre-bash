@@ -730,10 +730,11 @@ case "$-" in
         # Most fragments in compound inspection commands are plain words. Keep
         # those in the current shell: command substitution plus the recursive
         # tokenizer once per fragment otherwise makes hook latency scale in
-        # process startups. Anything with quoting, wrappers, or shell syntax
-        # still uses the conservative parser below.
-        if _agentguard_command_text_is_plain_fragment "$frag" &&
-          _agentguard_plain_fragment_command_word "$frag" cw; then
+        # process startups. Direct commands with inert quoted argv stay cheap;
+        # wrappers and executable shell syntax use the conservative parser.
+        if _agentguard_direct_simple_fragment_command_word "$frag" cw ||
+          { _agentguard_command_text_is_plain_fragment "$frag" &&
+            _agentguard_plain_fragment_command_word "$frag" cw; }; then
           :
         else
           cw=$(_fragment_command_word "$frag") || continue
