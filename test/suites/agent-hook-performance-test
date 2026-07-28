@@ -8,18 +8,20 @@ AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/
 _assert_hook_median_under() {
   local desc="$1" hook="$2" input="$3"
   local max_ms="${4:-${AGENTGUARD_PERF_MAX_MEDIAN_MS:-250}}"
+  local max_sample_ms="${5:-0}"
   local output status
 
   output=$(
-    python3 - "$hook" "$input" "$max_ms" "$TEST_TMPDIR" "$TEST_SID" <<'PY'
+    python3 - "$hook" "$input" "$max_ms" "$max_sample_ms" "$TEST_TMPDIR" "$TEST_SID" <<'PY'
 import os
 import statistics
 import subprocess
 import sys
 import time
 
-hook, hook_input, max_ms_arg, tmpdir, sid = sys.argv[1:]
+hook, hook_input, max_ms_arg, max_sample_ms_arg, tmpdir, sid = sys.argv[1:]
 max_ms = float(max_ms_arg)
+max_sample_limit_ms = float(max_sample_ms_arg)
 iterations = int(os.environ.get("AGENTGUARD_PERF_ITERATIONS", "9"))
 timeout = float(os.environ.get("AGENTGUARD_PERF_TIMEOUT_SEC", "2"))
 
@@ -85,7 +87,8 @@ summary = (
     f"(max sample {max_sample_ms:.1f}ms, n={iterations})"
 )
 print(summary)
-sys.exit(0 if median_ms <= max_ms else 1)
+within_tail_limit = max_sample_limit_ms <= 0 or max_sample_ms <= max_sample_limit_ms
+sys.exit(0 if median_ms <= max_ms and within_tail_limit else 1)
 PY
   )
   status=$?
@@ -99,6 +102,19 @@ PY
 
 echo ""
 echo "=== hook performance: cheap paths ==="
+
+compound_command=""
+for _ in {1..6}; do
+  [[ -z "$compound_command" ]] || compound_command+=" && "
+  compound_command+="echo x && printf y && pwd"
+done
+compound_command+=" && PERF_VAR=value true && git status --short"
+compound_input=$(jq -cn --arg command "$compound_command" \
+  '{tool_input:{command:$command}}')
+
+nested_compound_command="$compound_command && bash -lc 'printf nested'"
+nested_compound_input=$(jq -cn --arg command "$nested_compound_command" \
+  '{tool_input:{command:$command}}')
 
 _assert_hook_median_under \
   "pre-bash true stays fast" \
@@ -119,5 +135,19 @@ _assert_hook_median_under \
   "pre-mcp benign payload stays fast" \
   "$PRE_MCP" \
   '{"tool_name":"functions.exec_command","tool_input":{"cmd":"true"}}'
+
+_assert_hook_median_under \
+  "pre-bash safe compound command stays fast" \
+  "$PRE_BASH" \
+  "$compound_input" \
+  "${AGENTGUARD_PERF_COMPOUND_MAX_MEDIAN_MS:-500}" \
+  "${AGENTGUARD_PERF_COMPOUND_MAX_SAMPLE_MS:-1500}"
+
+_assert_hook_median_under \
+  "pre-bash compound command keeps nested fallback bounded" \
+  "$PRE_BASH" \
+  "$nested_compound_input" \
+  "${AGENTGUARD_PERF_NESTED_MAX_MEDIAN_MS:-750}" \
+  "${AGENTGUARD_PERF_NESTED_MAX_SAMPLE_MS:-1800}"
 
 _test_summary
