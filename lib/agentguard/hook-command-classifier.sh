@@ -944,6 +944,14 @@ _hook_executable_fragments_uncached() {
     while IFS= read -r fragment; do
       printf '%s\n' "$fragment"
       if [ "$depth" -lt 2 ]; then
+        # A plain fragment cannot carry structural, nested-shell, or env-split
+        # payloads. Avoid three process substitutions per ordinary fragment;
+        # wrappers and any shell syntax deliberately fall through to the full
+        # scanners so conservative classification is unchanged.
+        if _agentguard_command_text_is_plain_fragment "$fragment" &&
+          _agentguard_plain_fragment_command_word "$fragment" >/dev/null; then
+          continue
+        fi
         while IFS= read -r payload; do
           _hook_executable_fragments "$payload" $((depth + 1))
         done < <(_structural_shell_payloads "$fragment")
@@ -1088,7 +1096,7 @@ _agentguard_command_text_is_plain_fragment() {
 }
 
 _agentguard_plain_fragment_command_word() {
-  local text="$1" i=0 word base
+  local text="$1" output_name="${2:-}" i=0 word base
   local -a words=()
 
   read -r -a words <<<"$text"
@@ -1115,7 +1123,11 @@ _agentguard_plain_fragment_command_word() {
         return 1
         ;;
       *)
-        printf '%s' "$word"
+        if [ -n "$output_name" ]; then
+          printf -v "$output_name" '%s' "$word"
+        else
+          printf '%s' "$word"
+        fi
         return 0
         ;;
     esac

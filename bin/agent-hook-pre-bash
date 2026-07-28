@@ -727,10 +727,17 @@ case "$-" in
       while IFS= read -r frag; do
         [ -n "$frag" ] || continue
 
-        # THE key optimization: one _fragment_command_word per fragment instead
-        # of 13. This single call costs ~20ms; the case dispatch below is free
-        # for non-matching command words.
-        cw=$(_fragment_command_word "$frag") || continue
+        # Most fragments in compound inspection commands are plain words. Keep
+        # those in the current shell: command substitution plus the recursive
+        # tokenizer once per fragment otherwise makes hook latency scale in
+        # process startups. Anything with quoting, wrappers, or shell syntax
+        # still uses the conservative parser below.
+        if _agentguard_command_text_is_plain_fragment "$frag" &&
+          _agentguard_plain_fragment_command_word "$frag" cw; then
+          :
+        else
+          cw=$(_fragment_command_word "$frag") || continue
+        fi
 
         # Sudo/doas: agents have no legitimate need for root privilege escalation.
         # _fragment_command_word skips privilege wrappers transparently, so we
