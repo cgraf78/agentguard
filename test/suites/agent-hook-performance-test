@@ -112,6 +112,63 @@ compound_command+=" && PERF_VAR=value true && git status --short"
 compound_input=$(jq -cn --arg command "$compound_command" \
   '{tool_input:{command:$command}}')
 
+quoted_compound_command=""
+for _ in {1..20}; do
+  [[ -z "$quoted_compound_command" ]] || quoted_compound_command+=" && "
+  quoted_compound_command+="printf '%s\\n' x"
+done
+quoted_compound_input=$(jq -cn --arg command "$quoted_compound_command" \
+  '{tool_input:{command:$command}}')
+
+quoted_scan_log="$TEST_TMPDIR/quoted-compound-scans"
+quoted_scan_counts=$(
+  bash -s -- \
+    "$AGENTGUARD_ROOT/lib/agentguard/hook-command-classifier.sh" \
+    "$quoted_compound_command" \
+    "$quoted_scan_log" <<'BASH'
+classifier=$1
+command_text=$2
+scan_log=$3
+# shellcheck disable=SC1090 # production classifier path supplied by the test.
+source "$classifier"
+
+eval "$(declare -f _structural_shell_payloads | sed '1s/_structural_shell_payloads/_perf_original_structural_shell_payloads/')"
+eval "$(declare -f _nested_shell_payloads | sed '1s/_nested_shell_payloads/_perf_original_nested_shell_payloads/')"
+eval "$(declare -f _env_split_payloads | sed '1s/_env_split_payloads/_perf_original_env_split_payloads/')"
+eval "$(declare -f _fragment_command_word | sed '1s/_fragment_command_word/_perf_original_fragment_command_word/')"
+
+_structural_shell_payloads() {
+  printf 'structural\n' >>"$scan_log"
+  _perf_original_structural_shell_payloads "$@"
+}
+_nested_shell_payloads() {
+  printf 'nested\n' >>"$scan_log"
+  _perf_original_nested_shell_payloads "$@"
+}
+_env_split_payloads() {
+  printf 'env\n' >>"$scan_log"
+  _perf_original_env_split_payloads "$@"
+}
+_fragment_command_word() {
+  printf 'command_word\n' >>"$scan_log"
+  _perf_original_fragment_command_word "$@"
+}
+
+: >"$scan_log"
+_hook_cache_executable_fragments "$command_text"
+printf 'structural=%s nested=%s env=%s command_word=%s\n' \
+  "$(awk '$0 == "structural" { count++ } END { print count + 0 }' "$scan_log")" \
+  "$(awk '$0 == "nested" { count++ } END { print count + 0 }' "$scan_log")" \
+  "$(awk '$0 == "env" { count++ } END { print count + 0 }' "$scan_log")" \
+  "$(awk '$0 == "command_word" { count++ } END { print count + 0 }' "$scan_log")"
+BASH
+)
+rm -f "$quoted_scan_log"
+_assert_eq \
+  "quoted direct fragments skip recursive payload and command-word subprocesses" \
+  "structural=0 nested=0 env=0 command_word=0" \
+  "$quoted_scan_counts"
+
 nested_compound_command="$compound_command && bash -lc 'printf nested'"
 nested_compound_input=$(jq -cn --arg command "$nested_compound_command" \
   '{tool_input:{command:$command}}')
@@ -142,6 +199,13 @@ _assert_hook_median_under \
   "$compound_input" \
   "${AGENTGUARD_PERF_COMPOUND_MAX_MEDIAN_MS:-500}" \
   "${AGENTGUARD_PERF_COMPOUND_MAX_SAMPLE_MS:-1500}"
+
+_assert_hook_median_under \
+  "pre-bash quoted-argument compound command stays fast" \
+  "$PRE_BASH" \
+  "$quoted_compound_input" \
+  "${AGENTGUARD_PERF_QUOTED_COMPOUND_MAX_MEDIAN_MS:-500}" \
+  "${AGENTGUARD_PERF_QUOTED_COMPOUND_MAX_SAMPLE_MS:-1500}"
 
 _assert_hook_median_under \
   "pre-bash compound command keeps nested fallback bounded" \
