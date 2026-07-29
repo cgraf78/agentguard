@@ -28,6 +28,52 @@ _post_bash_payload_with_stdout_field() {
   '
 }
 
+_run_post_bash_with_counting_tools() {
+  local payload="$1" mock_bin real_jq real_grep
+  mock_bin="$TEST_TMPDIR/post-bash-counting-tools"
+  real_jq=$(type -P jq)
+  real_grep=$(type -P grep)
+  mkdir -p "$mock_bin"
+  : >"$TEST_TMPDIR/post-bash-jq.log"
+  : >"$TEST_TMPDIR/post-bash-grep.log"
+
+  cat >"$mock_bin/jq" <<'SCRIPT'
+#!/usr/bin/env bash
+printf 'jq\n' >>"$AGENTGUARD_TEST_JQ_LOG"
+exec "$AGENTGUARD_TEST_REAL_JQ" "$@"
+SCRIPT
+  cat >"$mock_bin/grep" <<'SCRIPT'
+#!/usr/bin/env bash
+printf 'grep\n' >>"$AGENTGUARD_TEST_GREP_LOG"
+exec "$AGENTGUARD_TEST_REAL_GREP" "$@"
+SCRIPT
+  chmod +x "$mock_bin/jq" "$mock_bin/grep"
+
+  # shellcheck disable=SC2034 # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    AGENTGUARD_SESSION_ID="$TEST_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="agent"
+    CODEX_THREAD_ID=
+    AGENTGUARD_HOOK_STDIN_TIMEOUT=1
+    PATH="$mock_bin:$PATH"
+    AGENTGUARD_TEST_JQ_LOG="$TEST_TMPDIR/post-bash-jq.log"
+    AGENTGUARD_TEST_GREP_LOG="$TEST_TMPDIR/post-bash-grep.log"
+    AGENTGUARD_TEST_REAL_JQ="$real_jq"
+    AGENTGUARD_TEST_REAL_GREP="$real_grep"
+  )
+  _run_hook_env "$POST_BASH" "$payload"
+}
+
+_assert_between() {
+  local desc="$1" min="$2" max="$3" actual="$4"
+  if [ "$actual" -ge "$min" ] && [ "$actual" -le "$max" ]; then
+    _pass "$desc"
+  else
+    _fail "$desc (expected '$min' through '$max', got '$actual')"
+  fi
+}
+
 echo ""
 echo "=== post-bash: credential scanner ==="
 
@@ -84,6 +130,17 @@ _run_hook "$POST_BASH" "$(_post_bash_payload "ghs_$(python3 -c 'print("B"*36)')"
 _assert_eq "GitHub ghs_ token: warns" "0" "$HOOK_EXIT"
 _assert_contains "GitHub ghs_ token: WARNING" "WARNING" "$HOOK_STDERR"
 
+# The shared GitHub classifier supports every modern prefix and the fine-grained
+# PAT format. Keep each accepted shape behind the same prefilter.
+for _github_prefix in ghr gho ghu; do
+  _run_hook "$POST_BASH" "$(_post_bash_payload "${_github_prefix}_$(python3 -c 'print("C"*36)')")"
+  _assert_eq "GitHub $_github_prefix token: warns" "0" "$HOOK_EXIT"
+  _assert_contains "GitHub $_github_prefix token: names type" "GitHub token" "$HOOK_STDERR"
+done
+_run_hook "$POST_BASH" "$(_post_bash_payload "github_pat_$(python3 -c 'print("D"*82)')")"
+_assert_eq "GitHub fine-grained PAT: warns" "0" "$HOOK_EXIT"
+_assert_contains "GitHub fine-grained PAT: names type" "GitHub token" "$HOOK_STDERR"
+
 # Anthropic API key
 _run_hook "$POST_BASH" "$(_post_bash_payload "ANTHROPIC_API_KEY=sk-ant-api03-$(python3 -c 'print("X"*40)')")"
 _assert_eq "Anthropic key: warns" "0" "$HOOK_EXIT"
@@ -110,6 +167,8 @@ _assert_eq "multiple creds: warns" "0" "$HOOK_EXIT"
 _assert_contains "multiple creds: WARNING" "WARNING" "$HOOK_STDERR"
 _assert_contains "multiple creds: AWS type" "AWS access key" "$HOOK_STDERR"
 _assert_contains "multiple creds: PEM type" "PEM private key" "$HOOK_STDERR"
+_assert_contains "multiple creds: warning type order is unchanged" \
+  "(PEM private key/certificate, AWS access key ID)" "$HOOK_STDERR"
 
 # Clean output — no warning
 _run_hook "$POST_BASH" "$(_post_bash_payload 'total 48
@@ -118,6 +177,28 @@ drwxr-xr-x   5 alex staff  160 May 15 09:00 ..')"
 _assert_eq "clean output: allowed" "0" "$HOOK_EXIT"
 _assert_not_contains "clean output: no WARNING" "WARNING" "$HOOK_STDERR"
 _assert_not_contains "clean output: no warning context" "Command output may contain credentials" "$HOOK_STDOUT"
+
+# Large command output is realistic for test/build commands. The hook should
+# parse the cached JSON once for state and adapters, then scan a credential-free
+# payload once instead of launching one full scan per credential class.
+_large_clean_payload=$(python3 -c '
+import json
+print(json.dumps({
+    "tool_input": {"command": "run tests"},
+    "tool_response": {
+        "stdout": "ordinary build output\\n" * 50000,
+        "stderr": "",
+        "exit_code": 0,
+    },
+}))
+')
+_run_post_bash_with_counting_tools "$_large_clean_payload"
+_assert_eq "large clean output: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "large clean output: no WARNING" "WARNING" "$HOOK_STDERR"
+_assert_between "large clean output: cached payload uses one through five jq calls" \
+  "1" "5" "$(wc -l <"$TEST_TMPDIR/post-bash-jq.log" | tr -d ' ')"
+_assert_eq "large clean output: credential prefilter uses exactly one grep call" \
+  "1" "$(wc -l <"$TEST_TMPDIR/post-bash-grep.log" | tr -d ' ')"
 
 # Empty stdout — no warning
 _run_hook "$POST_BASH" "$(_post_bash_payload '')"
@@ -135,5 +216,11 @@ done
 _run_hook "$POST_BASH" '{"tool_input":{"command":"ls"}}'
 _assert_eq "no tool_response: exits 0" "0" "$HOOK_EXIT"
 _assert_not_contains "no tool_response: no WARNING" "WARNING" "$HOOK_STDERR"
+
+# Valid PostToolUse JSON with no shell command is still a no-op; the output
+# scanner must not run independently of the command parser contract.
+_run_hook "$POST_BASH" '{"tool_input":{},"tool_response":{"stdout":"sk-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}'
+_assert_eq "no command: exits 0" "0" "$HOOK_EXIT"
+_assert_not_contains "no command: no WARNING" "WARNING" "$HOOK_STDERR"
 
 _test_summary
