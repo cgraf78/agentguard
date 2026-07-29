@@ -480,6 +480,35 @@ _assert_eq "state_dir: claude env wins over input session_id" "0" "$?"
 ) | _stdin_contains PASS
 _assert_eq "state_dir: parse_command refreshes input session_id" "0" "$?"
 
+# Once one immutable hook payload has selected its state directory, helper
+# adapters must reuse that result. PostToolUse calls several adapters in one
+# process, and reparsing a large cached payload for every adapter adds latency
+# without changing the session identity.
+# shellcheck disable=SC2034 # XDG_RUNTIME_DIR is consumed by the sourced helper.
+(
+  unset CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID GEMINI_PROJECT_DIR 2>/dev/null
+  XDG_RUNTIME_DIR="/tmp/cached-input-session-test"
+  source "$HELPERS"
+  eval "$(declare -f _hook_refresh_state_dir | sed '1s/_hook_refresh_state_dir/_original_hook_refresh_state_dir/')"
+  refresh_calls=0
+  # shellcheck disable=SC2317,SC2329 # _hook_read_input invokes this replacement dynamically.
+  _hook_refresh_state_dir() {
+    refresh_calls=$((refresh_calls + 1))
+    _original_hook_refresh_state_dir
+  }
+  _HOOK_INPUT='{"session_id":"cached-input-session-123","tool_input":{"command":"echo ok"}}'
+  _hook_read_input
+  _hook_read_input
+  _hook_read_input
+  if [ "$refresh_calls" = "1" ] &&
+    [ "$_HOOK_STATE_DIR" = "/tmp/cached-input-session-test/agentguard/hook-state/cached-input-session-123" ]; then
+    echo "PASS"
+  else
+    printf 'FAIL: refresh_calls=%s state_dir=%s\n' "$refresh_calls" "$_HOOK_STATE_DIR"
+  fi
+) | _stdin_contains PASS
+_assert_eq "state_dir: cached input refreshes session identity once" "0" "$?"
+
 # Codex API exec_command payloads use tool_input.cmd instead of command.
 (
   unset CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID GEMINI_PROJECT_DIR 2>/dev/null
@@ -783,6 +812,33 @@ prompt_input_preserved=$(
 )
 _assert_contains "hm hook: prompt-submit preserves JSON for later extensions" \
   '"prompt":"goal work"' "$prompt_input_preserved"
+
+# The first-byte timeout protects hooks from runners that attach an empty pipe;
+# it must not become a total-payload deadline after a large JSON body starts.
+chunked_stdin_dir=$(_tmpdir)
+chunked_stdin_fifo="$chunked_stdin_dir/stdin"
+mkfifo "$chunked_stdin_fifo"
+(
+  exec 3>"$chunked_stdin_fifo"
+  printf '%s' '{"session_id":"chunked-input",' >&3
+  sleep 0.1
+  printf '%s' '"tool_input":{"command":"echo ok"}}' >&3
+) &
+chunked_stdin_writer=$!
+chunked_stdin_out=$(
+  AGENTGUARD_HOOK_STDIN_TIMEOUT=0.05 \
+    AGENTGUARD_HOOK_STDIN_DRAIN_TIMEOUT=1 \
+    AGENTGUARD_NAME=agent \
+    _with_timeout 2 bash -c '
+      source "$1"
+      _hook_read_input
+      printf "%s\n" "$_HOOK_INPUT"
+    ' _ "$HELPERS" <"$chunked_stdin_fifo"
+)
+wait "$chunked_stdin_writer"
+_assert_eq "hook input: first-byte timeout drains later chunks" \
+  '{"session_id":"chunked-input","tool_input":{"command":"echo ok"}}' \
+  "$chunked_stdin_out"
 
 _assert_hook_open_empty_stdin() {
   local label="$1" hook="$2"

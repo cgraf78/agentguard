@@ -50,30 +50,42 @@ if [ -n "$_stdout" ]; then
     fi
   }
 
-  # PEM private key or certificate block headers — unambiguous format.
-  # Use -e to avoid grep treating the leading dashes as option flags.
-  if printf '%s' "$_stdout" | grep -qE -e '-----BEGIN [A-Z ]*(PRIVATE KEY|CERTIFICATE)[[:space:]]*-----'; then
-    _add_cred_type 'PEM private key/certificate'
-  fi
+  _pem_credential_pattern='-----BEGIN [A-Z ]*(PRIVATE KEY|CERTIFICATE)[[:space:]]*-----'
+  _aws_credential_pattern='(^|[^A-Z0-9])AKIA[0-9A-Z]{16}([^A-Z0-9]|$)'
+  _github_credential_pattern='(ghp|ghs|ghr|gho|ghu)_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82}'
+  _anthropic_credential_pattern='sk-ant-[A-Za-z0-9_-]{20,}'
+  _sk_credential_pattern='(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9]{32,}'
+  _credential_union_pattern="($_pem_credential_pattern)|($_aws_credential_pattern)|($_github_credential_pattern)|($_anthropic_credential_pattern)|($_sk_credential_pattern)"
 
-  # AWS Access Key ID — AKIA + exactly 16 uppercase alphanumeric chars
-  if printf '%s' "$_stdout" | grep -qE '(^|[^A-Z0-9])AKIA[0-9A-Z]{16}([^A-Z0-9]|$)'; then
-    _add_cred_type 'AWS access key ID'
-  fi
+  # Most command output is credential-free. One exact union scan keeps that
+  # common path bounded; a possible match still runs every existing classifier
+  # below so warning types and multi-credential behavior remain unchanged.
+  if printf '%s' "$_stdout" | grep -qE -e "$_credential_union_pattern"; then
+    # PEM private key or certificate block headers — unambiguous format.
+    # Use -e to avoid grep treating the leading dashes as option flags.
+    if printf '%s' "$_stdout" | grep -qE -e "$_pem_credential_pattern"; then
+      _add_cred_type 'PEM private key/certificate'
+    fi
 
-  # GitHub tokens — modern prefixed formats
-  if printf '%s' "$_stdout" | grep -qE '(ghp|ghs|ghr|gho|ghu)_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82}'; then
-    _add_cred_type 'GitHub token'
-  fi
+    # AWS Access Key ID — AKIA + exactly 16 uppercase alphanumeric chars
+    if printf '%s' "$_stdout" | grep -qE "$_aws_credential_pattern"; then
+      _add_cred_type 'AWS access key ID'
+    fi
 
-  # Anthropic API key
-  if printf '%s' "$_stdout" | grep -qE 'sk-ant-[A-Za-z0-9_-]{20,}'; then
-    _add_cred_type 'Anthropic API key'
-  fi
+    # GitHub tokens — modern prefixed formats
+    if printf '%s' "$_stdout" | grep -qE "$_github_credential_pattern"; then
+      _add_cred_type 'GitHub token'
+    fi
 
-  # OpenAI / generic sk- API key (broad but high-signal prefix)
-  if printf '%s' "$_stdout" | grep -qE '(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9]{32,}'; then
-    _add_cred_type 'API key (sk- prefix)'
+    # Anthropic API key
+    if printf '%s' "$_stdout" | grep -qE "$_anthropic_credential_pattern"; then
+      _add_cred_type 'Anthropic API key'
+    fi
+
+    # OpenAI / generic sk- API key (broad but high-signal prefix)
+    if printf '%s' "$_stdout" | grep -qE "$_sk_credential_pattern"; then
+      _add_cred_type 'API key (sk- prefix)'
+    fi
   fi
 
   if [ -n "$_cred_types" ]; then

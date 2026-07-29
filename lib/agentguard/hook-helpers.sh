@@ -17,6 +17,7 @@ _HOOK_BLOCKED=''
 _HOOK_CTX=''
 _HOOK_STOP_CONTINUE=''
 _HOOK_HM_CONFIG_PATH=''
+_HOOK_INPUT_STATE_REFRESHED=''
 
 # General non-interactive shells get env.d through BASH_ENV/.zshenv. This is a
 # hook-local fallback for launchers that invoke hook scripts by absolute path
@@ -161,6 +162,11 @@ _hook_refresh_state_dir() {
   [ -n "$session_key" ] || session_key="$$"
   _HOOK_SESSION_KEY="$session_key"
   _HOOK_STATE_DIR="$(_hook_state_root)/$_HOOK_SESSION_KEY"
+  if [ -n "${_HOOK_INPUT+x}" ]; then
+    _HOOK_INPUT_STATE_REFRESHED=1
+  else
+    _HOOK_INPUT_STATE_REFRESHED=''
+  fi
 }
 
 _hook_refresh_state_dir
@@ -278,12 +284,13 @@ $1"
 
 _hook_read_input() {
   if [ -n "${_HOOK_INPUT+x}" ]; then
-    _hook_refresh_state_dir
+    [ "$_HOOK_INPUT_STATE_REFRESHED" = 1 ] || _hook_refresh_state_dir
     return 0
   fi
   [ ! -t 0 ] || return 1
-  local input stdin_timeout
+  local input stdin_timeout stdin_drain_timeout chunk read_rc
   stdin_timeout="${AGENTGUARD_HOOK_STDIN_TIMEOUT:-0.05}"
+  stdin_drain_timeout="${AGENTGUARD_HOOK_STDIN_DRAIN_TIMEOUT:-1}"
   # Some hook runners attach a non-tty stdin pipe before they have any payload
   # to send. A plain `cat` waits for EOF and can consume the runner's whole hook
   # timeout, so read at most the bytes that arrive promptly.
@@ -296,10 +303,14 @@ _hook_read_input() {
         use IO::Select;
 
         my $timeout = shift @ARGV;
+        my $drain_timeout = shift @ARGV;
         my $select = IO::Select->new(*STDIN);
         my $input = "";
         if ($select->can_read($timeout)) {
-          while ($select->can_read(0)) {
+          # The short timeout guards pipes with no payload. Once data starts,
+          # allow a bounded idle interval between chunks so large JSON is not
+          # truncated merely because the producer briefly loses the scheduler.
+          while ($select->can_read($drain_timeout)) {
             my $chunk = "";
             my $read = sysread(STDIN, $chunk, 65536);
             last if !defined($read) || $read == 0;
@@ -307,7 +318,7 @@ _hook_read_input() {
           }
         }
         print $input;
-      ' "$stdin_timeout"
+      ' "$stdin_timeout" "$stdin_drain_timeout"
     )
   elif [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] && [[ "$stdin_timeout" == *.* ]]; then
     # Bash 3, still shipped as /bin/bash on macOS, rejects fractional timeouts.
@@ -316,7 +327,18 @@ _hook_read_input() {
     IFS= read -r -t 0 -d '' input || return 1
     IFS= read -r -t 1 -d '' input || true
   else
-    IFS= read -r -t "$stdin_timeout" -d '' input || true
+    # `read -t -d ''` applies one deadline to the entire payload. That can
+    # truncate large command output on a loaded host even while bytes continue
+    # to arrive. Keep the short first-byte timeout, then reset a bounded
+    # per-chunk deadline. `-n` is supported by Bash 3.2; `-N` is not.
+    IFS= read -r -t "$stdin_timeout" -d '' -n 1 input || return 1
+    while :; do
+      chunk=''
+      IFS= read -r -t "$stdin_drain_timeout" -d '' -n 4096 chunk
+      read_rc=$?
+      input+="$chunk"
+      [ "$read_rc" -eq 0 ] || break
+    done
   fi
   # Non-interactive test shells and some hook launchers can present an already
   # closed stdin. Treat that as "no hook JSON" instead of caching an empty input:
