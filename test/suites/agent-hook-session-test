@@ -63,14 +63,17 @@ _install_hook_fixture "$MOCK_STOP_DIR" agent-hook-stop
 MOCK_STOP="$MOCK_STOP_DIR/bin/agent-hook-stop"
 cat >"$MOCK_STOP_DIR/bin/term-notify-sound" <<'MOCK'
 #!/usr/bin/env bash
+printf '%s\n' "$0" >>"$TERM_NOTIFY_MARKER"
 printf '%s\n' "notification noise"
 MOCK
 chmod +x "$MOCK_STOP_DIR/bin/term-notify-sound"
+STOP_NOTIFY_MARKER="$MOCK_STOP_DIR/stop-notify.log"
 
 stop_out=$(
   AGENTGUARD_SESSION_ID="$TEST_SID" \
     TMPDIR="$TEST_TMPDIR" \
     AGENTGUARD_NAME="codex" \
+    TERM_NOTIFY_MARKER="$STOP_NOTIFY_MARKER" \
     PATH="$MOCK_STOP_DIR/bin:$PATH" \
     "$MOCK_STOP" </dev/null 2>/dev/null
 )
@@ -78,6 +81,30 @@ echo "$stop_out" | jq -e '. == {}' >/dev/null 2>&1
 _assert_eq "stop: notification stdout does not corrupt JSON" "0" "$?"
 _assert_not_contains "stop: notification output is suppressed" \
   "notification noise" "$stop_out"
+_assert_file_content "stop: invokes the shared terminal notifier" \
+  "$MOCK_STOP_DIR/bin/term-notify-sound" "$STOP_NOTIFY_MARKER"
+
+echo ""
+echo "=== notification: terminal notifier ==="
+
+MOCK_NOTIFICATION_DIR=$(_tmpdir)
+_install_hook_fixture "$MOCK_NOTIFICATION_DIR" agent-hook-notification
+MOCK_NOTIFICATION="$MOCK_NOTIFICATION_DIR/bin/agent-hook-notification"
+cat >"$MOCK_NOTIFICATION_DIR/bin/term-notify-sound" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$0" >>"$TERM_NOTIFY_MARKER"
+MOCK
+chmod +x "$MOCK_NOTIFICATION_DIR/bin/term-notify-sound"
+NOTIFICATION_MARKER="$MOCK_NOTIFICATION_DIR/notification.log"
+
+AGENTGUARD_SESSION_ID="$TEST_SID" \
+  TMPDIR="$TEST_TMPDIR" \
+  AGENTGUARD_NAME="codex" \
+  TERM_NOTIFY_MARKER="$NOTIFICATION_MARKER" \
+  PATH="$MOCK_NOTIFICATION_DIR/bin:$PATH" \
+  "$MOCK_NOTIFICATION" </dev/null >/dev/null 2>&1
+_assert_file_content "notification: invokes the shared terminal notifier" \
+  "$MOCK_NOTIFICATION_DIR/bin/term-notify-sound" "$NOTIFICATION_MARKER"
 
 echo ""
 echo "=== session-end: Claude structured title detection ==="
