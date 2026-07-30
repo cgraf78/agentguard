@@ -178,4 +178,55 @@ _assert_eq "/usr/bin/env split-string git status untracked: blocked" "2" "$HOOK_
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"env -S git status --untracked-files=all"}}'
 _assert_eq "env split-string git with trailing status args: blocked" "2" "$HOOK_EXIT"
 
+# ---------------------------------------------------------------------------
+# git add: staging the whole protected work tree
+#
+# `git add -A` walks the entire work tree like `status -uall` does, but stages
+# the result, so an accidental sweep of $HOME lands one commit from publication.
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-bash: protected bare-Git whole-tree staging guard ==="
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git add -A"}}'
+_assert_eq "git add -A: blocked" "2" "$HOOK_EXIT"
+_assert_contains "git add -A: explains whole-tree staging" \
+  "stage the whole protected" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git add --all"}}'
+_assert_eq "git add --all: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git add --al"}}'
+_assert_eq "git add --al abbreviation: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git add --no-ignore-removal"}}'
+_assert_eq "git add --no-ignore-removal: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git add -An"}}'
+_assert_eq "git add bundled -An: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git add ."}}'
+_assert_eq "git add .: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git add :/"}}'
+_assert_eq "git add :/ magic pathspec: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git add -A ."}}'
+_assert_eq "git add -A .: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git add -- ."}}'
+_assert_eq "git add -- .: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git add \"*.sh\""}}'
+_assert_eq "git add glob pathspec: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"\"git\" add -A"}}'
+_assert_eq "quoted git add -A: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"g\\it add -A"}}'
+_assert_eq "escaped git add -A: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"cd /tmp && git add -A"}}'
+_assert_eq "git add -A after a sequenced command: blocked" "2" "$HOOK_EXIT"
+
 _test_summary

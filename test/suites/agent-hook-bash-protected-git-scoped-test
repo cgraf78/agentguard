@@ -110,4 +110,39 @@ _assert_eq "non-protected git status -uall: allowed" "0" "$HOOK_EXIT"
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"git -C ~/.normal-git-repo status -uall"}}'
 _assert_eq "overlay protected bare-Git repo status -uall: allowed" "0" "$HOOK_EXIT"
 
+# ---------------------------------------------------------------------------
+# git add: explicit paths must stay usable
+#
+# Unlike the status/ls-files/clean guards, `git add` does not require a `--`
+# separator. `git add path/file` is the normal safe spelling, so demanding one
+# would block ordinary staging rather than the whole-tree sweep we care about.
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-bash: protected bare-Git scoped staging ==="
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git add .config/dot/config.toml"}}'
+_assert_eq "git add with an explicit path: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git add -- .config/dot/config.toml"}}'
+_assert_eq "git add with a separated explicit path: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git add -A -- .config/dot"}}'
+_assert_eq "git add -A narrowed by an explicit path: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git add a.sh b.sh"}}'
+_assert_eq "git add with several explicit paths: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git add -u"}}'
+_assert_eq "git add -u restages tracked files only: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git add --help"}}'
+_assert_eq "git add --help: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"git commit -A"}}'
+_assert_eq "non-add subcommand with -A: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"npm add -A"}}'
+_assert_eq "non-git add -A: allowed" "0" "$HOOK_EXIT"
+
 _test_summary
