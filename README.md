@@ -37,8 +37,12 @@ another tool that follows the same hook protocol.
   `AGENTGUARD_PROTECTED_BARE_GIT_ALIASES` (space-separated shell variable names
   that should resolve to the protected Git dir),
   `AGENTGUARD_PROTECTED_BARE_GIT_LAUNCHER` (the PATH-visible `git` wrapper to
-  model), and the `AGENTGUARD_PROTECTED_BARE_GIT_{STATUS,LS_FILES,CLEAN}_MESSAGE`
-  remediation strings.
+  model), and the
+  `AGENTGUARD_PROTECTED_BARE_GIT_{STATUS,LS_FILES,CLEAN,ADD}_MESSAGE`
+  remediation strings. The guard covers unscoped `status`, `ls-files`, `clean`,
+  and whole-tree `git add` (`-A`, `.`, `:/`, globs); `git add` accepts explicit
+  paths without a `--` separator, and `git add -u` is allowed because it
+  restages tracked files only.
 
 Source non-binary assets through shdeps so install locations stay under the
 dependency manager's contract:

@@ -1379,6 +1379,9 @@ _protected_bare_git_message() {
     clean)
       printf '%s\n' "${AGENTGUARD_PROTECTED_BARE_GIT_CLEAN_MESSAGE:-do not run unscoped git clean in the protected bare-Git work tree. Inspect a scoped path with git clean --dry-run -- <path>.}"
       ;;
+    add)
+      printf '%s\n' "${AGENTGUARD_PROTECTED_BARE_GIT_ADD_MESSAGE:-do not stage the whole protected bare-Git work tree. Stage explicit paths with git add -- <path>.}"
+      ;;
   esac
 }
 
@@ -3761,6 +3764,81 @@ _git_clean_lists_untracked() {
   return 0
 }
 
+# Git accepts unique long-option prefixes, so every spelling from `--a` to
+# `--all` means the same thing. `-A` may also arrive bundled (`-An`).
+_git_option_stages_all() {
+  local word
+  word="$(_shell_word_token "$1")"
+
+  case "$word" in
+    --a | --al | --all | --no-ignore-removal)
+      return 0
+      ;;
+  esac
+  [[ "$word" == -* && "$word" != --* && "${word#-}" == *A* ]] && return 0
+
+  return 1
+}
+
+# `git add -A` walks the entire work tree and stages whatever it finds. In a
+# protected bare repo whose work tree is $HOME that sweeps in unrelated dotfiles
+# and caches, and unlike a stray `status` the result is staged and one commit
+# away from being published.
+#
+# Unlike the status/ls-files/clean guards this does not demand a `--` separator,
+# because `git add path/file` is the normal safe spelling and requiring `--`
+# would block ordinary staging. Any specific pathspec is enough; the block is
+# for whole-tree targets (`-A`, `.`, `:/`, `~`, globs) with nothing narrowing
+# them. `-u` is deliberately not treated as whole-tree: it restages tracked
+# files only, so it cannot pull in untracked content.
+_git_add_stages_everything() {
+  local fragment="$1" word index
+  local all_flag=0 specific_pathspec=0 broad_pathspec=0 saw_separator=0
+  local -a words=()
+  index="$(_git_subcommand_index "$fragment" "add")" || return 1
+
+  while IFS= read -r word; do
+    words+=("$word")
+  done < <(_fragment_tokens "$fragment")
+
+  # Start after the subcommand token itself.
+  index=$((index + 1))
+  while [ "$index" -lt "${#words[@]}" ]; do
+    word="$(_shell_word_token "${words[$index]}")"
+    index=$((index + 1))
+    [ -n "$word" ] || continue
+
+    if [ "$saw_separator" -eq 0 ]; then
+      case "$word" in
+        --)
+          saw_separator=1
+          continue
+          ;;
+        -h | --help)
+          return 1
+          ;;
+      esac
+      if [[ "$word" == -* ]]; then
+        _git_option_stages_all "$word" && all_flag=1
+        continue
+      fi
+    fi
+
+    if _pathspec_is_specific "$word"; then
+      specific_pathspec=1
+    else
+      broad_pathspec=1
+    fi
+  done
+
+  # A whole-tree pathspec (`.`, `:/`, `~`, a glob) is unsafe no matter what
+  # else narrows it, because it still resolves against the whole work tree.
+  [ "$broad_pathspec" -eq 1 ] && return 0
+  # `-A` alone sweeps everything, but `git add -A -- src/` is properly scoped.
+  [ "$all_flag" -eq 1 ] && [ "$specific_pathspec" -eq 0 ] && return 0
+  return 1
+}
+
 # Nested executable payloads must be classified with the variable visibility the
 # shell would give them, then restored afterward. `bash -c` sees only exported
 # variables; command substitutions run in a subshell copy that sees shell-local
@@ -3965,6 +4043,8 @@ _block_protected_bare_git_fragment() {
     _hook_block "$(_protected_bare_git_message ls-files)"
   elif _git_clean_lists_untracked "$fragment"; then
     _hook_block "$(_protected_bare_git_message clean)"
+  elif _git_add_stages_everything "$fragment"; then
+    _hook_block "$(_protected_bare_git_message add)"
   fi
   _remember_protected_bare_git_path_assignments "$fragment"
 }
