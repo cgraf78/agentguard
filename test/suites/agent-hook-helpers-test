@@ -1173,6 +1173,44 @@ fi
 _assert_contains "hm hook: a timeout is reported distinctly from a hard failure" \
   "Hive Memory hook timed out after 1s" "$(cat "$hm_hang_err")"
 
+# A timeout warning is context for the user, but it is not memory context. Do
+# not mark startup context as emitted or the same session can never retry after
+# the store recovers.
+hm_start_retry_out="$HM_MOCK_ROOT/start-timeout-retry.out"
+HOME="$HM_HOME" \
+  PATH="$HM_BIN:$PATH" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  HM_MODE=hang \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+  AGENTGUARD_HIVE_MEMORY_TIMEOUT=0.1 \
+  AGENTGUARD_NAME=codex \
+  CODEX_THREAD_ID="hm-start-timeout-session" \
+  bash -c '
+    source "$1"
+    _hook_hm_session_start
+    [ ! -e "$_HOOK_STATE_DIR/hm-session-start-context-emitted" ] && printf "timeout=retryable\n"
+
+    export HM_MODE=response
+    _HOOK_CTX=""
+    _hook_hm_session_start
+    [ -e "$_HOOK_STATE_DIR/hm-session-start-context-emitted" ] && printf "recovery=marked\n"
+    printf "context=%s\n" "$_HOOK_CTX"
+
+    before=$(grep -c "^args=" "$HM_LOG")
+    _hook_hm_session_start
+    after=$(grep -c "^args=" "$HM_LOG")
+    [ "$before" -eq "$after" ] && printf "third=suppressed\n"
+  ' _ "$HELPERS" >"$hm_start_retry_out" 2>/dev/null
+_assert_contains "hm hook: session-start timeout remains retryable" \
+  "timeout=retryable" "$(cat "$hm_start_retry_out")"
+_assert_contains "hm hook: recovered session-start writes the marker" \
+  "recovery=marked" "$(cat "$hm_start_retry_out")"
+_assert_contains "hm hook: recovered session-start injects memory" \
+  "memory ctx" "$(cat "$hm_start_retry_out")"
+_assert_contains "hm hook: emitted marker suppresses a third invocation" \
+  "third=suppressed" "$(cat "$hm_start_retry_out")"
+
 # The timeout is advisory infrastructure, not a hard failure: the calling
 # hook must still exit cleanly and simply proceed without memory context.
 hm_hang_rc=0
