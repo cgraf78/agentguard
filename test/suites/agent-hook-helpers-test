@@ -578,6 +578,7 @@ cat >"$HM_BIN/hm" <<'SCRIPT'
   printf 'project=%s\n' "${HIVE_MEMORY_PROJECT:-}"
   printf 'project_infer=%s\n' "${HIVE_MEMORY_PROJECT_INFER:-}"
   printf 'active=%s\n' "${HIVE_MEMORY_HOOK_ACTIVE:-}"
+  printf 'background_refresh=%s\n' "${HIVE_MEMORY_BACKGROUND_REFRESH:-}"
 } >>"$HM_LOG"
 
 case "${HM_MODE:-empty}" in
@@ -795,6 +796,8 @@ _assert_contains "hm hook: session-start from home omits project argument" \
   "args=hook session-start --json" "$(cat "$HM_LOG")"
 _assert_not_contains "hm hook: session-start from home does not pass --project" \
   "--project" "$(cat "$HM_LOG")"
+_assert_contains "hm hook: session-start enables detached cache refresh" \
+  "background_refresh=1" "$(cat "$HM_LOG")"
 
 prompt_input_preserved=$(
   printf '%s' '{"prompt":"goal work","workspace":{"current_dir":"/tmp/project"}}' |

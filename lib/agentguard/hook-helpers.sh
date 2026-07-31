@@ -864,6 +864,7 @@ _hook_hm_event() {
         HIVE_MEMORY_SESSION_ID="$_HOOK_SESSION_KEY" \
         HIVE_MEMORY_PROJECT_INFER=0 \
         HIVE_MEMORY_HOOK_ACTIVE=1 \
+        HIVE_MEMORY_BACKGROUND_REFRESH=1 \
         "${_HOOK_TIMEOUT_PREFIX[@]}" hm "${hm_args[@]}" 2>"$err"
     )
   else
@@ -874,6 +875,7 @@ _hook_hm_event() {
         HIVE_MEMORY_PROJECT="$project" \
         HIVE_MEMORY_PROJECT_INFER="$project_infer" \
         HIVE_MEMORY_HOOK_ACTIVE=1 \
+        HIVE_MEMORY_BACKGROUND_REFRESH=1 \
         "${_HOOK_TIMEOUT_PREFIX[@]}" hm "${hm_args[@]}" 2>"$err"
     )
   fi
