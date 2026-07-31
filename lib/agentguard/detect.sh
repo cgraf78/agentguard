@@ -20,9 +20,60 @@
 # produce Codex-shaped hook JSON even before regenerated config can inject
 # AGENTGUARD_NAME=codex explicitly.
 
+_agent_process_tree_snapshot_pid() {
+  local target="$1"
+  local snapshot
+
+  snapshot=$(ps -axo pid=,ppid=,comm= 2>/dev/null) || return 2
+  [ -n "$snapshot" ] || return 2
+
+  printf '%s\n' "$snapshot" | awk -v start="$$" -v target="$target" '
+    {
+      pid = $1
+      parent[pid] = $2
+      $1 = $2 = ""
+      sub(/^[[:space:]]+/, "")
+      command[pid] = $0
+    }
+    END {
+      if (!(start in command)) exit 2
+      pid = start
+      while (pid != "" && pid != "0" && !seen[pid]++) {
+        name = command[pid]
+        sub(/^.*\//, "", name)
+        if (name == target) {
+          print pid
+          found = 1
+          break
+        }
+        if (!(pid in parent)) {
+          incomplete = 1
+          break
+        }
+        next_pid = parent[pid]
+        if (next_pid == pid) break
+        if (next_pid != "" && next_pid != "0" && !(next_pid in command)) {
+          incomplete = 1
+          break
+        }
+        pid = next_pid
+      }
+      exit(found ? 0 : (incomplete ? 2 : 1))
+    }
+  '
+}
+
 _agent_process_tree_pid() {
   local target="$1"
-  local pid parent comm
+  local snapshot_status pid parent comm
+
+  _agent_process_tree_snapshot_pid "$target" && return 0
+  snapshot_status=$?
+  [ "$snapshot_status" -ne 2 ] && return "$snapshot_status"
+
+  # Fall back for minimal or older `ps` implementations without a portable
+  # all-process snapshot. This path is slower but preserves detection rather
+  # than turning a missing `ps -a` capability into a false human classification.
   pid="$$"
   while [ -n "$pid" ] && [ "$pid" != "0" ]; do
     # Match on the executable NAME only, never the argument text. An earlier
