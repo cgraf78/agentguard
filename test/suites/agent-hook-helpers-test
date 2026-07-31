@@ -1731,6 +1731,22 @@ _assert_eq "agent_name: codex override wins over claude env" "0" "$?"
 ) | _stdin_contains PASS
 _assert_eq "agent_name: codex thread id wins over claude env" "0" "$?"
 
+# Exercise the native ps path. Container process namespaces can legitimately
+# omit host ancestors, in which case the compatibility walk must preserve the
+# same no-match result.
+(
+  source "$HELPERS"
+  _agent_process_tree_snapshot_pid "agentguard-no-such-process-$$" >/dev/null
+  snapshot_status=$?
+  if [ "$snapshot_status" -eq 2 ]; then
+    _agent_process_tree_pid "agentguard-no-such-process-$$" >/dev/null
+    [ "$?" -eq 1 ]
+  else
+    [ "$snapshot_status" -eq 1 ]
+  fi
+)
+_assert_eq "agent_name: native ps snapshot or fallback preserves no match" "0" "$?"
+
 # _hook_agent_name falls back to the process tree for Codex. This covers
 # already-running Codex sessions whose hook subprocesses do not inherit a
 # Codex-specific env var; regenerated config still sets AGENTGUARD_NAME directly.
@@ -1781,6 +1797,130 @@ chmod +x "$MOCK_PS_DIR/ps"
   ' _ "$MOCK_PS_DIR" "$HELPERS"
 ) | _stdin_contains PASS
 _assert_eq "agent_name: codex process fallback" "0" "$?"
+
+# The markerless fallback runs on every human `hm` command, so it must inspect
+# the process tree from one snapshot instead of spawning two `ps` commands per
+# ancestor. The mock supports only the snapshot form and records every call.
+MOCK_PS_SNAPSHOT_DIR=$(_tmpdir)
+MOCK_PS_SNAPSHOT_CALLS="$MOCK_PS_SNAPSHOT_DIR/calls"
+cat >"$MOCK_PS_SNAPSHOT_DIR/ps" <<'SCRIPT'
+#!/usr/bin/env bash
+printf 'call\n' >>"$MOCK_PS_SNAPSHOT_CALLS"
+if [[ "$*" != "-axo pid=,ppid=,comm=" ]]; then
+  exit 1
+fi
+if [ "${MOCK_SNAPSHOT_UNRELATED:-}" = "1" ]; then
+  printf '%s %s %s\n' "$MOCK_CHILD_PID" 1 bash
+else
+  printf '%s %s %s\n' "$MOCK_CHILD_PID" 4242 bash
+fi
+printf '%s %s %s\n' 4242 1 /usr/local/bin/codex
+printf '%s %s %s\n' 1 0 init
+SCRIPT
+chmod +x "$MOCK_PS_SNAPSHOT_DIR/ps"
+snapshot_agent=$(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID GEMINI_PROJECT_DIR \
+    AGENTGUARD_SESSION_ID 2>/dev/null
+  AGENTGUARD_PROCESS_DETECT=1
+  export AGENTGUARD_PROCESS_DETECT MOCK_PS_SNAPSHOT_CALLS
+  bash -c '
+    export MOCK_CHILD_PID="$$"
+    PATH="$1:$PATH"
+    source "$2"
+    : >"$MOCK_PS_SNAPSHOT_CALLS"
+    _hook_agent_name
+  ' _ "$MOCK_PS_SNAPSHOT_DIR" "$HELPERS"
+)
+_assert_eq "agent_name: one process snapshot detects codex" "codex" "$snapshot_agent"
+_assert_eq "agent_name: process fallback invokes ps once" "1" \
+  "$(wc -l <"$MOCK_PS_SNAPSHOT_CALLS" | tr -d ' ')"
+
+: >"$MOCK_PS_SNAPSHOT_CALLS"
+snapshot_agent=$(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID GEMINI_PROJECT_DIR \
+    AGENTGUARD_SESSION_ID 2>/dev/null
+  AGENTGUARD_PROCESS_DETECT=1
+  MOCK_SNAPSHOT_UNRELATED=1
+  export AGENTGUARD_PROCESS_DETECT MOCK_PS_SNAPSHOT_CALLS MOCK_SNAPSHOT_UNRELATED
+  bash -c '
+    export MOCK_CHILD_PID="$$"
+    PATH="$1:$PATH"
+    source "$2"
+    : >"$MOCK_PS_SNAPSHOT_CALLS"
+    _hook_agent_name
+  ' _ "$MOCK_PS_SNAPSHOT_DIR" "$HELPERS"
+)
+_assert_eq "agent_name: unrelated codex process is ignored" "agent" "$snapshot_agent"
+_assert_eq "agent_name: unrelated process scan invokes ps once" "1" \
+  "$(wc -l <"$MOCK_PS_SNAPSHOT_CALLS" | tr -d ' ')"
+
+# A successful snapshot can still be incomplete. Fall back to the per-process
+# queries when the current shell is absent instead of silently classifying an
+# already-running Codex session as a human shell.
+MOCK_PS_INCOMPLETE_DIR=$(_tmpdir)
+cat >"$MOCK_PS_INCOMPLETE_DIR/ps" <<'SCRIPT'
+#!/usr/bin/env bash
+if [[ "$*" = "-axo pid=,ppid=,comm=" ]]; then
+  if [ "${MOCK_SNAPSHOT_MODE:-}" = "partial-chain" ]; then
+    printf '%s\n' "$MOCK_CHILD_PID 4242 bash"
+  fi
+  printf '%s\n' "1 0 init"
+  exit 0
+fi
+
+field=""
+pid=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field="${2:-}"; shift 2 ;;
+    -p) pid="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+case "$field:$pid" in
+  comm=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash" ;;
+  ppid=:"${MOCK_CHILD_PID:-}") printf '%s\n' "4242" ;;
+  comm=:4242) printf '%s\n' "codex" ;;
+  ppid=:4242) printf '%s\n' "1" ;;
+  comm=:1) printf '%s\n' "init" ;;
+  ppid=:1) printf '%s\n' "0" ;;
+  *) exit 1 ;;
+esac
+SCRIPT
+chmod +x "$MOCK_PS_INCOMPLETE_DIR/ps"
+(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID GEMINI_PROJECT_DIR \
+    AGENTGUARD_SESSION_ID 2>/dev/null
+  AGENTGUARD_PROCESS_DETECT=1
+  export AGENTGUARD_PROCESS_DETECT
+  bash -c '
+    export MOCK_CHILD_PID="$$"
+    PATH="$1:$PATH"
+    source "$2"
+    [ "$(_hook_agent_name)" = "codex" ] && echo "PASS" || echo "FAIL"
+  ' _ "$MOCK_PS_INCOMPLETE_DIR" "$HELPERS"
+) | _stdin_contains PASS
+_assert_eq "agent_name: incomplete snapshot uses process fallback" "0" "$?"
+
+(
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID GEMINI_PROJECT_DIR \
+    AGENTGUARD_SESSION_ID 2>/dev/null
+  AGENTGUARD_PROCESS_DETECT=1
+  MOCK_SNAPSHOT_MODE=partial-chain
+  export AGENTGUARD_PROCESS_DETECT MOCK_SNAPSHOT_MODE
+  bash -c '
+    export MOCK_CHILD_PID="$$"
+    PATH="$1:$PATH"
+    source "$2"
+    [ "$(_hook_agent_name)" = "codex" ] && echo "PASS" || echo "FAIL"
+  ' _ "$MOCK_PS_INCOMPLETE_DIR" "$HELPERS"
+) | _stdin_contains PASS
+_assert_eq "agent_name: partial snapshot ancestry uses process fallback" "0" "$?"
 
 # Regression: the process-tree fallback must match the executable NAME only,
 # never the argument text. Here an ancestor (comm=bash) merely mentions "codex"
