@@ -630,6 +630,7 @@ _hook_hm_apply_response() {
     [ -n "$body" ] || continue
     case "$kind" in
       inject_context)
+        _HOOK_HM_CONTEXT_EMITTED=1
         _hook_context "$body"
         ;;
       remind)
@@ -863,6 +864,7 @@ _hook_hm_event() {
         HIVE_MEMORY_SESSION_ID="$_HOOK_SESSION_KEY" \
         HIVE_MEMORY_PROJECT_INFER=0 \
         HIVE_MEMORY_HOOK_ACTIVE=1 \
+        HIVE_MEMORY_BACKGROUND_REFRESH=1 \
         "${_HOOK_TIMEOUT_PREFIX[@]}" hm "${hm_args[@]}" 2>"$err"
     )
   else
@@ -873,6 +875,7 @@ _hook_hm_event() {
         HIVE_MEMORY_PROJECT="$project" \
         HIVE_MEMORY_PROJECT_INFER="$project_infer" \
         HIVE_MEMORY_HOOK_ACTIVE=1 \
+        HIVE_MEMORY_BACKGROUND_REFRESH=1 \
         "${_HOOK_TIMEOUT_PREFIX[@]}" hm "${hm_args[@]}" 2>"$err"
     )
   fi
@@ -894,7 +897,7 @@ _hook_hm_event() {
 }
 
 _hook_hm_session_start() {
-  local marker before
+  local marker
   # Read hook stdin before checking the marker. Some runners only expose the
   # durable session id in JSON; checking the process-key marker first would miss
   # an existing session marker, and writing after _hook_hm_event could target a
@@ -908,9 +911,11 @@ _hook_hm_session_start() {
   marker="$_HOOK_STATE_DIR/hm-session-start-context-emitted"
   [ ! -e "$marker" ] || return 0
 
-  before="$_HOOK_CTX"
+  _HOOK_HM_CONTEXT_EMITTED=0
   _hook_hm_event session-start
-  if [ "$_HOOK_CTX" != "$before" ]; then
+  if [ "$_HOOK_HM_CONTEXT_EMITTED" -eq 1 ]; then
+    # Warnings also add hook context, but they do not deliver memory. Mark only
+    # a real inject_context action so a timeout remains retryable after recovery.
     # _hook_hm_event also reads stdin for callers that did not already do so,
     # so derive the marker path from the post-event state as a final guard.
     marker="$_HOOK_STATE_DIR/hm-session-start-context-emitted"
