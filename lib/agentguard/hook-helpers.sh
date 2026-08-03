@@ -18,6 +18,7 @@ _HOOK_CTX=''
 _HOOK_STOP_CONTINUE=''
 _HOOK_HM_CONFIG_PATH=''
 _HOOK_INPUT_STATE_REFRESHED=''
+_HOOK_PROMPT_SUBMITTED=''
 
 # General non-interactive shells get env.d through BASH_ENV/.zshenv. This is a
 # hook-local fallback for launchers that invoke hook scripts by absolute path
@@ -222,6 +223,36 @@ _hook_once_per_prompt() {
 
 _hook_once_per_session() {
   _hook_mark_once "$_HOOK_STATE_DIR" "$1"
+}
+
+# Return whether the current host identifies this Stop as a continuation. Keep
+# raw payload vocabulary behind one predicate so launchers never grow
+# agent-specific branches as compatible runtimes evolve.
+_hook_stop_active() {
+  [ -n "${_HOOK_INPUT:-}" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  printf '%s' "$_HOOK_INPUT" |
+    jq -e '.stop_hook_active == true' >/dev/null 2>&1
+}
+
+# Atomically claim the one audible notification in a prompt cycle. Unlike
+# behavioral reminders, sound must fail silent when state cannot be persisted;
+# failing open here would recreate the repeated-bell failure under concurrency
+# or a temporarily unavailable state root.
+_hook_stop_claim_notification() {
+  local dir="$_HOOK_STATE_DIR/prompt-cycle"
+  _hook_mkstate "$dir" || return 1
+  mkdir "$dir/stop-notified" 2>/dev/null
+}
+
+# Return success once per foreground prompt cycle so a completed response can
+# notify without repeated Stop callbacks ringing for background continuations.
+# AgentGuard state is canonical across runtimes; stop_hook_active is only an
+# additional recursion guard when a host exposes that compatible field.
+_hook_stop_should_notify() {
+  _hook_hm_read_input
+  _hook_stop_active && return 1
+  _hook_stop_claim_notification
 }
 
 _hook_flag_enabled() {
@@ -574,7 +605,15 @@ _hook_hm_project_hint() {
 _hook_hm_prompt_text() {
   _hook_hm_read_input
   printf '%s' "${_HOOK_INPUT:-}" | jq -r '
-    .prompt // .user_prompt // .message // .input // .tool_input.prompt // empty
+    [
+      .prompt?,
+      .user_prompt?,
+      .message?,
+      .input?,
+      .tool_input.prompt?
+    ]
+    | map(select(type == "string" and . != ""))
+    | .[0] // empty
   ' 2>/dev/null
 }
 
@@ -933,6 +972,7 @@ _hook_hm_prompt_submit() {
   _hook_hm_read_input
   prompt=$(_hook_hm_prompt_text)
   [ -n "$prompt" ] || return 0
+  _HOOK_PROMPT_SUBMITTED=1
   _hook_hm_event prompt-submit --text "$prompt"
 }
 

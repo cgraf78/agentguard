@@ -244,10 +244,13 @@ To add a new managed agent runtime:
   reminders and context refresh decisions, then resets prompt-cycle state used
   by once-per-prompt guidance. The hook passes prompt text and path facts; it
   does not decide what should be written.
-- `agent-hook-stop` asks Hive Memory for any pending-memory reminder, then plays
-  terminal notifications. On Codex, only explicit reminders or blocks continue
-  the turn; ordinary warnings do not trap shutdown. `agent-hook-notification`
-  only plays notifications.
+- `agent-hook-stop` asks Hive Memory for any pending-memory reminder and plays a
+  terminal notification for the first non-reentrant Stop callback after a valid
+  prompt. Repeated callbacks stay silent until another valid prompt re-arms the
+  shared AgentGuard state. On Codex, only explicit reminders or blocks continue
+  the turn; ordinary warnings do not trap shutdown.
+  `agent-hook-notification` plays notifications for host attention events such
+  as permission requests.
 
 Hive Memory integration is deliberately centralized behind `hm hook <event>`.
 The shell hooks pass only event facts: agent id, session id, and the best
