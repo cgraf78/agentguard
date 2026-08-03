@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # agent-hook-stop — Stop hook.
-# Runs after every response: play the local notification and surface any
-# pending Hive Memory reminder before agent-specific and local extensions run.
+# Runs after every response: surface any pending Hive Memory reminder and ring
+# for the first non-reentrant Stop after a valid prompt, not repeated callbacks.
 
 set -u
 _HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}" # captured before sourcing so _hook_source_extensions finds agent/local variants
@@ -35,6 +35,8 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
 # END GENERATED LAUNCHER BOOTSTRAP
 
 _hook_hm_stop
-term-notify-sound >/dev/null 2>&1 || true
+if _hook_stop_should_notify; then
+  term-notify-sound >/dev/null 2>&1 || true
+fi
 _hook_source_extensions
 _hook_finish

@@ -161,6 +161,104 @@ _assert_contains "hook marker: prompt marker second call stops" \
 _assert_contains "hook marker: prompt reset re-arms marker" \
   "prompt_after_reset=yes" "$marker_out"
 
+stop_claim_root=$(_tmpdir)
+stop_claim_ready="$stop_claim_root/ready"
+stop_claim_results="$stop_claim_root/results"
+stop_claim_state="$stop_claim_root/state"
+stop_claim_workers=16
+mkdir -p "$stop_claim_ready" "$stop_claim_results"
+stop_claim_worker=1
+while [ "$stop_claim_worker" -le "$stop_claim_workers" ]; do
+  STOP_CLAIM_READY="$stop_claim_ready" \
+    STOP_CLAIM_RESULTS="$stop_claim_results" \
+    STOP_CLAIM_STATE="$stop_claim_state" \
+    STOP_CLAIM_WORKERS="$stop_claim_workers" \
+    STOP_CLAIM_WORKER="$stop_claim_worker" \
+    bash -c '
+      source "$1"
+      _HOOK_INPUT=""
+      _HOOK_INPUT_STATE_REFRESHED=1
+      _HOOK_STATE_DIR="$STOP_CLAIM_STATE"
+      _hook_mkstate() {
+        local dir="$1" ready_count=0 attempts=0
+        mkdir -p "$dir"
+        : >"$STOP_CLAIM_READY/$STOP_CLAIM_WORKER"
+        while [ "$ready_count" -lt "$STOP_CLAIM_WORKERS" ]; do
+          set -- "$STOP_CLAIM_READY"/*
+          if [ -e "$1" ]; then
+            ready_count=$#
+          else
+            ready_count=0
+          fi
+          [ "$ready_count" -ge "$STOP_CLAIM_WORKERS" ] && continue
+          attempts=$((attempts + 1))
+          if [ "$attempts" -ge 500 ]; then
+            printf "stop claim barrier timed out\n" >&2
+            return 1
+          fi
+          sleep 0.01
+        done
+      }
+      if _hook_stop_should_notify; then
+        : >"$STOP_CLAIM_RESULTS/$STOP_CLAIM_WORKER"
+      fi
+    ' _ "$HELPERS" &
+  stop_claim_worker=$((stop_claim_worker + 1))
+done
+stop_claim_wait=0
+wait || stop_claim_wait=$?
+_assert_eq "stop notification claim: concurrent workers complete" \
+  "0" "$stop_claim_wait"
+stop_claim_count=$(
+  set -- "$stop_claim_results"/*
+  if [ -e "$1" ]; then
+    printf '%s\n' "$#"
+  else
+    printf '0\n'
+  fi
+)
+_assert_eq "stop notification claim: concurrent callbacks acquire once" \
+  "1" "$stop_claim_count"
+
+stop_claim_failure=$(
+  bash -c '
+    source "$1"
+    _HOOK_INPUT=""
+    _HOOK_INPUT_STATE_REFRESHED=1
+    _HOOK_STATE_DIR="/dev/null/agentguard-state"
+    if _hook_stop_should_notify; then
+      printf "notify\n"
+    else
+      printf "silent\n"
+    fi
+  ' _ "$HELPERS"
+)
+_assert_eq "stop notification claim: unavailable state fails silent" \
+  "silent" "$stop_claim_failure"
+
+stop_claim_marker_failure=$(
+  bash -c '
+    source "$1"
+    _HOOK_INPUT=""
+    _HOOK_INPUT_STATE_REFRESHED=1
+    _HOOK_STATE_DIR="$2"
+    mkdir() {
+      if [ "${1:-}" = "-p" ]; then
+        command mkdir "$@"
+      else
+        return 1
+      fi
+    }
+    if _hook_stop_should_notify; then
+      printf "notify\n"
+    else
+      printf "silent\n"
+    fi
+  ' _ "$HELPERS" "$stop_claim_root/marker-failure"
+)
+_assert_eq "stop notification claim: marker write failure stays silent" \
+  "silent" "$stop_claim_marker_failure"
+
 echo ""
 echo "=== hook-helpers: PATH fallback ==="
 

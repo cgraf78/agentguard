@@ -6,7 +6,9 @@ agent-hook-stop \- run end-of-turn agent checks and notifications
 .SH DESCRIPTION
 .B agent-hook-stop
 reads a stop hook JSON payload from standard input, asks Hive Memory for any
-pending-memory reminder, and plays terminal notifications. On Codex, only
+pending-memory reminder, and plays a terminal notification for the first
+non-reentrant Stop callback after a valid prompt. Repeated callbacks stay silent
+until another valid prompt re-arms the shared AgentGuard state. On Codex, only
 explicit reminders or blocks continue the turn; ordinary warnings do not trap
 shutdown.
 .SH EXIT STATUS

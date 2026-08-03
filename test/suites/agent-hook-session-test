@@ -58,31 +58,250 @@ _assert_eq "session-start: no crash" "0" "$?"
 echo ""
 echo "=== stop: response JSON ==="
 
-MOCK_STOP_DIR=$(_tmpdir)
-_install_hook_fixture "$MOCK_STOP_DIR" agent-hook-stop
-MOCK_STOP="$MOCK_STOP_DIR/bin/agent-hook-stop"
-cat >"$MOCK_STOP_DIR/bin/term-notify-sound" <<'MOCK'
+_assert_stop_notification_cycle() {
+  local agent="$1" mock_dir mock_stop mock_prompt marker active_marker
+  local session_id stop_out expected
+  mock_dir=$(_tmpdir)
+  _install_hook_fixture "$mock_dir" agent-hook-stop agent-hook-prompt-submit
+  mock_stop="$mock_dir/bin/agent-hook-stop"
+  mock_prompt="$mock_dir/bin/agent-hook-prompt-submit"
+  cat >"$mock_dir/bin/term-notify-sound" <<'MOCK'
 #!/usr/bin/env bash
 printf '%s\n' "$0" >>"$TERM_NOTIFY_MARKER"
 printf '%s\n' "notification noise"
 MOCK
-chmod +x "$MOCK_STOP_DIR/bin/term-notify-sound"
-STOP_NOTIFY_MARKER="$MOCK_STOP_DIR/stop-notify.log"
+  chmod +x "$mock_dir/bin/term-notify-sound"
+  marker="$mock_dir/stop-notify.log"
+  active_marker="$mock_dir/active-stop-notify.log"
+  session_id="$TEST_SID-$agent"
+  expected="$mock_dir/bin/term-notify-sound"
 
-stop_out=$(
-  AGENTGUARD_SESSION_ID="$TEST_SID" \
+  stop_out=$(
+    AGENTGUARD_SESSION_ID="$session_id" \
+      TMPDIR="$TEST_TMPDIR" \
+      AGENTGUARD_NAME="$agent" \
+      TERM_NOTIFY_MARKER="$marker" \
+      PATH="$mock_dir/bin:$PATH" \
+      "$mock_stop" </dev/null 2>/dev/null
+  )
+  echo "$stop_out" | jq -e '. == {}' >/dev/null 2>&1
+  _assert_eq "stop ($agent): notification stdout does not corrupt JSON" "0" "$?"
+  _assert_not_contains "stop ($agent): notification output is suppressed" \
+    "notification noise" "$stop_out"
+  _assert_file_content "stop ($agent): foreground completion rings" \
+    "$expected" "$marker"
+
+  AGENTGUARD_SESSION_ID="$session_id" \
     TMPDIR="$TEST_TMPDIR" \
-    AGENTGUARD_NAME="codex" \
-    TERM_NOTIFY_MARKER="$STOP_NOTIFY_MARKER" \
-    PATH="$MOCK_STOP_DIR/bin:$PATH" \
-    "$MOCK_STOP" </dev/null 2>/dev/null
-)
-echo "$stop_out" | jq -e '. == {}' >/dev/null 2>&1
-_assert_eq "stop: notification stdout does not corrupt JSON" "0" "$?"
-_assert_not_contains "stop: notification output is suppressed" \
-  "notification noise" "$stop_out"
-_assert_file_content "stop: invokes the shared terminal notifier" \
-  "$MOCK_STOP_DIR/bin/term-notify-sound" "$STOP_NOTIFY_MARKER"
+    AGENTGUARD_NAME="$agent" \
+    TERM_NOTIFY_MARKER="$marker" \
+    PATH="$mock_dir/bin:$PATH" \
+    "$mock_stop" </dev/null >/dev/null 2>/dev/null
+  _assert_file_content "stop ($agent): repeated background completion stays silent" \
+    "$expected" "$marker"
+
+  for invalid_prompt in \
+    '' \
+    'not-json' \
+    '{}' \
+    '{"prompt":0}' \
+    '{"prompt":{}}' \
+    '{"input":[]}' \
+    '{"prompt":true}'; do
+    printf '%s' "$invalid_prompt" |
+      AGENTGUARD_SESSION_ID="$session_id" \
+        TMPDIR="$TEST_TMPDIR" \
+        AGENTGUARD_NAME="$agent" \
+        PATH="$mock_dir/bin:$PATH" \
+        "$mock_prompt" >/dev/null 2>/dev/null
+    AGENTGUARD_SESSION_ID="$session_id" \
+      TMPDIR="$TEST_TMPDIR" \
+      AGENTGUARD_NAME="$agent" \
+      TERM_NOTIFY_MARKER="$marker" \
+      PATH="$mock_dir/bin:$PATH" \
+      "$mock_stop" </dev/null >/dev/null 2>/dev/null
+    _assert_file_content \
+      "stop ($agent): invalid prompt does not re-arm notification" \
+      "$expected" "$marker"
+  done
+
+  printf '%s' '{"prompt":"Start another foreground turn."}' |
+    AGENTGUARD_SESSION_ID="$session_id" \
+      TMPDIR="$TEST_TMPDIR" \
+      AGENTGUARD_NAME="$agent" \
+      PATH="$mock_dir/bin:$PATH" \
+      "$mock_prompt" >/dev/null 2>/dev/null
+  AGENTGUARD_SESSION_ID="$session_id" \
+    TMPDIR="$TEST_TMPDIR" \
+    AGENTGUARD_NAME="$agent" \
+    TERM_NOTIFY_MARKER="$marker" \
+    PATH="$mock_dir/bin:$PATH" \
+    "$mock_stop" </dev/null >/dev/null 2>/dev/null
+  expected="$expected
+$expected"
+  _assert_file_content "stop ($agent): new prompt re-arms foreground notification" \
+    "$expected" "$marker"
+
+  printf '%s' '{"stop_hook_active":true}' |
+    AGENTGUARD_SESSION_ID="$session_id-active" \
+      TMPDIR="$TEST_TMPDIR" \
+      AGENTGUARD_NAME="$agent" \
+      TERM_NOTIFY_MARKER="$active_marker" \
+      PATH="$mock_dir/bin:$PATH" \
+      "$mock_stop" >/dev/null 2>/dev/null
+  _assert_file_missing "stop ($agent): runtime continuation stays silent" \
+    "$active_marker"
+
+  AGENTGUARD_SESSION_ID="$session_id-active" \
+    TMPDIR="$TEST_TMPDIR" \
+    AGENTGUARD_NAME="$agent" \
+    TERM_NOTIFY_MARKER="$active_marker" \
+    PATH="$mock_dir/bin:$PATH" \
+    "$mock_stop" </dev/null >/dev/null 2>/dev/null
+  _assert_file_content \
+    "stop ($agent): runtime continuation leaves foreground notification armed" \
+    "$mock_dir/bin/term-notify-sound" "$active_marker"
+}
+
+for stop_agent in agent claude gemini codex; do
+  _assert_stop_notification_cycle "$stop_agent"
+done
+
+MOCK_NATIVE_STOP_DIR=$(_tmpdir)
+_install_hook_fixture \
+  "$MOCK_NATIVE_STOP_DIR" \
+  agent-hook-stop \
+  agent-hook-prompt-submit
+cat >"$MOCK_NATIVE_STOP_DIR/bin/term-notify-sound" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$0" >>"$TERM_NOTIFY_MARKER"
+MOCK
+chmod +x "$MOCK_NATIVE_STOP_DIR/bin/term-notify-sound"
+
+_assert_native_stop_cycle() {
+  local agent="$1" marker="$MOCK_NATIVE_STOP_DIR/$1-notify.log"
+  local expected="$MOCK_NATIVE_STOP_DIR/bin/term-notify-sound"
+  local script
+  # shellcheck disable=SC2016 # the inner Bash expands its positional parameters.
+  script='
+    "$1" </dev/null >/dev/null 2>/dev/null
+    "$1" </dev/null >/dev/null 2>/dev/null
+    printf "%s" "{\"prompt\":\"Start another native turn.\"}" |
+      "$2" >/dev/null 2>/dev/null
+    "$1" </dev/null >/dev/null 2>/dev/null
+  '
+
+  case "$agent" in
+    agent)
+      AGENTGUARD_SESSION_ID="$TEST_SID-native-agent" \
+        AGENTGUARD_NAME=agent \
+        TERM_NOTIFY_MARKER="$marker" \
+        PATH="$MOCK_NATIVE_STOP_DIR/bin:$PATH" \
+        bash -c "$script" _ \
+        "$MOCK_NATIVE_STOP_DIR/bin/agent-hook-stop" \
+        "$MOCK_NATIVE_STOP_DIR/bin/agent-hook-prompt-submit"
+      ;;
+    claude)
+      AGENTGUARD_SESSION_ID='' \
+        AGENTGUARD_NAME=claude \
+        CLAUDE_CODE_CURRENT_SESSION_ID="$TEST_SID-native-claude" \
+        TERM_NOTIFY_MARKER="$marker" \
+        PATH="$MOCK_NATIVE_STOP_DIR/bin:$PATH" \
+        bash -c "$script" _ \
+        "$MOCK_NATIVE_STOP_DIR/bin/agent-hook-stop" \
+        "$MOCK_NATIVE_STOP_DIR/bin/agent-hook-prompt-submit"
+      ;;
+    gemini)
+      AGENTGUARD_SESSION_ID='' \
+        AGENTGUARD_NAME=gemini \
+        GEMINI_PROJECT_DIR="$MOCK_NATIVE_STOP_DIR" \
+        TERM_NOTIFY_MARKER="$marker" \
+        PATH="$MOCK_NATIVE_STOP_DIR/bin:$PATH" \
+        bash -c "$script" _ \
+        "$MOCK_NATIVE_STOP_DIR/bin/agent-hook-stop" \
+        "$MOCK_NATIVE_STOP_DIR/bin/agent-hook-prompt-submit"
+      ;;
+    codex)
+      AGENTGUARD_SESSION_ID='' \
+        AGENTGUARD_NAME=codex \
+        CODEX_THREAD_ID="$TEST_SID-native-codex" \
+        TERM_NOTIFY_MARKER="$marker" \
+        PATH="$MOCK_NATIVE_STOP_DIR/bin:$PATH" \
+        bash -c "$script" _ \
+        "$MOCK_NATIVE_STOP_DIR/bin/agent-hook-stop" \
+        "$MOCK_NATIVE_STOP_DIR/bin/agent-hook-prompt-submit"
+      ;;
+  esac
+
+  expected="$expected
+$expected"
+  _assert_file_content "stop ($agent): native session identity shares prompt state" \
+    "$expected" "$marker"
+}
+
+for stop_agent in agent claude gemini codex; do
+  _assert_native_stop_cycle "$stop_agent"
+done
+
+MOCK_FAILED_STATE_STOP_DIR=$(_tmpdir)
+_install_hook_fixture "$MOCK_FAILED_STATE_STOP_DIR" agent-hook-stop
+cat >"$MOCK_FAILED_STATE_STOP_DIR/bin/term-notify-sound" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$0" >>"$TERM_NOTIFY_MARKER"
+MOCK
+chmod +x "$MOCK_FAILED_STATE_STOP_DIR/bin/term-notify-sound"
+touch "$MOCK_FAILED_STATE_STOP_DIR/not-a-directory"
+FAILED_STATE_STOP_NOTIFY_MARKER="$MOCK_FAILED_STATE_STOP_DIR/stop-notify.log"
+XDG_RUNTIME_DIR="$MOCK_FAILED_STATE_STOP_DIR/not-a-directory" \
+  AGENTGUARD_SESSION_ID="$TEST_SID-failed-state" \
+  TMPDIR="$TEST_TMPDIR" \
+  AGENTGUARD_NAME="agent" \
+  TERM_NOTIFY_MARKER="$FAILED_STATE_STOP_NOTIFY_MARKER" \
+  PATH="$MOCK_FAILED_STATE_STOP_DIR/bin:$PATH" \
+  "$MOCK_FAILED_STATE_STOP_DIR/bin/agent-hook-stop" \
+  </dev/null >/dev/null 2>/dev/null
+_assert_file_missing "stop: unavailable state fails silent instead of ringing repeatedly" \
+  "$FAILED_STATE_STOP_NOTIFY_MARKER"
+
+MOCK_REMINDER_STOP_DIR=$(_tmpdir)
+_install_hook_fixture "$MOCK_REMINDER_STOP_DIR" agent-hook-stop
+MOCK_REMINDER_STOP="$MOCK_REMINDER_STOP_DIR/bin/agent-hook-stop"
+mkdir -p "$MOCK_REMINDER_STOP_DIR/home/.config/hive-memory"
+touch "$MOCK_REMINDER_STOP_DIR/home/.config/hive-memory/config.toml"
+cat >"$MOCK_REMINDER_STOP_DIR/bin/hm" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' \
+  '{"warnings":[],"actions":[{"kind":"remind","body":"Write pending memory before stopping."}]}'
+MOCK
+cat >"$MOCK_REMINDER_STOP_DIR/bin/term-notify-sound" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$0" >>"$TERM_NOTIFY_MARKER"
+MOCK
+chmod +x \
+  "$MOCK_REMINDER_STOP_DIR/bin/hm" \
+  "$MOCK_REMINDER_STOP_DIR/bin/term-notify-sound"
+REMINDER_STOP_NOTIFY_MARKER="$MOCK_REMINDER_STOP_DIR/stop-notify.log"
+
+for _ in 1 2; do
+  stop_out=$(
+    HOME="$MOCK_REMINDER_STOP_DIR/home" \
+      HIVE_MEMORY_CONFIG="$MOCK_REMINDER_STOP_DIR/home/.config/hive-memory/config.toml" \
+      AGENTGUARD_SESSION_ID="$TEST_SID-reminder" \
+      AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+      TMPDIR="$TEST_TMPDIR" \
+      AGENTGUARD_NAME="codex" \
+      TERM_NOTIFY_MARKER="$REMINDER_STOP_NOTIFY_MARKER" \
+      PATH="$MOCK_REMINDER_STOP_DIR/bin:$PATH" \
+      "$MOCK_REMINDER_STOP" </dev/null 2>/dev/null
+  )
+  echo "$stop_out" | jq -e \
+    '.decision == "block" and (.reason | contains("Write pending memory before stopping."))' \
+    >/dev/null 2>&1
+  _assert_eq "stop: Hive reminder continues the turn" "0" "$?"
+done
+_assert_file_content "stop: repeated Hive continuation rings only once" \
+  "$MOCK_REMINDER_STOP_DIR/bin/term-notify-sound" \
+  "$REMINDER_STOP_NOTIFY_MARKER"
 
 echo ""
 echo "=== notification: terminal notifier ==="
