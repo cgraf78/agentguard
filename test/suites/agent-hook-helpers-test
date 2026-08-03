@@ -2407,9 +2407,10 @@ codex_session_json=$(
 echo "$codex_session_json" | jq -e '.hookSpecificOutput.hookEventName == "SessionStart"' >/dev/null 2>&1
 _assert_eq "hook_finish: Codex SessionStart output includes hookEventName" "0" "$?"
 
-# Codex Stop uses a different schema from context-injection hooks: no
-# hookSpecificOutput envelope is accepted. Only reminders and explicit blocks
-# should continue the turn; warnings/plain context must not trap shutdown.
+# Affected Codex releases persist Stop continuations with a local UUID message
+# id, then replay that id to the Responses API even though message ids must
+# start with `msg_`. Suppress every Codex Stop continuation until the host owns
+# a replay-safe synthetic-message contract; prompt reminders remain visible.
 codex_stop_context_json=$(
   AGENTGUARD_NAME="codex"
   export AGENTGUARD_NAME
@@ -2440,12 +2441,32 @@ codex_stop_json=$(
   _hook_remind "remember the summary" >/dev/null 2>&1
   _hook_finish 2>/dev/null
 )
-echo "$codex_stop_json" | jq -e 'has("hookSpecificOutput") | not' >/dev/null 2>&1
-_assert_eq "hook_finish: Codex Stop omits hookSpecificOutput" "0" "$?"
-echo "$codex_stop_json" | jq -e '.decision == "block"' >/dev/null 2>&1
-_assert_eq "hook_finish: Codex Stop blocks to continue" "0" "$?"
-echo "$codex_stop_json" | jq -e '.reason == "remember the summary"' >/dev/null 2>&1
-_assert_eq "hook_finish: Codex Stop reason carries context" "0" "$?"
+echo "$codex_stop_json" | jq -e '. == {}' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex Stop suppresses replay-unsafe reminders" "0" "$?"
+
+codex_stop_block_rc=0
+codex_stop_block_json=$(
+  AGENTGUARD_NAME="codex"
+  export AGENTGUARD_NAME
+  _HOOK_SELF="$BIN_DIR/agent-hook-stop"
+  source "$HELPERS"
+  _hook_block "finish required cleanup"
+  _hook_finish
+) 2>/dev/null || codex_stop_block_rc=$?
+_assert_eq "hook_finish: Codex Stop block exits without continuation" "0" "$codex_stop_block_rc"
+echo "$codex_stop_block_json" | jq -e '. == {}' >/dev/null 2>&1
+_assert_eq "hook_finish: Codex Stop suppresses replay-unsafe blocks" "0" "$?"
+
+claude_stop_block_rc=0
+(
+  AGENTGUARD_NAME="claude"
+  export AGENTGUARD_NAME
+  _HOOK_SELF="$BIN_DIR/agent-hook-stop"
+  source "$HELPERS"
+  _hook_block "finish required cleanup"
+  _hook_finish
+) >/dev/null 2>&1 || claude_stop_block_rc=$?
+_assert_eq "hook_finish: non-Codex Stop blocks remain active" "2" "$claude_stop_block_rc"
 
 # _hook_finish also emits Codex-strict JSON when Codex is identified by
 # CODEX_THREAD_ID alone, which is the signal current Codex sessions export

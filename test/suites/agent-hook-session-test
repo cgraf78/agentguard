@@ -270,6 +270,7 @@ mkdir -p "$MOCK_REMINDER_STOP_DIR/home/.config/hive-memory"
 touch "$MOCK_REMINDER_STOP_DIR/home/.config/hive-memory/config.toml"
 cat >"$MOCK_REMINDER_STOP_DIR/bin/hm" <<'MOCK'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >>"$HM_LOG"
 printf '%s\n' \
   '{"warnings":[],"actions":[{"kind":"remind","body":"Write pending memory before stopping."}]}'
 MOCK
@@ -281,11 +282,13 @@ chmod +x \
   "$MOCK_REMINDER_STOP_DIR/bin/hm" \
   "$MOCK_REMINDER_STOP_DIR/bin/term-notify-sound"
 REMINDER_STOP_NOTIFY_MARKER="$MOCK_REMINDER_STOP_DIR/stop-notify.log"
+REMINDER_STOP_HM_LOG="$MOCK_REMINDER_STOP_DIR/hm.log"
 
 for _ in 1 2; do
   stop_out=$(
     HOME="$MOCK_REMINDER_STOP_DIR/home" \
       HIVE_MEMORY_CONFIG="$MOCK_REMINDER_STOP_DIR/home/.config/hive-memory/config.toml" \
+      HM_LOG="$REMINDER_STOP_HM_LOG" \
       AGENTGUARD_SESSION_ID="$TEST_SID-reminder" \
       AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
       TMPDIR="$TEST_TMPDIR" \
@@ -294,12 +297,13 @@ for _ in 1 2; do
       PATH="$MOCK_REMINDER_STOP_DIR/bin:$PATH" \
       "$MOCK_REMINDER_STOP" </dev/null 2>/dev/null
   )
-  echo "$stop_out" | jq -e \
-    '.decision == "block" and (.reason | contains("Write pending memory before stopping."))' \
-    >/dev/null 2>&1
-  _assert_eq "stop: Hive reminder continues the turn" "0" "$?"
+  echo "$stop_out" | jq -e '. == {}' >/dev/null 2>&1
+  _assert_eq "stop: Codex suppresses replay-unsafe Hive continuation" "0" "$?"
 done
-_assert_file_content "stop: repeated Hive continuation rings only once" \
+_assert_eq "stop: Hive policy still runs before Codex suppression" \
+  "hook stop --json
+hook stop --json" "$(cat "$REMINDER_STOP_HM_LOG")"
+_assert_file_content "stop: repeated Hive checks ring only once" \
   "$MOCK_REMINDER_STOP_DIR/bin/term-notify-sound" \
   "$REMINDER_STOP_NOTIFY_MARKER"
 
