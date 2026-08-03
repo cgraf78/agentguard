@@ -285,6 +285,7 @@ REMINDER_STOP_NOTIFY_MARKER="$MOCK_REMINDER_STOP_DIR/stop-notify.log"
 for _ in 1 2; do
   stop_out=$(
     HOME="$MOCK_REMINDER_STOP_DIR/home" \
+      HIVE_MEMORY_CONFIG="$MOCK_REMINDER_STOP_DIR/home/.config/hive-memory/config.toml" \
       AGENTGUARD_SESSION_ID="$TEST_SID-reminder" \
       AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
       TMPDIR="$TEST_TMPDIR" \
