@@ -15,7 +15,6 @@
 
 _HOOK_BLOCKED=''
 _HOOK_CTX=''
-_HOOK_STOP_CONTINUE=''
 _HOOK_HM_CONFIG_PATH=''
 _HOOK_INPUT_STATE_REFRESHED=''
 _HOOK_PROMPT_SUBMITTED=''
@@ -191,7 +190,6 @@ _hook_warn() {
 _hook_remind() {
   local message="$1"
   printf 'REMINDER: %s\n' "$message" >&2
-  _HOOK_STOP_CONTINUE=1
   # Same rationale as _hook_warn: reminders should affect the next model turn,
   # not depend on whether a client happens to surface successful-hook stderr.
   _hook_context "$message"
@@ -1056,33 +1054,34 @@ _hook_codex_supports_suppress_output() {
 }
 
 _hook_finish_codex_stop() {
-  # Codex Stop has its own strict schema and does not accept the
-  # hookSpecificOutput/additionalContext envelope used by other context hooks.
-  # Only explicit reminders or blocks should continue the turn. Warnings are
-  # useful context on prompt/tool hooks, but a best-effort warning during Stop
-  # should not trap the agent in a shutdown loop.
-  if [ -n "$_HOOK_STOP_CONTINUE" ] || [ -n "$_HOOK_BLOCKED" ]; then
-    printf '%s' "$_HOOK_CTX" | jq -Rsc '{
-      decision: "block",
-      reason: .
-    }'
-  else
-    printf '{}\n'
-  fi
+  # Affected Codex releases assign a local UUID to the synthetic user message
+  # created by a Stop continuation, then replay that UUID to the Responses API
+  # where message ids must use the `msg_` prefix. The poisoned rollout cannot
+  # accept another turn. Prompt hooks already surface reminders before Stop,
+  # so keep Stop fail-open until Codex exposes a replay-safe contract.
+  printf '{}\n'
 }
 
 # Emits one JSON response and exits. Must be the last call in every hook.
 # Emits legacy "context" for Claude plus Gemini-compatible additionalContext.
 # Codex uses strict per-event hookSpecificOutput schemas with no legacy fields.
 _hook_finish() {
+  # Handle Codex Stop before the generic context/block branches. A Stop
+  # extension can call _hook_block without adding _HOOK_CTX; falling through
+  # would still exit 2 and turn stderr into the same replay-unsafe prompt.
+  case "${_HOOK_SELF##*/}" in
+    agent-hook-stop*)
+      if [ "$(_hook_agent_name)" = "codex" ]; then
+        _hook_finish_codex_stop
+        exit 0
+      fi
+      ;;
+  esac
+
   if [ -n "$_HOOK_CTX" ]; then
     if [ "$(_hook_agent_name)" = "codex" ]; then
       local hook_event_name
       hook_event_name=$(_hook_event_name)
-      if [ "$hook_event_name" = "Stop" ]; then
-        _hook_finish_codex_stop
-        exit 0
-      fi
       if [ -n "$_HOOK_BLOCKED" ]; then
         printf '%s' "$_HOOK_CTX" | jq -Rsc --arg hook_event_name "$hook_event_name" '{
           hookSpecificOutput: {

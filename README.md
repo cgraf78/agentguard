@@ -247,8 +247,10 @@ To add a new managed agent runtime:
 - `agent-hook-stop` asks Hive Memory for any pending-memory reminder and plays a
   terminal notification for the first non-reentrant Stop callback after a valid
   prompt. Repeated callbacks stay silent until another valid prompt re-arms the
-  shared AgentGuard state. On Codex, only explicit reminders or blocks continue
-  the turn; ordinary warnings do not trap shutdown.
+  shared AgentGuard state. Codex Stop continuations are currently suppressed
+  because affected Codex releases persist their synthetic messages with
+  replay-invalid item IDs; prompt-submit still surfaces memory reminders before
+  Stop.
   `agent-hook-notification` plays notifications for host attention events such
   as permission requests.
 
