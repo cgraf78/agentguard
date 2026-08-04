@@ -330,6 +330,40 @@ _assert_file_content "notification: invokes the shared terminal notifier" \
   "$MOCK_NOTIFICATION_DIR/bin/term-notify-sound" "$NOTIFICATION_MARKER"
 
 echo ""
+echo "=== session-end: extension dispatch ==="
+
+MOCK_END_EXTENSION_DIR=$(_tmpdir)
+_install_hook_fixture "$MOCK_END_EXTENSION_DIR" agent-hook-session-end
+MOCK_END_EXTENSION="$MOCK_END_EXTENSION_DIR/bin/agent-hook-session-end"
+cat >"$MOCK_END_EXTENSION_DIR/bin/agent-hook-session-end-fixture" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s:%s\n' "${sid:-}" "${tp:-}" >"$SESSION_END_EXTENSION_MARKER"
+MOCK
+chmod +x "$MOCK_END_EXTENSION_DIR/bin/agent-hook-session-end-fixture"
+
+SESSION_END_NO_TRANSCRIPT_MARKER="$MOCK_END_EXTENSION_DIR/no-transcript.log"
+printf '%s' '{"session_id":"sess-no-transcript"}' |
+  AGENTGUARD_SESSION_ID="$TEST_SID" \
+    TMPDIR="$TEST_TMPDIR" \
+    AGENTGUARD_NAME="fixture" \
+    SESSION_END_EXTENSION_MARKER="$SESSION_END_NO_TRANSCRIPT_MARKER" \
+    "$MOCK_END_EXTENSION" >/dev/null 2>/dev/null
+_assert_file_content "session-end: extension runs without a transcript" \
+  "sess-no-transcript:" "$SESSION_END_NO_TRANSCRIPT_MARKER"
+
+SESSION_END_PRESENT_TRANSCRIPT="$MOCK_END_EXTENSION_DIR/present-transcript.jsonl"
+: >"$SESSION_END_PRESENT_TRANSCRIPT"
+SESSION_END_NO_ID_MARKER="$MOCK_END_EXTENSION_DIR/no-session-id.log"
+printf '{"transcript_path":"%s"}' "$SESSION_END_PRESENT_TRANSCRIPT" |
+  AGENTGUARD_SESSION_ID="$TEST_SID" \
+    TMPDIR="$TEST_TMPDIR" \
+    AGENTGUARD_NAME="fixture" \
+    SESSION_END_EXTENSION_MARKER="$SESSION_END_NO_ID_MARKER" \
+    "$MOCK_END_EXTENSION" >/dev/null 2>/dev/null
+_assert_file_missing "session-end: missing session ID skips extensions" \
+  "$SESSION_END_NO_ID_MARKER"
+
+echo ""
 echo "=== session-end: Claude structured title detection ==="
 
 _session_end_title_count() {
@@ -357,9 +391,30 @@ MOCK_END="$MOCK_END_DIR/bin/agent-hook-session-end"
 cat >"$MOCK_END_DIR/bin/claude-session-name" <<'MOCK'
 #!/usr/bin/env bash
 cat >/dev/null
+[ -z "${SESSION_END_NAME_MARKER:-}" ] || : >"$SESSION_END_NAME_MARKER"
 printf '%s\n' "structured-title"
 MOCK
 chmod +x "$MOCK_END_DIR/bin/claude-session-name"
+
+# The Claude extension launches naming in the background. Override disown in
+# this fixture so the hook waits for the child and filesystem assertions are
+# deterministic.
+SESSION_END_BASH_ENV="$MOCK_END_DIR/bash-env"
+printf '%s\n' 'disown() { wait; }' >"$SESSION_END_BASH_ENV"
+
+SESSION_END_MISSING_TRANSCRIPT="$MOCK_END_DIR/missing-transcript.jsonl"
+SESSION_END_NAME_MARKER="$MOCK_END_DIR/missing-transcript-named.log"
+printf '{"session_id":"sess-missing","transcript_path":"%s"}' \
+  "$SESSION_END_MISSING_TRANSCRIPT" |
+  AGENTGUARD_SESSION_ID="$TEST_SID" \
+    TMPDIR="$TEST_TMPDIR" \
+    AGENTGUARD_NAME="claude" \
+    BASH_ENV="$SESSION_END_BASH_ENV" \
+    SESSION_END_NAME_MARKER="$SESSION_END_NAME_MARKER" \
+    PATH="$MOCK_END_DIR/bin:$PATH" \
+    "$MOCK_END" >/dev/null 2>/dev/null
+_assert_file_missing "session-end: missing transcript skips Claude naming" \
+  "$SESSION_END_NAME_MARKER"
 
 SESSION_END_TRANSCRIPT="$MOCK_END_DIR/transcript.jsonl"
 cat >"$SESSION_END_TRANSCRIPT" <<'JSONL'
