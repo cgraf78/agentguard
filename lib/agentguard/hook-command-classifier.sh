@@ -3442,6 +3442,73 @@ _rm_fragment_rf_state() {
   fi
 }
 
+# Flags that switch a normally-interactive command into a non-interactive mode,
+# keyed by command family. This is the extension point for the TTY guard: a
+# family gains a batch mode by adding one row here, rather than by special-casing
+# the guard itself. Families with no row keep blocking unconditionally, so the
+# table fails closed for anything it does not know about.
+#
+# Absence of a row means "not implemented here", not "has no batch mode" —
+# `gdb --batch`, `emacs --batch`, and `top -b -n 1` are all real batch
+# invocations that this table deliberately does not cover yet. Add a row when
+# one of them is actually needed.
+#
+# Presence of a flag signals non-interactive *intent*; it does not prove the
+# command terminates (`nvim --headless` with no `-c qall` still runs forever),
+# and the scan is a shallow token match that quoting or command substitution can
+# fool. Both are accepted tradeoffs: the guard exists to stop the common
+# accidental hang, not to be a security boundary against a caller trying to
+# defeat it. The caller remains responsible for making the invocation exit,
+# exactly as the guard's own block message already advises.
+#
+# Keep the families here in sync with the TTY case arm in agent-hook-pre-bash;
+# a command matched there but absent here simply keeps blocking.
+_tty_noninteractive_flags() {
+  case "$1" in
+    # -l is Lua script mode for nvim only. In vim/vi/view it is Lisp mode,
+    # which is fully interactive, so it must not appear in the shared row.
+    nvim)
+      printf '%s\n' '--headless' '-l' '-es' '-Es' '--version' '--help'
+      ;;
+    vim | vi | view)
+      # -es/-Es is silent ex mode; --headless is nvim-only (vim rejects it).
+      printf '%s\n' '-es' '-Es' '--version' '--help'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# True when a TTY-requiring fragment carries one of its family's non-interactive
+# flags. Scanning stops at `--` because every family in the table treats later
+# tokens as operands: `nvim -- --headless` opens a file named `--headless` and
+# must stay blocked.
+_fragment_has_noninteractive_flag() {
+  local fragment="$1" command_word="$2" word flag i
+  local -a words=() flags=()
+
+  while IFS= read -r flag; do
+    flags+=("$flag")
+  done < <(_tty_noninteractive_flags "${command_word##*/}")
+  [ "${#flags[@]}" -gt 0 ] || return 1
+
+  while IFS= read -r word; do
+    words+=("$word")
+  done < <(_fragment_tokens "$fragment")
+  i="$(_fragment_command_index "$fragment")" || return 1
+  ((i++))
+
+  while [ "$i" -lt "${#words[@]}" ]; do
+    word="$(_clean_command_word "${words[$i]}")"
+    [ "$word" = "--" ] && return 1
+    for flag in "${flags[@]}"; do
+      [ "$word" = "$flag" ] && return 0
+    done
+    ((i++))
+  done
+
+  return 1
+}
+
 _untracked_status_config_value_is_safe() {
   local value
   value="$(_shell_word_token "$1")"
