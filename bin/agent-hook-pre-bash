@@ -1013,6 +1013,10 @@ case "$-" in
             ;;
 
           # Block interactive TTY commands — they will silently hang the agent turn.
+          # Families with a documented batch mode are exempted when the fragment
+          # carries one of their non-interactive flags; see
+          # _tty_noninteractive_flags for that table. Everything else, and any
+          # family absent from the table, still blocks unconditionally.
           vim | vi | nvim | view | */vim | */vi | */nvim | */view | \
             nano | pico | joe | micro | */nano | */pico | */joe | */micro | \
             emacs | */emacs | \
@@ -1020,7 +1024,9 @@ case "$-" in
             top | htop | btop | atop | */top | */htop | */btop | */atop | \
             gdb | lldb | */gdb | */lldb | \
             watch | */watch)
-            _GUARD_TTY_REQUIRED=1
+            [ "$_GUARD_TTY_REQUIRED" -eq 0 ] &&
+              ! _fragment_has_noninteractive_flag "$frag" "$cw" &&
+              _GUARD_TTY_REQUIRED=1
             ;;
         esac
       done <<<"$_HOOK_EXECUTABLE_FRAGMENTS_CACHE_VALUE"

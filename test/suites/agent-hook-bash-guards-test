@@ -247,6 +247,66 @@ _assert_eq "watch: blocked" "2" "$HOOK_EXIT"
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"/usr/bin/vim file.txt"}}'
 _assert_eq "path-qualified vim: blocked" "2" "$HOOK_EXIT"
 
+# Non-interactive flags exempt the vim/nvim family (_tty_noninteractive_flags).
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nvim --headless --startuptime /tmp/st.log -c qall!"}}'
+_assert_eq "nvim --headless: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "nvim --headless: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nvim --version"}}'
+_assert_eq "nvim --version: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nvim -es +q"}}'
+_assert_eq "nvim -es: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nvim -l script.lua"}}'
+_assert_eq "nvim -l: allowed" "0" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"vim -es +q"}}'
+_assert_eq "vim -es: allowed" "0" "$HOOK_EXIT"
+
+# -l is nvim Lua script mode but vim/vi/view Lisp mode, which is interactive.
+# The nvim-only row must not leak into the vim family.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"vim -l foo.txt"}}'
+_assert_eq "vim -l: blocked (Lisp mode is interactive)" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"vi -l foo.txt"}}'
+_assert_eq "vi -l: blocked (Lisp mode is interactive)" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"view -l foo.txt"}}'
+_assert_eq "view -l: blocked (Lisp mode is interactive)" "2" "$HOOK_EXIT"
+
+# --headless is an nvim flag; vim does not accept it, so it earns no exemption.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"vim --headless -c qall!"}}'
+_assert_eq "vim --headless: blocked (nvim-only flag)" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"/usr/bin/nvim --headless -c qall!"}}'
+_assert_eq "path-qualified nvim --headless: allowed" "0" "$HOOK_EXIT"
+
+# `--` ends option parsing, so the flag is a filename and must still block.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nvim -- --headless"}}'
+_assert_eq "nvim -- --headless: blocked" "2" "$HOOK_EXIT"
+
+# Interactive nvim keeps blocking even though its family has a table row.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nvim -c qall! ."}}'
+_assert_eq "nvim without non-interactive flag: blocked" "2" "$HOOK_EXIT"
+
+# Families with no table row fail closed, even given a flag another family uses.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nano --headless"}}'
+_assert_eq "nano --headless: blocked" "2" "$HOOK_EXIT"
+
+# emacs --batch is a genuine batch mode; it blocks only because the table has no
+# emacs row yet, not because the mode does not exist.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"emacs --batch -l build.el"}}'
+_assert_eq "emacs --batch: blocked (family not in table)" "2" "$HOOK_EXIT"
+
+# A TTY command with a non-interactive flag is still prose after echo.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"echo nvim --headless"}}'
+_assert_eq "echo nvim --headless: allowed" "0" "$HOOK_EXIT"
+
+# Compound fragments: an interactive nvim anywhere in the chain still blocks.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"nvim --headless -c qall! && nvim ."}}'
+_assert_eq "compound with interactive nvim: blocked" "2" "$HOOK_EXIT"
+
 # Non-TTY commands are fine
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"cat README.md"}}'
 _assert_eq "cat: allowed" "0" "$HOOK_EXIT"
