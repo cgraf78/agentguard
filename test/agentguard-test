@@ -83,14 +83,33 @@ if [[ "${AGENTGUARD_SKIP_SHELLCHECK:-0}" != 1 ]]; then
     "${runtime_shell_files[@]}" \
     "$test_dir/agentguard-test" \
     "$test_dir/helpers.sh" \
+    "$test_dir/run-suites" \
     "$test_dir"/suites/*-test \
     "$test_dir/suites/agent-hook-helpers.sh"
 fi
 
 "$root/support/sync-hook-bootstrap" --check
 
+parallel_suites=()
+exclusive_suites=()
 for suite in "$test_dir"/suites/*-test; do
+  case "${suite##*/}" in
+    agent-hook-helpers-test | agent-hook-performance-test | runner-test)
+      # Gross hook-latency budgets and signal-cleanup deadlines need a quiet
+      # host signal. Running them beside CPU-heavy policy suites would make the
+      # aggregate faster by weakening the measurements that protect production
+      # hook responsiveness and cleanup behavior.
+      exclusive_suites+=("$suite")
+      ;;
+    *) parallel_suites+=("$suite") ;;
+  esac
+done
+
+# Run timing and signal-deadline suites before the worker pool so their measured
+# signal is not biased by the CPU and writeback residue of peak parallel load.
+for suite in ${exclusive_suites[@]+"${exclusive_suites[@]}"}; do
   "$suite"
 done
+"$test_dir/run-suites" ${parallel_suites[@]+"${parallel_suites[@]}"}
 
 printf 'agentguard-test: ok\n'

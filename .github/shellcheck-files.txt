@@ -24,6 +24,7 @@ program	support/secure-launcher.sh.template
 program	support/sync-hook-bootstrap
 program	test/agentguard-test
 program	test/helpers.sh
+program	test/run-suites
 program	test/suites/agent-bash-reexec-test
 program	test/suites/agent-command-classifier-test
 program	test/suites/agent-hook-bash-fast-test
@@ -49,4 +50,5 @@ program	test/suites/agent-hook-performance-test
 program	test/suites/agent-hook-session-test
 program	test/suites/bootstrap-test
 program	test/suites/manpage-test
+program	test/suites/runner-test
 program	test/suites/timeout-test
