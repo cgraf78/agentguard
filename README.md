@@ -117,7 +117,9 @@ coverage for hook entry points lives here, including the protected bare-Git
 guard that the command classifier exercises. Downstream consumers should keep
 only install and wiring smoke tests. Consumers that need command detection
 should call `agentguard-classify-command` rather than sourcing private
-`_hook_*` classifier helpers.
+`_hook_*` classifier helpers. Independent suites use four workers by default;
+set `AGENTGUARD_TEST_JOBS` to a positive integer to tune that bound for a
+specific host. Hook latency budgets always run alone.
 
 ## Lifecycle
 
