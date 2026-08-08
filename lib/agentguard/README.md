@@ -19,6 +19,9 @@ another tool that follows the same hook protocol.
   `AGENTGUARD_CMD_LINE1`, `AGENTGUARD_EDIT_FILES`, and
   `AGENTGUARD_EDIT_FILE` after the matching parser helper runs.
 - `detect.sh` is internal to those public entry points.
+- Native hook fragments and runtime adapters are public assets under
+  `share/agentguard/integrations/`. Consumers own activation and configuration
+  merging; AgentGuard owns the reusable runtime protocol mapping.
 - `agent-hook-pre-edit` warns after `AGENTGUARD_EDIT_CHURN_WARN` edits to a
   file and blocks after `AGENTGUARD_EDIT_CHURN_BLOCK` edits. Defaults are `5`
   and `10`. Set `AGENTGUARD_EDIT_CHURN_BYPASS=1` to bypass the churn warning

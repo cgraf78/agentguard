@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# Validate AgentGuard-owned native runtime integration assets.
+
+set -u
+
+test_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+root="${test_dir%/test/suites}"
+
+# shellcheck source=../helpers.sh
+. "$root/test/helpers.sh"
+
+echo ""
+echo "=== native integration assets ==="
+
+python3 - "$root" <<'PY'
+import json
+from pathlib import Path
+import sys
+import tomllib
+
+
+root = Path(sys.argv[1])
+assets = root / "share" / "agentguard" / "integrations"
+
+expected = {
+    "claude": {
+        "Notification": [("", "agent-hook-notification", None)],
+        "PostToolUse": [
+            ("Edit|Write", "agent-hook-post-edit", 60),
+            ("Bash", "agent-hook-post-bash", 120),
+            ("mcp__", "agent-hook-post-mcp", 10),
+        ],
+        "PreToolUse": [
+            ("Bash", "agent-hook-pre-bash", 600),
+            ("Edit|Write", "agent-hook-pre-edit", 10),
+            ("mcp__", "agent-hook-pre-mcp", 10),
+        ],
+        "SessionEnd": [(None, "agent-hook-session-end", 30)],
+        "SessionStart": [(None, "agent-hook-session-start", 10)],
+        "Stop": [("", "agent-hook-stop", None)],
+        "UserPromptSubmit": [("", "agent-hook-prompt-submit", 10)],
+    },
+    "codex": {
+        "SessionStart": [(None, "agent-hook-session-start", 10)],
+        "PreToolUse": [
+            ("Bash|exec_command|functions[.]exec_command", "agent-hook-pre-bash", 600),
+            ("Edit|Write|apply_patch|functions[.]apply_patch", "agent-hook-pre-edit", 10),
+            ("mcp__", "agent-hook-pre-mcp", 10),
+        ],
+        "PostToolUse": [
+            ("Edit|Write|apply_patch|functions[.]apply_patch", "agent-hook-post-edit", 60),
+            ("Bash|exec_command|functions[.]exec_command", "agent-hook-post-bash", 120),
+            ("mcp__", "agent-hook-post-mcp", 10),
+        ],
+        "Stop": [(None, "agent-hook-stop", None)],
+        "SessionEnd": [(None, "agent-hook-session-end", 3)],
+        "PermissionRequest": [(None, "agent-hook-notification", None)],
+        "UserPromptSubmit": [(None, "agent-hook-prompt-submit", 10)],
+    },
+    "gemini": {
+        "SessionStart": [(None, "agent-hook-session-start", 10)],
+        "SessionEnd": [(None, "agent-hook-session-end", 30)],
+        "BeforeAgent": [("", "agent-hook-prompt-submit", 10)],
+        "AfterAgent": [("", "agent-hook-stop", None)],
+        "BeforeTool": [
+            ("run_shell_command", "agent-hook-pre-bash", 600),
+            ("replace|write_file", "agent-hook-pre-edit", 10),
+            ("mcp__", "agent-hook-pre-mcp", 10),
+        ],
+        "AfterTool": [
+            ("replace|write_file", "agent-hook-post-edit", 60),
+            ("run_shell_command", "agent-hook-post-bash", 120),
+            ("mcp__", "agent-hook-post-mcp", 10),
+        ],
+        "Notification": [("", "agent-hook-notification", None)],
+    },
+    "muse": {
+        "PostToolUse": [
+            ("Edit|Write", "agent-hook-post-edit", 60),
+            ("Bash", "agent-hook-post-bash", 120),
+            ("mcp__", "agent-hook-post-mcp", 10),
+        ],
+        "PreToolUse": [
+            ("Bash", "agent-hook-pre-bash", 600),
+            ("Edit|Write", "agent-hook-pre-edit", 10),
+            ("mcp__", "agent-hook-pre-mcp", 10),
+        ],
+        "SessionStart": [(None, "agent-hook-session-start", 10)],
+        "Stop": [("", "agent-hook-stop", None)],
+        "UserPromptSubmit": [("", "agent-hook-prompt-submit", 10)],
+    },
+}
+
+identity_prefixes = {
+    "claude": 'env -u BASH_ENV -u ENV AGENTGUARD_NAME=claude AGENTGUARD_SESSION_ID="${CLAUDE_CODE_CURRENT_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}" ',
+    "codex": 'env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID="${CODEX_THREAD_ID:-}" ',
+    "gemini": 'env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID="gemini-${PPID}" ',
+    "muse": 'env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID="${MUSE_SESSION_ID:-$PPID}" ',
+}
+
+paths = {
+    "claude": assets / "claude" / "hooks.json",
+    "codex": assets / "codex" / "hooks.toml",
+    "gemini": assets / "gemini" / "hooks.json",
+    "muse": assets / "muse" / "hooks.json",
+}
+
+for runtime, path in paths.items():
+    if path.suffix == ".toml":
+        with path.open("rb") as stream:
+            data = tomllib.load(stream)
+        if data.get("features") != {"hooks": True}:
+            raise AssertionError("Codex integration must enable only the hooks feature")
+        if set(data) != {"features", "hooks"}:
+            raise AssertionError(f"Codex integration contains non-AgentGuard settings: {set(data)}")
+    else:
+        with path.open(encoding="utf-8") as stream:
+            data = json.load(stream)
+        if set(data) != {"hooks"}:
+            raise AssertionError(f"{runtime} integration contains non-hook policy: {set(data)}")
+
+    hooks = data["hooks"]
+    if hooks.keys() != expected[runtime].keys():
+        raise AssertionError(
+            f"{runtime} events differ: expected {list(expected[runtime])}, got {list(hooks)}"
+        )
+
+    for event, expected_groups in expected[runtime].items():
+        actual_groups = []
+        for group in hooks[event]:
+            commands = group.get("hooks", [])
+            if len(commands) != 1:
+                raise AssertionError(f"{runtime} {event} must contain one command per group")
+            command = commands[0]
+            if command.get("type") != "command":
+                raise AssertionError(f"{runtime} {event} contains a non-command hook")
+            executable = command["command"].split()[-1]
+            if command["command"] != identity_prefixes[runtime] + executable:
+                raise AssertionError(f"{runtime} {event} does not set canonical identity")
+            if not (root / "bin" / executable).is_file():
+                raise AssertionError(f"{runtime} {event} references missing {executable}")
+            actual_groups.append((group.get("matcher"), executable, command.get("timeout")))
+        if actual_groups != expected_groups:
+            raise AssertionError(
+                f"{runtime} {event} differs: expected {expected_groups!r}, got {actual_groups!r}"
+            )
+PY
+asset_status=$?
+
+_assert_exit "native assets preserve each runtime contract" 0 "$asset_status"
+
+reconcile_dir=$(mktemp -d 2>/dev/null || mktemp -d -t agentguard-reconcile-test) || exit 1
+trap 'rm -rf "$reconcile_dir"' EXIT
+cat >"$reconcile_dir/live.json" <<'JSON'
+{
+  "features": {"hooks": false, "other": true},
+  "hooks": {
+    "Mixed": [
+      {
+        "matcher": "mixed",
+        "hooks": [
+          {"type": "command", "command": "env AGENTGUARD_NAME=claude old agent-hook-pre-edit"},
+          {"type": "command", "command": "user-owned-hook"}
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "old",
+        "hooks": [
+          {"type": "command", "command": "env AGENTGUARD_NAME=claude old agent-hook-pre-bash"}
+        ]
+      },
+      {
+        "matcher": "user",
+        "hooks": [
+          {"type": "command", "command": "user-pre-hook"}
+        ]
+      }
+    ],
+    "Retired": [
+      {
+        "hooks": [
+          {"type": "command", "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=claude old agent-hook-session-end"}
+        ]
+      }
+    ],
+    "OtherAgent": [
+      {
+        "hooks": [
+          {"type": "command", "command": "env AGENTGUARD_NAME=gemini other agent-hook-stop"}
+        ]
+      }
+    ],
+    "state": {"consumer-owned": {"enabled": false}}
+  },
+  "theme": "dark"
+}
+JSON
+cat >"$reconcile_dir/incoming.json" <<'JSON'
+{
+  "features": {"hooks": true},
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "current",
+        "hooks": [
+          {"type": "command", "command": "env AGENTGUARD_NAME=claude current agent-hook-pre-bash"}
+        ]
+      }
+    ]
+  }
+}
+JSON
+
+jq -n --arg agent claude \
+  --slurpfile d "$reconcile_dir/live.json" \
+  --slurpfile s "$reconcile_dir/incoming.json" \
+  -f "$root/share/agentguard/integrations/_shared/reconcile-hooks.jq" \
+  >"$reconcile_dir/result.json"
+reconcile_status=$?
+_assert_exit "integration reconciliation: provider filter executes" 0 "$reconcile_status"
+
+if [[ "$reconcile_status" -eq 0 ]] && jq -e '
+  .theme == "dark" and
+  .features == {hooks: true, other: true} and
+  ([.. | strings | select(contains("AGENTGUARD_NAME=claude old"))] | length) == 0 and
+  ([.. | strings | select(contains("AGENTGUARD_NAME=claude current"))] | length) == 1 and
+  ([.. | strings | select(. == "user-owned-hook")] | length) == 1 and
+  ([.. | strings | select(. == "user-pre-hook")] | length) == 1 and
+  ([.. | strings | select(contains("AGENTGUARD_NAME=gemini"))] | length) == 1 and
+  .hooks.state == {"consumer-owned": {"enabled": false}} and
+  (.hooks | has("Retired") | not)
+' "$reconcile_dir/result.json" >/dev/null; then
+  _pass "integration reconciliation: refreshes only the selected provider hooks"
+else
+  _fail "integration reconciliation: refreshes only the selected provider hooks"
+fi
+
+_test_summary

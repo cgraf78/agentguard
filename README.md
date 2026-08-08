@@ -27,6 +27,8 @@ another tool that follows the same hook protocol.
   `AGENTGUARD_EDIT_FILE` after the matching parser helper runs.
 - `share/agentguard/shell.sh` is a stable no-op shell loader for integration
   harnesses that source each dependency's shell API uniformly.
+- `share/agentguard/integrations/` contains canonical native hook fragments for
+  Claude Code, Codex, Gemini CLI, and Muse, plus the OpenCode runtime adapter.
 - `agent-hook-pre-edit` warns after `AGENTGUARD_EDIT_CHURN_WARN` edits to a
   file and blocks after `AGENTGUARD_EDIT_CHURN_BLOCK` edits. Defaults are `5`
   and `10`. Set `AGENTGUARD_EDIT_CHURN_BYPASS=1` to bypass the churn warning
@@ -50,6 +52,36 @@ dependency manager's contract:
 ```bash
 . "$(shdeps dep-file cgraf78/agentguard lib/agentguard/agentguard.sh)"
 ```
+
+## Native Agent Integrations
+
+AgentGuard publishes native, policy-free integration assets:
+
+| Runtime | Asset |
+| --- | --- |
+| Shared lifecycle | `share/agentguard/integrations/_shared/reconcile-hooks.jq` |
+| Claude Code | `share/agentguard/integrations/claude/hooks.json` |
+| Codex | `share/agentguard/integrations/codex/hooks.toml` |
+| Gemini CLI | `share/agentguard/integrations/gemini/hooks.json` |
+| Muse | `share/agentguard/integrations/muse/hooks.json` |
+| OpenCode | `share/agentguard/integrations/opencode/agentguard.js` |
+
+The declarative fragments contain only AgentGuard hook activation: native event
+names and matchers, timeouts, runtime identity, session identity, and hook
+commands. They intentionally exclude permissions, models, MCP servers, UI
+settings, and machine policy. Consumers choose whether to enable an integration
+and remain responsible for merging or installing the asset without overwriting
+unmanaged configuration. AgentGuard never mutates an agent's configuration.
+Declarative consumers should apply the shared reconciler so the current
+provider generation can replace changed commands and retire events while
+preserving user hooks and runtime-owned state.
+
+The OpenCode adapter translates OpenCode's plugin callbacks into AgentGuard's
+shared hook schema. `AGENTGUARD_OPENCODE_NAME` can override the default
+`opencode` identity for a compatible runtime, and
+`AGENTGUARD_OPENCODE_TIMEOUT_SCALE` scales hook timeouts for tests. Hook
+executables are invoked directly with shell startup controls removed so their
+documented launcher boundary remains intact.
 
 ## Dependencies
 
@@ -88,6 +120,10 @@ dependency manager's contract:
   unguarded when no compatible Bash is available or a fixed inspection or
   scrub tool fails.
 - `jq` for hook payload parsing and JSON responses.
+- OpenCode supplies the Node.js runtime for its adapter. On POSIX systems, the
+  adapter uses Python 3 and `ps` when available to sweep an entire timed-out
+  process session. Python runs in isolated mode from a neutral directory;
+  direct process-group cleanup remains the fallback.
 - `cgraf78/sley` is a hard runtime dependency for hooks that format files.
   `agent-hook-post-edit` invokes the PATH-visible `sley hook format-file` CLI.
   Commit readiness belongs in native VCS hooks so human and agent workflows
@@ -200,8 +236,8 @@ the concrete agent. `AGENTGUARD_SESSION_ID` alone falls back to the generic
 
 To add a new managed agent runtime:
 
-- add a consumer-owned config generator or source layer that emits the agent's
-  native config format
+- add a canonical, policy-free native fragment or runtime adapter under
+  `share/agentguard/integrations/`
 - make every managed hook command set `AGENTGUARD_NAME=<agent>` and
   `AGENTGUARD_SESSION_ID=<stable-id-or-empty>`
 - map the agent's hook payload schema into the shared `agent-hook-*` scripts
@@ -210,8 +246,8 @@ To add a new managed agent runtime:
   runtime-specific
 - update `detect.sh` only when the runtime exposes reliable process or
   environment signals
-- add tests that verify hook env injection, session identity, payload parsing,
-  and Hive Memory attribution
+- add tests that verify native event mapping, hook environment injection,
+  session identity, payload parsing, and referenced hook executables
 - if the agent supports skills or extensions, update the gstack registration
   helper or document why it is unsupported
 
