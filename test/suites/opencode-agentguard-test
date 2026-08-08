@@ -1,0 +1,1656 @@
+#!/usr/bin/env bash
+# OpenCode AgentGuard adapter integration tests.
+
+set -u
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "SKIP: opencode-agentguard-test (node unavailable)"
+  exit 0
+fi
+
+test_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+root="${test_dir%/test/suites}"
+test_root=$(mktemp -d 2>/dev/null || mktemp -d -t opencode-agentguard-test) || exit 1
+trap 'rm -rf "$test_root"' EXIT
+
+fixture_home="$test_root/home"
+fixture_bin="$fixture_home/.local/bin"
+behavior_dir="$test_root/behaviors"
+hook_log="$test_root/hooks.jsonl"
+mkdir -p "$fixture_bin" "$behavior_dir"
+
+cp "$root/share/agentguard/integrations/opencode/agentguard.js" "$test_root/agentguard.mjs"
+
+cat >"$test_root/hook-fixture.mjs" <<'HOOK_FIXTURE'
+#!/usr/bin/env node
+
+import fs from "node:fs";
+import path from "node:path";
+import { spawn } from "node:child_process";
+
+const hook = path.basename(process.argv[1]);
+const input = await new Promise((resolve) => {
+  let data = "";
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk) => {
+    data += chunk;
+  });
+  process.stdin.on("end", () => resolve(data));
+});
+const payload = input.trim() ? JSON.parse(input) : {};
+const behaviorPath = path.join(process.env.AGENTGUARD_TEST_HOOK_BEHAVIOR_DIR, `${hook}.json`);
+const behavior = fs.existsSync(behaviorPath)
+  ? JSON.parse(fs.readFileSync(behaviorPath, "utf8"))
+  : {};
+
+fs.appendFileSync(
+  process.env.AGENTGUARD_TEST_HOOK_LOG,
+  `${JSON.stringify({
+    hook,
+    payload,
+    cwd: process.cwd(),
+    name: process.env.AGENTGUARD_NAME,
+    session: process.env.AGENTGUARD_SESSION_ID,
+    bashEnv: process.env.BASH_ENV,
+    posixEnv: process.env.ENV,
+    bashFunction: process.env["BASH_FUNC_agentguard_test%%"],
+    bashOptions: process.env.BASHOPTS,
+    shellOptions: process.env.SHELLOPTS,
+    bashCompat: process.env.BASH_COMPAT,
+    bashXtraceFd: process.env.BASH_XTRACEFD,
+    functionDepth: process.env.FUNCNEST,
+    posixMode: process.env.POSIXLY_CORRECT,
+  })}\n`,
+);
+
+if (behavior.descendantPidFile) {
+  spawn(
+    process.execPath,
+    [
+      "-e",
+      'const fs = require("node:fs"); fs.writeFileSync(process.argv[1], String(process.pid)); setTimeout(() => {}, 30000);',
+      behavior.descendantPidFile,
+    ],
+    { stdio: "ignore" },
+  );
+  // Do not let the hook leader exit until the regression can prove its
+  // descendant really existed. Waiting on the file is deterministic on loaded
+  // CI hosts and prevents a cleanup test from passing because the child simply
+  // had not been scheduled before the leader exited.
+  const descendantDeadline = Date.now() + 5_000;
+  while (!fs.existsSync(behavior.descendantPidFile) && Date.now() < descendantDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  if (!fs.existsSync(behavior.descendantPidFile)) {
+    throw new Error("descendant did not publish its PID");
+  }
+}
+
+if (behavior.delayMs) {
+  await new Promise((resolve) => setTimeout(resolve, behavior.delayMs));
+}
+
+let stdout = behavior.stdout ?? "{}";
+if (behavior.echoCommand) {
+  stdout = JSON.stringify({ context: payload.tool_input?.command ?? "" });
+}
+if (behavior.stderr) process.stderr.write(behavior.stderr);
+if (stdout) process.stdout.write(stdout);
+process.exit(behavior.exit ?? 0);
+HOOK_FIXTURE
+chmod +x "$test_root/hook-fixture.mjs"
+
+for hook in \
+  agent-hook-session-start \
+  agent-hook-prompt-submit \
+  agent-hook-pre-bash \
+  agent-hook-post-bash \
+  agent-hook-pre-edit \
+  agent-hook-post-edit \
+  agent-hook-pre-mcp \
+  agent-hook-post-mcp \
+  agent-hook-notification \
+  agent-hook-stop \
+  agent-hook-session-end; do
+  ln -s "$test_root/hook-fixture.mjs" "$fixture_bin/$hook"
+done
+
+cat >"$test_root/test.mjs" <<'TEST_SCRIPT'
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
+const root = process.env.AGENTGUARD_TEST_ROOT;
+const home = process.env.AGENTGUARD_TEST_HOME;
+const logPath = process.env.AGENTGUARD_TEST_HOOK_LOG;
+const behaviorDir = process.env.AGENTGUARD_TEST_HOOK_BEHAVIOR_DIR;
+const pluginPath = process.env.AGENTGUARD_TEST_PLUGIN;
+const sourceDirectory = path.join(root, "workspace");
+fs.mkdirSync(sourceDirectory, { recursive: true });
+process.env.HOME = home;
+const startupMarker = path.join(root, "hook-startup-env-ran");
+const startupFile = path.join(root, "hostile-hook-startup-env");
+fs.writeFileSync(startupFile, `printf 'ran\\n' >${JSON.stringify(startupMarker)}\n`);
+process.env.BASH_ENV = startupFile;
+process.env.ENV = startupFile;
+process.env["BASH_FUNC_agentguard_test%%"] =
+  `() { printf 'function-ran\\n' >${JSON.stringify(startupMarker)}; }`;
+process.env.BASHOPTS = "extglob";
+process.env.SHELLOPTS = "xtrace";
+process.env.BASH_COMPAT = "5.2";
+process.env.BASH_XTRACEFD = "9";
+process.env.FUNCNEST = "1";
+process.env.POSIXLY_CORRECT = "1";
+// Give ordinary fixtures five seconds rather than the former one-second budget.
+// The full AgentGuard runner executes suites in parallel, and both macOS CI and
+// a loaded local run have taken multiple seconds to schedule a healthy Node
+// child. Five seconds keeps default-hook failures prompt; the suite ceiling still
+// bounds long-hook defects, while the case below tests fail-closed timeout behavior.
+process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = "0.5";
+
+const { AgentGuardPlugin } = await import(`${pathToFileURL(pluginPath).href}?test=${Date.now()}`);
+
+let passed = 0;
+let failed = 0;
+
+function behavior(hook, value) {
+  fs.writeFileSync(path.join(behaviorDir, `${hook}.json`), JSON.stringify(value));
+}
+
+function clearBehavior(hook) {
+  fs.rmSync(path.join(behaviorDir, `${hook}.json`), { force: true });
+}
+
+function clearLog() {
+  fs.writeFileSync(logPath, "");
+}
+
+function logs() {
+  const raw = fs.readFileSync(logPath, "utf8").trim();
+  return raw ? raw.split("\n").map((line) => JSON.parse(line)) : [];
+}
+
+async function waitForProcessExit(pid, description) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const result = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], {
+      encoding: "utf8",
+    });
+    const state = result.status === 0 ? result.stdout.trim() : "";
+    // A zombie can no longer mutate state; its parent or init only needs to reap
+    // the already-dead process. BSD and procps ps both place Z first in STAT.
+    if (!state || state.startsWith("Z")) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail(`${description} process ${pid} survived cleanup`);
+}
+
+async function plugin(config = {}, client) {
+  const hooks = await AgentGuardPlugin({ directory: sourceDirectory, client });
+  await hooks.config?.(config);
+  return hooks;
+}
+
+function toolErrorEvent({ sessionID, callID, tool, input, error, metadata }) {
+  return {
+    type: "message.part.updated",
+    properties: {
+      sessionID,
+      part: {
+        id: `prt-${callID}`,
+        messageID: `msg-${sessionID}`,
+        sessionID,
+        type: "tool",
+        callID,
+        tool,
+        state: {
+          status: "error",
+          input,
+          error,
+          ...(metadata === undefined ? {} : { metadata }),
+          time: { start: 1, end: 2 },
+        },
+      },
+      time: 2,
+    },
+  };
+}
+
+async function check(name, fn) {
+  try {
+    await fn();
+    passed += 1;
+    console.log(`PASS: ${name}`);
+  } catch (error) {
+    failed += 1;
+    console.error(`FAIL: ${name}`);
+    console.error(error?.stack ?? String(error));
+  }
+}
+
+await check("publishes the provider-owned OpenCode marker", async () => {
+  const firstLine = fs.readFileSync(pluginPath, "utf8").split("\n", 1)[0];
+  assert.equal(firstLine, "// agentguard-managed:opencode-plugin");
+});
+
+await check("exports the complete OpenCode hook surface", async () => {
+  const hooks = await plugin();
+  for (const name of [
+    "config",
+    "chat.message",
+    "permission.ask",
+    "shell.env",
+    "tool.execute.before",
+    "tool.execute.after",
+    "event",
+    "dispose",
+  ]) {
+    assert.equal(typeof hooks[name], "function", name);
+  }
+});
+
+await check("injects OpenCode identity into shell commands", async () => {
+  const hooks = await plugin();
+  const output = {
+    env: {
+      PATH: "/fixture/bin",
+      CUSTOM_ENV: "preserved",
+      AGENTGUARD_NAME: "stale-agent",
+      AGENTGUARD_SESSION_ID: "stale-session",
+    },
+  };
+  await hooks["shell.env"](
+    { cwd: sourceDirectory, sessionID: "shell-session", callID: "shell-call" },
+    output,
+  );
+  assert.deepEqual(output.env, {
+    PATH: "/fixture/bin",
+    CUSTOM_ENV: "preserved",
+    AGENTGUARD_NAME: "opencode",
+    AGENTGUARD_SESSION_ID: "shell-session",
+  });
+
+  const ambientSession = process.env.AGENTGUARD_SESSION_ID;
+  process.env.AGENTGUARD_SESSION_ID = "outer-agent-session";
+  const sessionless = {
+    env: {
+      CUSTOM_ENV: "preserved",
+    },
+  };
+  try {
+    await hooks["shell.env"]({ cwd: sourceDirectory }, sessionless);
+    assert.deepEqual(sessionless.env, {
+      CUSTOM_ENV: "preserved",
+      AGENTGUARD_NAME: "opencode",
+      AGENTGUARD_SESSION_ID: "",
+    });
+
+  } finally {
+    if (ambientSession === undefined) {
+      delete process.env.AGENTGUARD_SESSION_ID;
+    } else {
+      process.env.AGENTGUARD_SESSION_ID = ambientSession;
+    }
+  }
+  await hooks.dispose();
+});
+
+await check("supports a compatible runtime identity override", async () => {
+  const savedName = process.env.AGENTGUARD_OPENCODE_NAME;
+  let hooks;
+  process.env.AGENTGUARD_OPENCODE_NAME = "compatible-runtime";
+  clearLog();
+  try {
+    hooks = await plugin();
+    const output = { env: {} };
+    await hooks["shell.env"]({ sessionID: "compatible-session" }, output);
+    assert.equal(output.env.AGENTGUARD_NAME, "compatible-runtime");
+
+    await hooks["tool.execute.before"](
+      { tool: "bash", sessionID: "compatible-session", callID: "compatible-call" },
+      { args: { command: "pwd" } },
+    );
+    assert.equal(logs()[0].name, "compatible-runtime");
+  } finally {
+    await hooks?.dispose();
+    if (savedName === undefined) {
+      delete process.env.AGENTGUARD_OPENCODE_NAME;
+    } else {
+      process.env.AGENTGUARD_OPENCODE_NAME = savedName;
+    }
+  }
+});
+
+await check("translates Bash, edit, multiedit, write, patch, and MCP payloads", async () => {
+  clearLog();
+  fs.mkdirSync(path.join(sourceDirectory, "relative-dir"), { recursive: true });
+  const hooks = await plugin({ mcp: { "server-name": { type: "local" } } });
+  const cases = [
+    [
+      "bash",
+      "b1",
+      { command: "pwd", timeout: 50, workdir: "/tmp" },
+      "Bash",
+      "agent-hook-pre-bash",
+      "/tmp",
+      7,
+    ],
+    [
+      "bash",
+      "b2",
+      { command: "pwd", workdir: "relative-dir" },
+      "Bash",
+      "agent-hook-pre-bash",
+      path.join(sourceDirectory, "relative-dir"),
+      null,
+    ],
+    [
+      "edit",
+      "e1",
+      { filePath: "a.txt", oldString: "old", newString: "new", replaceAll: true },
+      "Edit",
+      "agent-hook-pre-edit",
+      sourceDirectory,
+    ],
+    [
+      "write",
+      "w1",
+      { filePath: "b.txt", content: "body" },
+      "Write",
+      "agent-hook-pre-edit",
+      sourceDirectory,
+    ],
+    [
+      "multiedit",
+      "me1",
+      {
+        filePath: "multi.txt",
+        edits: [{ oldString: "before", newString: "after", replaceAll: false }],
+      },
+      "MultiEdit",
+      "agent-hook-pre-edit",
+      sourceDirectory,
+    ],
+    [
+      "apply_patch",
+      "p1",
+      { patchText: "*** Begin Patch" },
+      "Edit",
+      "agent-hook-pre-edit",
+      sourceDirectory,
+    ],
+    [
+      "server-name_lookup",
+      "m1",
+      { query: "value" },
+      "mcp__server-name__lookup",
+      "agent-hook-pre-mcp",
+      sourceDirectory,
+    ],
+  ];
+
+  for (const [tool, callID, args, , , , exit] of cases) {
+    await hooks["tool.execute.before"]({ tool, sessionID: "payload-session", callID }, { args });
+    await hooks["tool.execute.after"](
+      { tool, sessionID: "payload-session", callID, args },
+      {
+        title: tool,
+        output: `${tool} output`,
+        metadata: tool === "bash" ? { exit } : {},
+      },
+    );
+  }
+
+  const records = logs();
+  for (let index = 0; index < cases.length; index += 1) {
+    const [tool, , args, toolName, preHook, expectedCwd, exit] = cases[index];
+    const pre = records[index * 2];
+    const post = records[index * 2 + 1];
+    assert.equal(pre.hook, preHook, tool);
+    assert.equal(pre.payload.hook_event_name, "PreToolUse");
+    assert.equal(pre.payload.tool_name, toolName);
+    assert.equal(pre.payload.session_id, "payload-session");
+    assert.equal(pre.payload.cwd, expectedCwd);
+    // macOS exposes /tmp and /var as symlinks into /private. Keep asserting
+    // the lexical directory in AgentGuard's payload, because that is the path
+    // OpenCode requested, while comparing the hook process's cwd with the
+    // filesystem-canonical directory the kernel reports after chdir(2).
+    const expectedProcessCwd = fs.realpathSync(expectedCwd);
+    assert.equal(pre.cwd, expectedProcessCwd);
+    assert.equal(post.payload.cwd, expectedCwd);
+    assert.equal(post.cwd, expectedProcessCwd);
+    assert.equal(pre.name, "opencode");
+    assert.equal(pre.session, "payload-session");
+    assert.equal(pre.bashEnv, undefined);
+    assert.equal(pre.posixEnv, undefined);
+    assert.equal(pre.bashFunction, undefined);
+    assert.equal(pre.bashOptions, undefined);
+    assert.equal(pre.shellOptions, undefined);
+    assert.equal(pre.bashCompat, undefined);
+    assert.equal(pre.bashXtraceFd, undefined);
+    assert.equal(pre.functionDepth, undefined);
+    assert.equal(pre.posixMode, undefined);
+    assert.equal(post.payload.hook_event_name, "PostToolUse");
+    if (tool === "bash") {
+      assert.equal(pre.payload.tool_input.command, args.command);
+      assert.equal(post.payload.tool_response.stdout, "bash output");
+      assert.equal(post.payload.tool_response.exit_code, exit === null ? 1 : exit);
+    }
+    if (tool === "edit") {
+      assert.equal(pre.payload.tool_input.file_path, "a.txt");
+      assert.equal(pre.payload.tool_input.old_string, "old");
+      assert.equal(pre.payload.tool_input.new_string, "new");
+      assert.equal(pre.payload.tool_input.replace_all, true);
+    }
+    if (tool === "write") {
+      assert.equal(pre.payload.tool_input.file_path, "b.txt");
+      assert.equal(pre.payload.tool_input.content, "body");
+    }
+    if (tool === "multiedit") {
+      assert.equal(pre.payload.tool_input.file_path, "multi.txt");
+      assert.deepEqual(pre.payload.tool_input.edits, [
+        { old_string: "before", new_string: "after", replace_all: false },
+      ]);
+    }
+    if (tool === "apply_patch") {
+      assert.equal(pre.payload.tool_input.patch, "*** Begin Patch");
+    }
+  }
+});
+
+await check("does not run inherited shell startup code before a hook", async () => {
+  clearLog();
+  fs.rmSync(startupMarker, { force: true });
+  const hookPath = path.join(home, ".local/bin/agent-hook-pre-edit");
+  fs.rmSync(hookPath);
+  fs.writeFileSync(
+    hookPath,
+    "#!/usr/bin/env bash\n" +
+      "if declare -F agentguard_test >/dev/null; then agentguard_test; fi\n" +
+      "printf '{}\\n'\n",
+    { mode: 0o755 },
+  );
+  let hooks;
+  try {
+    hooks = await plugin();
+    await hooks["tool.execute.before"](
+      { tool: "edit", sessionID: "startup-env", callID: "startup-env-call" },
+      { args: { filePath: "safe", oldString: "old", newString: "new" } },
+    );
+    assert.equal(fs.existsSync(startupMarker), false);
+  } finally {
+    await hooks?.dispose();
+    fs.rmSync(hookPath, { force: true });
+    fs.symlinkSync(path.join(root, "hook-fixture.mjs"), hookPath);
+  }
+});
+
+await check("routes canonical MCP aliases through MCP hooks", async () => {
+  clearLog();
+  let hooks;
+  try {
+    hooks = await plugin({ mcp: { docs: { type: "local" } } });
+    const input = {
+      tool: "mcp__docs__lookup",
+      sessionID: "canonical-mcp",
+      callID: "canonical-mcp-call",
+    };
+    const args = { query: "value" };
+    await hooks["tool.execute.before"](input, { args });
+    await hooks["tool.execute.after"](
+      { ...input, args },
+      { title: "lookup", output: "result", metadata: {} },
+    );
+
+    const records = logs().filter((record) => record.hook.endsWith("-mcp"));
+    assert.deepEqual(
+      records.map((record) => [record.hook, record.payload.tool_name]),
+      [
+        ["agent-hook-pre-mcp", "mcp__docs__lookup"],
+        ["agent-hook-post-mcp", "mcp__docs__lookup"],
+      ],
+    );
+  } finally {
+    await hooks?.dispose();
+  }
+});
+
+await check("preserves typed MCP content and appends hook context", async () => {
+  clearLog();
+  let hooks;
+  behavior("agent-hook-pre-mcp", { stdout: JSON.stringify({ context: "pre MCP context" }) });
+  behavior("agent-hook-post-mcp", { stdout: JSON.stringify({ context: "post MCP context" }) });
+  try {
+    hooks = await plugin({ mcp: { docs: { type: "local" } } });
+    const args = { query: "value" };
+    await hooks["tool.execute.before"](
+      { tool: "docs_lookup", sessionID: "typed-mcp", callID: "typed-mcp-call" },
+      { args },
+    );
+    const content = [{ type: "text", text: "typed MCP result" }];
+    const output = {
+      title: "lookup",
+      output: "legacy display result",
+      content: content.map((part) => ({ ...part })),
+      metadata: { source: "mcp" },
+    };
+    await hooks["tool.execute.after"](
+      { tool: "docs_lookup", sessionID: "typed-mcp", callID: "typed-mcp-call", args },
+      output,
+    );
+
+    const post = logs().find((record) => record.hook === "agent-hook-post-mcp");
+    assert.deepEqual(post.payload.tool_response.content, content);
+    assert.equal(post.payload.tool_response.metadata.source, "mcp");
+    assert.equal(output.output, "legacy display result");
+    assert.deepEqual(output.content[0], content[0]);
+    assert.equal(output.content.at(-1).type, "text");
+    assert.match(output.content.at(-1).text, /pre MCP context/);
+    assert.match(output.content.at(-1).text, /post MCP context/);
+  } finally {
+    await hooks?.dispose();
+    clearBehavior("agent-hook-pre-mcp");
+    clearBehavior("agent-hook-post-mcp");
+  }
+});
+
+await check("maps MCP protocol errors to the canonical post-hook status", async () => {
+  clearLog();
+  let hooks;
+  try {
+    hooks = await plugin({ mcp: { docs: { type: "local" } } });
+    const args = { query: "value" };
+    await hooks["tool.execute.before"](
+      { tool: "docs_lookup", sessionID: "failed-mcp", callID: "failed-mcp-call" },
+      { args },
+    );
+    await hooks["tool.execute.after"](
+      { tool: "docs_lookup", sessionID: "failed-mcp", callID: "failed-mcp-call", args },
+      {
+        title: "lookup",
+        output: "request failed",
+        content: [{ type: "text", text: "request failed" }],
+        isError: true,
+        metadata: { source: "mcp" },
+      },
+    );
+
+    const post = logs().find((record) => record.hook === "agent-hook-post-mcp");
+    assert.equal(post.payload.tool_result_is_error, true);
+  } finally {
+    await hooks?.dispose();
+  }
+});
+
+await check("routes terminal MCP failures through the post hook", async () => {
+  clearLog();
+  let hooks;
+  behavior("agent-hook-pre-mcp", { stdout: JSON.stringify({ context: "pre failure context" }) });
+  behavior("agent-hook-post-mcp", {
+    stdout: JSON.stringify({ context: "post failure context" }),
+  });
+  try {
+    hooks = await plugin({ mcp: { docs: { type: "local" } } });
+    const failures = [
+      ["protocol-error-call", "MCP server returned an error result"],
+      ["transport-error-call", "MCP transport closed before a response"],
+    ];
+    for (const [callID, error] of failures) {
+      const input = { query: callID };
+      await hooks["tool.execute.before"](
+        { tool: "docs_lookup", sessionID: "terminal-mcp", callID },
+        { args: input },
+      );
+      void hooks.event({
+        event: toolErrorEvent({
+          sessionID: "terminal-mcp",
+          callID,
+          tool: "docs_lookup",
+          input,
+          error,
+          metadata: { source: "mcp" },
+        }),
+      });
+    }
+
+    const output = { message: {}, parts: [{ type: "text", text: "continue" }] };
+    await hooks["chat.message"]({ sessionID: "terminal-mcp", agent: "build" }, output);
+
+    const posts = logs().filter((record) => record.hook === "agent-hook-post-mcp");
+    assert.equal(posts.length, 2);
+    assert.deepEqual(
+      posts.map((record) => record.payload.tool_response.output),
+      failures.map(([, error]) => error),
+    );
+    assert.ok(posts.every((record) => record.payload.tool_result_is_error === true));
+    assert.ok(posts.every((record) => record.payload.tool_response.metadata.source === "mcp"));
+    assert.match(output.message.system, /pre failure context/);
+    assert.match(output.message.system, /post failure context/);
+  } finally {
+    await hooks?.dispose();
+    clearBehavior("agent-hook-pre-mcp");
+    clearBehavior("agent-hook-post-mcp");
+  }
+});
+
+await check("deduplicates repeated terminal MCP error events", async () => {
+  clearLog();
+  const hooks = await plugin({ mcp: { docs: { type: "local" } } });
+  const input = { query: "duplicate" };
+  await hooks["tool.execute.before"](
+    { tool: "docs_lookup", sessionID: "duplicate-error", callID: "duplicate-error-call" },
+    { args: input },
+  );
+  const event = toolErrorEvent({
+    sessionID: "duplicate-error",
+    callID: "duplicate-error-call",
+    tool: "docs_lookup",
+    input,
+    error: "MCP server returned an error result",
+  });
+  void hooks.event({ event });
+  void hooks.event({ event });
+  await hooks.dispose();
+
+  assert.equal(logs().filter((record) => record.hook === "agent-hook-post-mcp").length, 1);
+});
+
+await check("does not claim terminal errors from another session", async () => {
+  clearLog();
+  const hooks = await plugin({ mcp: { docs: { type: "local" } } });
+  const input = { query: "session ownership" };
+  const call = { tool: "docs_lookup", sessionID: "owning-session", callID: "owned-call" };
+  await hooks["tool.execute.before"](call, { args: input });
+  void hooks.event({
+    event: toolErrorEvent({
+      ...call,
+      sessionID: "other-session",
+      input,
+      error: "unrelated terminal error",
+    }),
+  });
+  await hooks["tool.execute.after"](
+    { ...call, args: input },
+    { output: "owned result", isError: true, metadata: {} },
+  );
+  await hooks.dispose();
+
+  const posts = logs().filter((record) => record.hook === "agent-hook-post-mcp");
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].payload.tool_response.output, "owned result");
+});
+
+await check("claims MCP failures once across event and after-hook ordering", async () => {
+  clearLog();
+  const hooks = await plugin({ mcp: { docs: { type: "local" } } });
+  const eventFirstInput = { query: "event first" };
+  const eventFirst = {
+    tool: "docs_lookup",
+    sessionID: "terminal-ordering",
+    callID: "event-first-call",
+  };
+  await hooks["tool.execute.before"](eventFirst, { args: eventFirstInput });
+  void hooks.event({
+    event: toolErrorEvent({
+      ...eventFirst,
+      input: eventFirstInput,
+      error: "MCP server returned an error result",
+    }),
+  });
+  await hooks["tool.execute.after"](
+    { ...eventFirst, args: eventFirstInput },
+    { output: "late result", isError: true, metadata: {} },
+  );
+
+  const afterFirstInput = { query: "after first" };
+  const afterFirst = {
+    tool: "docs_lookup",
+    sessionID: "terminal-ordering",
+    callID: "after-first-call",
+  };
+  await hooks["tool.execute.before"](afterFirst, { args: afterFirstInput });
+  await hooks["tool.execute.after"](
+    { ...afterFirst, args: afterFirstInput },
+    { output: "direct result", isError: true, metadata: {} },
+  );
+  void hooks.event({
+    event: toolErrorEvent({
+      ...afterFirst,
+      input: afterFirstInput,
+      error: "late terminal event",
+    }),
+  });
+  await hooks.dispose();
+
+  const posts = logs().filter((record) => record.hook === "agent-hook-post-mcp");
+  assert.equal(posts.length, 2);
+  assert.deepEqual(
+    posts.map((record) => record.payload.tool_response.output).sort(),
+    ["MCP server returned an error result", "direct result"],
+  );
+});
+
+await check("does not count interrupted MCP calls as server failures", async () => {
+  clearLog();
+  const hooks = await plugin({ mcp: { docs: { type: "local" } } });
+  const input = { query: "cancelled" };
+  const call = {
+    tool: "docs_lookup",
+    sessionID: "interrupted-mcp",
+    callID: "interrupted-mcp-call",
+  };
+  await hooks["tool.execute.before"](call, { args: input });
+  void hooks.event({
+    event: toolErrorEvent({
+      ...call,
+      input,
+      error: "Tool execution aborted",
+      metadata: { interrupted: true },
+    }),
+  });
+  await hooks["tool.execute.after"](
+    { ...call, args: input },
+    { output: "late result", isError: true, metadata: {} },
+  );
+  await hooks.dispose();
+
+  assert.equal(logs().filter((record) => record.hook === "agent-hook-post-mcp").length, 0);
+});
+
+await check("does not count cancelled MCP calls without interruption metadata", async () => {
+  clearLog();
+  const hooks = await plugin({ mcp: { docs: { type: "local" } } });
+  const input = { query: "cancelled without metadata" };
+  const call = {
+    tool: "docs_lookup",
+    sessionID: "cancelled-mcp",
+    callID: "cancelled-mcp-call",
+  };
+  await hooks["tool.execute.before"](call, { args: input });
+  void hooks.event({
+    event: toolErrorEvent({
+      ...call,
+      input,
+      error: "Tool execution aborted",
+    }),
+  });
+  await hooks["tool.execute.after"](
+    { ...call, args: input },
+    { output: "late result", isError: true, metadata: {} },
+  );
+  await hooks.dispose();
+
+  assert.equal(logs().filter((record) => record.hook === "agent-hook-post-mcp").length, 0);
+});
+
+await check("does not count permission denials as MCP server failures", async () => {
+  clearLog();
+  const hooks = await plugin({ mcp: { docs: { type: "local" } } });
+  const denials = [
+    ["interactive-denial", "The user rejected permission to use this specific tool call."],
+    [
+      "corrected-denial",
+      "The user rejected permission to use this specific tool call with the following feedback: no",
+    ],
+    [
+      "configured-denial",
+      "The user has specified a rule which prevents you from using this specific tool call.",
+    ],
+  ];
+  for (const [callID, error] of denials) {
+    const input = { query: callID };
+    const call = { tool: "docs_lookup", sessionID: "permission-denials", callID };
+    await hooks["tool.execute.before"](call, { args: input });
+    void hooks.event({ event: toolErrorEvent({ ...call, input, error }) });
+    await hooks["tool.execute.after"](
+      { ...call, args: input },
+      { output: "late result", isError: true, metadata: {} },
+    );
+  }
+  await hooks.dispose();
+
+  assert.equal(logs().filter((record) => record.hook === "agent-hook-post-mcp").length, 0);
+});
+
+await check("does not synthesize post hooks for direct-tool errors", async () => {
+  clearLog();
+  const hooks = await plugin();
+  const input = { command: "exit 1" };
+  const call = { tool: "bash", sessionID: "direct-error", callID: "direct-error-call" };
+  await hooks["tool.execute.before"](call, { args: input });
+  void hooks.event({
+    event: toolErrorEvent({ ...call, input, error: "Command exited with code 1" }),
+  });
+  await hooks["tool.execute.after"](
+    { ...call, args: input },
+    { output: "late result", metadata: { exit: 1 } },
+  );
+  await hooks.dispose();
+
+  assert.equal(logs().filter((record) => record.hook === "agent-hook-post-bash").length, 0);
+});
+
+await check("serializes lazy session start before the first prompt", async () => {
+  clearLog();
+  behavior("agent-hook-session-start", {
+    delayMs: 40,
+    stdout: JSON.stringify({ context: "start context" }),
+  });
+  behavior("agent-hook-prompt-submit", {
+    stdout: JSON.stringify({ hookSpecificOutput: { additionalContext: "prompt context" } }),
+  });
+  const hooks = await plugin();
+  void hooks.event({
+    event: {
+      type: "session.created",
+      properties: { info: { id: "race-session" } },
+    },
+  });
+  const output = {
+    message: { system: "existing" },
+    parts: [{ type: "text", text: "hello" }],
+  };
+  await hooks["chat.message"]({ sessionID: "race-session", agent: "build" }, output);
+  assert.match(output.message.system, /start context/);
+  assert.match(output.message.system, /prompt context/);
+  const records = logs();
+  assert.equal(records.filter((item) => item.hook === "agent-hook-session-start").length, 1);
+  assert.equal(
+    records.find((item) => item.hook === "agent-hook-session-start").payload.hook_event_name,
+    "SessionStart",
+  );
+  assert.equal(
+    records.find((item) => item.hook === "agent-hook-prompt-submit").payload.hook_event_name,
+    "UserPromptSubmit",
+  );
+  await hooks.dispose();
+  clearBehavior("agent-hook-session-start");
+  clearBehavior("agent-hook-prompt-submit");
+});
+
+await check("deduplicates Stop and finalizes each session at most once", async () => {
+  clearLog();
+  const hooks = await plugin();
+  const first = { message: {}, parts: [{ type: "text", text: "one" }] };
+  await hooks["chat.message"]({ sessionID: "life-session", agent: "build" }, first);
+  void hooks.event({ event: { type: "session.idle", properties: { sessionID: "life-session" } } });
+  void hooks.event({ event: { type: "session.idle", properties: { sessionID: "life-session" } } });
+  await hooks["chat.message"](
+    { sessionID: "life-session", agent: "build" },
+    { message: {}, parts: [{ type: "text", text: "two" }] },
+  );
+  void hooks.event({ event: { type: "session.idle", properties: { sessionID: "life-session" } } });
+  void hooks.event({
+    event: { type: "session.deleted", properties: { info: { id: "life-session" } } },
+  });
+  await hooks.dispose();
+  const records = logs();
+  assert.equal(records.filter((item) => item.hook === "agent-hook-stop").length, 2);
+  assert.equal(records.filter((item) => item.hook === "agent-hook-session-end").length, 1);
+  assert.ok(
+    records
+      .filter((item) => item.hook === "agent-hook-stop")
+      .every((item) => item.payload.hook_event_name === "Stop"),
+  );
+  assert.equal(
+    records.find((item) => item.hook === "agent-hook-session-end").payload.hook_event_name,
+    "SessionEnd",
+  );
+});
+
+await check("queues an idle event behind an in-flight message callback", async () => {
+  clearLog();
+  behavior("agent-hook-prompt-submit", { delayMs: 50 });
+  const hooks = await plugin();
+  const message = hooks["chat.message"](
+    { sessionID: "message-race", agent: "build" },
+    { message: {}, parts: [{ type: "text", text: "race" }] },
+  );
+  void hooks.event({
+    event: { type: "session.idle", properties: { sessionID: "message-race" } },
+  });
+  await message;
+  await hooks.dispose();
+  const records = logs();
+  const promptIndex = records.findIndex((item) => item.hook === "agent-hook-prompt-submit");
+  const stopIndex = records.findIndex((item) => item.hook === "agent-hook-stop");
+  assert.ok(promptIndex >= 0);
+  assert.ok(stopIndex > promptIndex);
+  clearBehavior("agent-hook-prompt-submit");
+});
+
+await check("does not finalize an active session because the clock advanced", async () => {
+  clearLog();
+  const hooks = await plugin();
+  await hooks["chat.message"](
+    { sessionID: "old-active", agent: "build" },
+    { message: {}, parts: [{ type: "text", text: "first" }] },
+  );
+  clearLog();
+  const originalNow = Date.now;
+  const later = originalNow() + 7 * 60 * 60 * 1_000;
+  Date.now = () => later;
+  try {
+    await hooks["chat.message"](
+      { sessionID: "old-active", agent: "build" },
+      { message: {}, parts: [{ type: "text", text: "second" }] },
+    );
+  } finally {
+    Date.now = originalNow;
+  }
+  const records = logs();
+  assert.equal(records.filter((item) => item.hook === "agent-hook-session-start").length, 0);
+  assert.equal(records.filter((item) => item.hook === "agent-hook-session-end").length, 0);
+  await hooks.dispose();
+});
+
+await check("does not finalize an active session because the session map is full", async () => {
+  clearLog();
+  const hooks = await plugin();
+  await hooks["chat.message"](
+    { sessionID: "cap-active", agent: "build" },
+    { message: {}, parts: [{ type: "text", text: "first" }] },
+  );
+  for (let index = 0; index < 260; index += 1) {
+    void hooks.event({
+      event: { type: "session.created", properties: { info: { id: `cap-${index}` } } },
+    });
+  }
+  clearLog();
+  await hooks["chat.message"](
+    { sessionID: "cap-active", agent: "build" },
+    { message: {}, parts: [{ type: "text", text: "second" }] },
+  );
+  const records = logs();
+  assert.equal(records.filter((item) => item.hook === "agent-hook-session-start").length, 0);
+  assert.equal(records.filter((item) => item.hook === "agent-hook-session-end").length, 0);
+  await hooks.dispose();
+});
+
+await check("isolates concurrent pre-tool context by callID", async () => {
+  clearLog();
+  behavior("agent-hook-pre-bash", { echoCommand: true });
+  const hooks = await plugin();
+  await Promise.all([
+    hooks["tool.execute.before"](
+      { tool: "bash", sessionID: "calls", callID: "call-one" },
+      { args: { command: "context one" } },
+    ),
+    hooks["tool.execute.before"](
+      { tool: "bash", sessionID: "calls", callID: "call-two" },
+      { args: { command: "context two" } },
+    ),
+  ]);
+  const two = { title: "two", output: "result two", metadata: {} };
+  const one = { title: "one", output: "result one", metadata: {} };
+  await hooks["tool.execute.after"](
+    { tool: "bash", sessionID: "calls", callID: "call-two", args: { command: "context two" } },
+    two,
+  );
+  await hooks["tool.execute.after"](
+    { tool: "bash", sessionID: "calls", callID: "call-one", args: { command: "context one" } },
+    one,
+  );
+  assert.match(two.output, /context two/);
+  assert.doesNotMatch(two.output, /context one/);
+  assert.match(one.output, /context one/);
+  assert.doesNotMatch(one.output, /context two/);
+  await hooks.dispose();
+  clearBehavior("agent-hook-pre-bash");
+});
+
+await check("fails closed with stderr for protected pre-hook denials", async () => {
+  clearLog();
+  const descendantPidFile = path.join(root, "denied-descendant-pid");
+  behavior("agent-hook-pre-bash", {
+    exit: 2,
+    stderr: "denied by fixture",
+    descendantPidFile,
+  });
+  const hooks = await plugin();
+  const output = { args: { command: "danger" } };
+  let descendantPid;
+  try {
+    await assert.rejects(
+      hooks["tool.execute.before"](
+        { tool: "bash", sessionID: "denied", callID: "denied-call" },
+        output,
+      ),
+      /denied by fixture/,
+    );
+    assert.equal(output.decision, "deny");
+    assert.match(output.reason, /denied by fixture/);
+    descendantPid = Number.parseInt(fs.readFileSync(descendantPidFile, "utf8"), 10);
+    assert.equal(Number.isSafeInteger(descendantPid) && descendantPid > 1, true);
+    await waitForProcessExit(descendantPid, "denied-hook descendant");
+  } finally {
+    if (descendantPid) {
+      try {
+        process.kill(descendantPid, "SIGKILL");
+      } catch {
+        // The expected cleanup path already removed it.
+      }
+    }
+    await hooks.dispose();
+    clearBehavior("agent-hook-pre-bash");
+    fs.rmSync(descendantPidFile, { force: true });
+  }
+});
+
+await check("fails closed on malformed successful protected output", async () => {
+  clearLog();
+  const descendantPidFile = path.join(root, "malformed-descendant-pid");
+  behavior("agent-hook-pre-edit", { stdout: "{truncated", descendantPidFile });
+  const hooks = await plugin();
+  let descendantPid;
+  try {
+    await assert.rejects(
+      hooks["tool.execute.before"](
+        { tool: "edit", sessionID: "malformed", callID: "malformed-call" },
+        { args: { filePath: "a", oldString: "b", newString: "c" } },
+      ),
+      /invalid AgentGuard output/i,
+    );
+    descendantPid = Number.parseInt(fs.readFileSync(descendantPidFile, "utf8"), 10);
+    assert.equal(Number.isSafeInteger(descendantPid) && descendantPid > 1, true);
+    await waitForProcessExit(descendantPid, "malformed-hook descendant");
+  } finally {
+    if (descendantPid) {
+      try {
+        process.kill(descendantPid, "SIGKILL");
+      } catch {
+        // The expected cleanup path already removed it.
+      }
+    }
+    await hooks.dispose();
+    clearBehavior("agent-hook-pre-edit");
+    fs.rmSync(descendantPidFile, { force: true });
+  }
+});
+
+await check("treats a missing executable as advisory", async () => {
+  clearLog();
+  const hookPath = path.join(home, ".local/bin/agent-hook-pre-bash");
+  const savedConsoleError = console.error;
+  const savedPath = process.env.PATH;
+  const errors = [];
+  let hooks;
+  fs.renameSync(hookPath, `${hookPath}.missing`);
+  console.error = (...args) => errors.push(args.join(" "));
+  process.env.PATH = path.join(root, "no-hooks-here");
+  try {
+    hooks = await plugin();
+    await hooks["tool.execute.before"](
+      { tool: "bash", sessionID: "missing", callID: "missing-call" },
+      { args: { command: "safe" } },
+    );
+    assert.deepEqual(logs(), []);
+    assert.deepEqual(errors, [
+      "[opencode-agentguard] agent-hook-pre-bash unavailable; skipping",
+    ]);
+  } finally {
+    console.error = savedConsoleError;
+    if (savedPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = savedPath;
+    }
+    fs.renameSync(`${hookPath}.missing`, hookPath);
+    await hooks?.dispose();
+  }
+});
+
+await check("fails closed when a protected hook cannot launch", async () => {
+  clearLog();
+  const hookPath = path.join(home, ".local/bin/agent-hook-pre-bash");
+  fs.rmSync(hookPath);
+  fs.mkdirSync(hookPath);
+  try {
+    const hooks = await plugin();
+    await assert.rejects(
+      hooks["tool.execute.before"](
+        { tool: "bash", sessionID: "launch", callID: "launch-call" },
+        { args: { command: "safe" } },
+      ),
+      /launch failed/i,
+    );
+    await hooks.dispose();
+  } finally {
+    fs.rmSync(hookPath, { recursive: true });
+    fs.symlinkSync(path.join(root, "hook-fixture.mjs"), hookPath);
+  }
+});
+
+await check("fails closed when a protected hook closes stdin early", async () => {
+  clearLog();
+  const hookPath = path.join(home, ".local/bin/agent-hook-pre-edit");
+  const hookScript = path.join(root, "close-input-hook.sh");
+  const hookGroup = path.join(root, "closed-input-hook-group");
+  const groupReady = path.join(root, "closed-input-group-ready");
+  const separateReady = path.join(root, "closed-input-separate-ready");
+  const darwinBin = path.join(root, "darwin-bin");
+  const savedPath = process.env.PATH;
+  fs.mkdirSync(darwinBin);
+  fs.writeFileSync(path.join(darwinBin, "pkill"), "#!/bin/sh\nexit 2\n", {
+    mode: 0o755,
+  });
+  fs.writeFileSync(
+    hookScript,
+    `#!/bin/sh
+printf '%s\n' "$$" >"${hookGroup}"
+python3 - "${groupReady}" "${separateReady}" <<'PY' &
+import os
+import pathlib
+import sys
+import time
+
+def wait_for_cleanup(ready):
+    identity = f"{os.getpid()} {os.getpgrp()}"
+    pathlib.Path(ready).write_text(identity, encoding="utf-8")
+    time.sleep(30)
+
+# Exercise both cleanup layers. An ordinary descendant must die with the hook's
+# process group; a helper that creates another process group must still be found
+# by the broader private-session sweep used for macOS background jobs.
+if os.fork() == 0:
+    wait_for_cleanup(sys.argv[1])
+    os._exit(0)
+if os.fork() == 0:
+    os.setpgrp()
+    wait_for_cleanup(sys.argv[2])
+    os._exit(0)
+PY
+while [ ! -s "${groupReady}" ] || [ ! -s "${separateReady}" ]; do
+  sleep 0.01
+done
+exec 0<&-
+sleep 5
+`,
+  );
+  fs.chmodSync(hookScript, 0o755);
+  fs.rmSync(hookPath);
+  fs.symlinkSync(hookScript, hookPath);
+  // Apple's pkill omits the session selector supported by procps-ng. Put an
+  // equivalent invalid-usage result first on PATH so Linux catches any cleanup
+  // implementation that silently relies on the non-portable `pkill -s`.
+  process.env.PATH = `${darwinBin}${path.delimiter}${savedPath}`;
+  try {
+    const hooks = await plugin();
+    await assert.rejects(
+      hooks["tool.execute.before"](
+        { tool: "edit", sessionID: "closed-input", callID: "closed-input-call" },
+        {
+          args: {
+            filePath: "large",
+            oldString: "",
+            newString: "x".repeat(2 * 1024 * 1024),
+          },
+        },
+      ),
+      /input failed/i,
+    );
+    // The shell closes stdin only after both descendants publish their PIDs, so
+    // these checks cannot pass merely because a busy runner had not scheduled
+    // their creation. Poll process state instead of guessing at a write delay.
+    assert.equal(fs.existsSync(groupReady), true);
+    assert.equal(fs.existsSync(separateReady), true);
+    const hookPgid = Number.parseInt(fs.readFileSync(hookGroup, "utf8"), 10);
+    const [groupPid, groupPgid] = fs.readFileSync(groupReady, "utf8").split(" ").map(Number);
+    const [separatePid, separatePgid] = fs
+      .readFileSync(separateReady, "utf8")
+      .split(" ")
+      .map(Number);
+    assert.equal(Number.isSafeInteger(hookPgid) && hookPgid > 1, true);
+    assert.equal(Number.isSafeInteger(groupPid) && groupPid > 1, true);
+    assert.equal(Number.isSafeInteger(groupPgid) && groupPgid > 1, true);
+    assert.equal(Number.isSafeInteger(separatePid) && separatePid > 1, true);
+    assert.equal(Number.isSafeInteger(separatePgid) && separatePgid > 1, true);
+    assert.equal(groupPgid, hookPgid);
+    assert.notEqual(separatePgid, hookPgid);
+    await waitForProcessExit(groupPid, "ordinary descendant");
+    await waitForProcessExit(separatePid, "separate-process-group descendant");
+    await hooks.dispose();
+  } finally {
+    process.env.PATH = savedPath;
+    fs.rmSync(hookPath);
+    fs.symlinkSync(path.join(root, "hook-fixture.mjs"), hookPath);
+  }
+});
+
+await check("fails closed when a protected hook times out", async () => {
+  clearLog();
+  behavior("agent-hook-pre-edit", { delayMs: 250 });
+  const normalTimeoutScale = process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE;
+  process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = "0.01";
+  try {
+    const hooks = await plugin();
+    await assert.rejects(
+      hooks["tool.execute.before"](
+        { tool: "edit", sessionID: "timeout", callID: "timeout-call" },
+        { args: { filePath: "a", oldString: "b", newString: "c" } },
+      ),
+      /timed out/i,
+    );
+    await hooks.dispose();
+  } finally {
+    process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = normalTimeoutScale;
+    clearBehavior("agent-hook-pre-edit");
+  }
+});
+
+await check("isolates timeout cleanup from project modules and PATH", async () => {
+  clearLog();
+  const siteMarker = path.join(root, "cleanup-sitecustomize-ran");
+  const subprocessMarker = path.join(root, "cleanup-subprocess-ran");
+  const pathPythonMarker = path.join(root, "cleanup-path-python-ran");
+  const pathPsMarker = path.join(root, "cleanup-path-ps-ran");
+  const sitecustomize = path.join(sourceDirectory, "sitecustomize.py");
+  const subprocessModule = path.join(sourceDirectory, "subprocess.py");
+  const cleanupBin = path.join(sourceDirectory, "cleanup-bin");
+  const descendantPidFile = path.join(root, "cleanup-descendant-pid");
+  const realPython = process.env.AGENTGUARD_TEST_REAL_PYTHON;
+  const realPs = process.env.AGENTGUARD_TEST_REAL_PS;
+  const savedPath = process.env.PATH;
+  assert.equal(typeof realPython === "string" && path.isAbsolute(realPython), true);
+  assert.equal(typeof realPs === "string" && path.isAbsolute(realPs), true);
+  fs.writeFileSync(
+    sitecustomize,
+    `from pathlib import Path\nPath(${JSON.stringify(siteMarker)}).write_text("ran")\n`,
+  );
+  fs.writeFileSync(
+    subprocessModule,
+    `from pathlib import Path\nPath(${JSON.stringify(subprocessMarker)}).write_text("ran")\nraise RuntimeError("project subprocess imported")\n`,
+  );
+  fs.mkdirSync(cleanupBin);
+  fs.writeFileSync(
+    path.join(cleanupBin, "python3"),
+    `#!/bin/sh\nprintf ran >${JSON.stringify(pathPythonMarker)}\nexec ${JSON.stringify(realPython)} "$@"\n`,
+    { mode: 0o755 },
+  );
+  fs.writeFileSync(
+    path.join(cleanupBin, "ps"),
+    `#!/bin/sh\nprintf ran >${JSON.stringify(pathPsMarker)}\nexec ${JSON.stringify(realPs)} "$@"\n`,
+    { mode: 0o755 },
+  );
+  behavior("agent-hook-pre-edit", { delayMs: 2_000, descendantPidFile });
+  const normalTimeoutScale = process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE;
+  process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = "0.05";
+  process.env.PATH = `${cleanupBin}${path.delimiter}${savedPath}`;
+  let hooks;
+  let descendantPid;
+  try {
+    hooks = await plugin();
+    await assert.rejects(
+      hooks["tool.execute.before"](
+        { tool: "edit", sessionID: "cleanup-python", callID: "cleanup-python-call" },
+        { args: { filePath: "a", oldString: "b", newString: "c" } },
+      ),
+      /timed out/i,
+    );
+    assert.equal(fs.existsSync(siteMarker), false);
+    assert.equal(fs.existsSync(subprocessMarker), false);
+    assert.equal(fs.existsSync(pathPythonMarker), false);
+    assert.equal(fs.existsSync(pathPsMarker), false);
+    descendantPid = Number.parseInt(fs.readFileSync(descendantPidFile, "utf8"), 10);
+    assert.equal(Number.isSafeInteger(descendantPid) && descendantPid > 1, true);
+    await waitForProcessExit(descendantPid, "timeout-cleanup descendant");
+  } finally {
+    if (descendantPid) {
+      try {
+        process.kill(descendantPid, "SIGKILL");
+      } catch {
+        // The expected cleanup path already removed it.
+      }
+    }
+    await hooks?.dispose();
+    process.env.PATH = savedPath;
+    process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = normalTimeoutScale;
+    clearBehavior("agent-hook-pre-edit");
+    fs.rmSync(sitecustomize, { force: true });
+    fs.rmSync(subprocessModule, { force: true });
+    fs.rmSync(cleanupBin, { recursive: true, force: true });
+    fs.rmSync(descendantPidFile, { force: true });
+  }
+});
+
+await check("keeps post-hook failures advisory", async () => {
+  clearLog();
+  behavior("agent-hook-post-bash", { exit: 1, stderr: "post failed" });
+  const hooks = await plugin();
+  await hooks["tool.execute.before"](
+    { tool: "bash", sessionID: "post", callID: "post-call" },
+    { args: { command: "done" } },
+  );
+  const output = { title: "done", output: "original", metadata: {} };
+  await hooks["tool.execute.after"](
+    { tool: "bash", sessionID: "post", callID: "post-call", args: { command: "done" } },
+    output,
+  );
+  assert.match(output.output, /^original/);
+  await hooks.dispose();
+  clearBehavior("agent-hook-post-bash");
+});
+
+await check("keeps malformed successful post output advisory", async () => {
+  clearLog();
+  behavior("agent-hook-post-bash", { stdout: "{truncated" });
+  const hooks = await plugin();
+  await hooks["tool.execute.before"](
+    { tool: "bash", sessionID: "bad-post", callID: "bad-post-call" },
+    { args: { command: "done" } },
+  );
+  const output = { title: "done", output: "original", metadata: {} };
+  await hooks["tool.execute.after"](
+    { tool: "bash", sessionID: "bad-post", callID: "bad-post-call", args: { command: "done" } },
+    output,
+  );
+  assert.equal(output.output, "original");
+  await hooks.dispose();
+  clearBehavior("agent-hook-post-bash");
+});
+
+await check("uses the direct permission callback for notifications", async () => {
+  clearLog();
+  const hooks = await plugin();
+  await hooks["permission.ask"]({
+    id: "permission-1",
+    sessionID: "permission-session",
+    title: "Allow edit",
+    metadata: {},
+  });
+  const record = logs().find((item) => item.hook === "agent-hook-notification");
+  assert.equal(record.payload.hook_event_name, "PermissionRequest");
+  assert.equal(record.payload.permission.id, "permission-1");
+  await hooks.dispose();
+});
+
+await check("fails closed on ambiguous MCP server prefixes", async () => {
+  clearLog();
+  const hooks = await plugin({ mcp: { a: {}, a_b: {} } });
+  const output = { args: { query: "x" } };
+  await assert.rejects(
+    hooks["tool.execute.before"](
+      { tool: "a_b_lookup", sessionID: "ambiguous", callID: "ambiguous-call" },
+      output,
+    ),
+    /ambiguous MCP/i,
+  );
+  assert.equal(output.decision, "deny");
+  assert.match(output.reason, /ambiguous MCP/i);
+  await hooks.dispose();
+});
+
+await check("fails closed on ambiguous canonical MCP server prefixes", async () => {
+  clearLog();
+  const hooks = await plugin({ mcp: { a: {}, a__b: {} } });
+  const output = { args: { query: "x" } };
+  await assert.rejects(
+    hooks["tool.execute.before"](
+      { tool: "mcp__a__b__lookup", sessionID: "canonical-ambiguous", callID: "canonical-ambiguous-call" },
+      output,
+    ),
+    /ambiguous MCP/i,
+  );
+  assert.equal(output.decision, "deny");
+  assert.match(output.reason, /ambiguous MCP/i);
+  await hooks.dispose();
+});
+
+await check("retains flattened MCP names that start with the canonical marker", async () => {
+  clearLog();
+  const hooks = await plugin({ mcp: { mcp_: {} } });
+  await hooks["tool.execute.before"](
+    { tool: "mcp__lookup", sessionID: "prefixed-mcp", callID: "prefixed-mcp-call" },
+    { args: { query: "x" } },
+  );
+  const pre = logs().find((record) => record.hook === "agent-hook-pre-mcp");
+  assert.equal(pre.payload.tool_name, "mcp__mcp___lookup");
+  await hooks.dispose();
+});
+
+await check("fails closed on cross-form ambiguous MCP identities", async () => {
+  clearLog();
+  const hooks = await plugin({ mcp: { docs: {}, mcp__docs_: {} } });
+  const output = { args: { query: "x" } };
+  await assert.rejects(
+    hooks["tool.execute.before"](
+      { tool: "mcp__docs__lookup", sessionID: "cross-form", callID: "cross-form-call" },
+      output,
+    ),
+    /ambiguous MCP/i,
+  );
+  assert.equal(output.decision, "deny");
+  assert.match(output.reason, /ambiguous MCP/i);
+  await hooks.dispose();
+});
+
+await check("observes MCP servers added after its config callback", async () => {
+  clearLog();
+  const config = { mcp: {} };
+  const hooks = await plugin(config);
+  config.mcp.later = { type: "local" };
+  await hooks["tool.execute.before"](
+    { tool: "later_lookup", sessionID: "later-mcp", callID: "later-call" },
+    { args: { query: "x" } },
+  );
+  const records = logs().filter((item) => item.hook === "agent-hook-pre-mcp");
+  assert.deepEqual(records.map((item) => item.payload.tool_name), ["mcp__later__lookup"]);
+  await hooks.dispose();
+});
+
+await check("observes dynamically added MCP servers from live status", async () => {
+  clearLog();
+  const client = {
+    mcp: {
+      status: async () => ({
+        data: {
+          dynamic: { status: "connected" },
+          offline: { status: "disabled" },
+        },
+      }),
+    },
+  };
+  const hooks = await plugin({}, client);
+  await hooks["tool.execute.before"](
+    { tool: "dynamic_lookup", sessionID: "dynamic-mcp", callID: "dynamic-call" },
+    { args: { query: "x" } },
+  );
+  const records = logs().filter((item) => item.hook === "agent-hook-pre-mcp");
+  assert.deepEqual(records.map((item) => item.payload.tool_name), ["mcp__dynamic__lookup"]);
+  await hooks.dispose();
+});
+
+await check("fails closed for a dynamic MCP identity when cold status is unavailable", async () => {
+  clearLog();
+  const hooks = await plugin(
+    {},
+    {
+      mcp: {
+        status: async () => {
+          throw new Error("status unavailable");
+        },
+      },
+    },
+  );
+  const output = { args: { query: "x" } };
+  try {
+    await assert.rejects(
+      hooks["tool.execute.before"](
+        { tool: "dynamic_lookup", sessionID: "cold-status", callID: "cold-status-call" },
+        output,
+      ),
+      /MCP inventory unavailable/i,
+    );
+    assert.equal(output.decision, "deny");
+    assert.match(output.reason, /MCP inventory unavailable/i);
+    assert.deepEqual(logs(), []);
+  } finally {
+    await hooks.dispose();
+  }
+});
+
+await check("bounds and briefly caches an unavailable MCP status endpoint", async () => {
+  clearLog();
+  const savedConsoleError = console.error;
+  const errors = [];
+  let statusCalls = 0;
+  let hooks;
+  console.error = (...args) => errors.push(args.join(" "));
+  try {
+    hooks = await plugin(
+      { mcp: { fallback: { type: "local" } } },
+      {
+        mcp: {
+          status: () => {
+            statusCalls += 1;
+            return new Promise(() => {});
+          },
+        },
+      },
+    );
+    const started = Date.now();
+    await hooks["tool.execute.before"](
+      { tool: "fallback_lookup", sessionID: "status-timeout", callID: "status-timeout-1" },
+      { args: { query: "one" } },
+    );
+    assert.equal(Date.now() - started < 2_500, true);
+    await hooks["tool.execute.before"](
+      { tool: "fallback_other", sessionID: "status-timeout", callID: "status-timeout-2" },
+      { args: { query: "two" } },
+    );
+    assert.equal(statusCalls, 1);
+    assert.deepEqual(
+      logs()
+        .filter((item) => item.hook === "agent-hook-pre-mcp")
+        .map((item) => item.payload.tool_name),
+      ["mcp__fallback__lookup", "mcp__fallback__other"],
+    );
+    assert.equal(
+      errors.filter((message) => message.includes("MCP status timed out")).length,
+      1,
+    );
+  } finally {
+    console.error = savedConsoleError;
+    await hooks?.dispose();
+  }
+});
+
+await check("excludes disabled MCP servers from prefix matching and fan-out", async () => {
+  clearLog();
+  const hooks = await plugin({
+    mcp: {
+      a: { enabled: false },
+      a_b: { enabled: true },
+      disabled: { enabled: false },
+    },
+  });
+  await hooks["tool.execute.before"](
+    { tool: "a_b_lookup", sessionID: "enabled-mcp", callID: "enabled-call" },
+    { args: { query: "x" } },
+  );
+  await hooks["tool.execute.before"](
+    { tool: "list_mcp_resources", sessionID: "enabled-mcp", callID: "enabled-list-call" },
+    { args: {} },
+  );
+  const records = logs().filter((item) => item.hook === "agent-hook-pre-mcp");
+  assert.deepEqual(
+    records.map((item) => item.payload.tool_name).sort(),
+    ["mcp__a_b__list_resources", "mcp__a_b__lookup"],
+  );
+  await hooks.dispose();
+});
+
+await check("fans out unscoped MCP resource lists", async () => {
+  clearLog();
+  const hooks = await plugin({ mcp: { alpha: {}, beta: {} } });
+  await hooks["tool.execute.before"](
+    { tool: "list_mcp_resources", sessionID: "resources", callID: "resource-call" },
+    { args: {} },
+  );
+  const records = logs().filter((item) => item.hook === "agent-hook-pre-mcp");
+  assert.deepEqual(
+    records.map((item) => item.payload.tool_name).sort(),
+    ["mcp__alpha__list_resources", "mcp__beta__list_resources"],
+  );
+  await hooks.dispose();
+});
+
+await check("skips internal agents but guards task subagents", async () => {
+  clearLog();
+  const hooks = await plugin();
+  for (const agent of ["title", "summary", "compaction"]) {
+    await hooks["chat.message"](
+      { sessionID: `internal-${agent}`, agent },
+      { message: {}, parts: [{ type: "text", text: agent }] },
+    );
+  }
+  await hooks["chat.message"](
+    { sessionID: "task-agent", agent: "task" },
+    { message: {}, parts: [{ type: "text", text: "work" }] },
+  );
+  const starts = logs().filter((item) => item.hook === "agent-hook-session-start");
+  assert.deepEqual(starts.map((item) => item.session), ["task-agent"]);
+  await hooks.dispose();
+});
+
+console.log(`Results: ${passed} passed, ${failed} failed`);
+process.exit(failed === 0 ? 0 : 1);
+TEST_SCRIPT
+
+mkdir -p "$test_root/workspace"
+(
+  cd "$test_root/workspace" || exit 1
+  AGENTGUARD_TEST_ROOT="$test_root" \
+    AGENTGUARD_TEST_HOME="$fixture_home" \
+    AGENTGUARD_TEST_REAL_PYTHON="$(command -v python3)" \
+    AGENTGUARD_TEST_REAL_PS="$(command -v ps)" \
+    AGENTGUARD_TEST_PLUGIN="$test_root/agentguard.mjs" \
+    AGENTGUARD_TEST_HOOK_LOG="$hook_log" \
+    AGENTGUARD_TEST_HOOK_BEHAVIOR_DIR="$behavior_dir" \
+    node "$test_root/test.mjs"
+) || exit 1
+
+if command -v opencode >/dev/null 2>&1; then
+  load_home="$test_root/load-home"
+  load_plugins="$load_home/.config/opencode/plugins"
+  load_marker="$test_root/global-plugin-loaded"
+  mkdir -p "$load_plugins"
+  cp "$root/share/agentguard/integrations/opencode/agentguard.js" \
+    "$load_plugins/agentguard.js"
+  cat >"$load_plugins/characterization.js" <<'LOAD_PLUGIN'
+import fs from "node:fs";
+import { AgentGuardPlugin } from "./agentguard.js";
+
+export const CharacterizationPlugin = async (input) => {
+  const hooks = await AgentGuardPlugin(input);
+  if (
+    typeof hooks.config !== "function" ||
+    typeof hooks["shell.env"] !== "function" ||
+    typeof hooks["tool.execute.before"] !== "function"
+  ) {
+    throw new Error("AgentGuard adapter returned an incomplete hook surface");
+  }
+  // `opencode debug config` invokes returned config callbacks. Write the marker
+  // there, rather than during module import, so CI proves the pinned public
+  // runtime accepts and calls at least one real adapter callback signature.
+  return {
+    ...hooks,
+    config: async (config) => {
+      await hooks.config(config);
+      fs.writeFileSync(process.env.AGENTGUARD_TEST_OPENCODE_LOAD_MARKER, "configured");
+    },
+  };
+};
+LOAD_PLUGIN
+  HOME="$load_home" \
+    XDG_CONFIG_HOME="$load_home/.config" \
+    AGENTGUARD_TEST_OPENCODE_LOAD_MARKER="$load_marker" \
+    opencode debug config >/dev/null
+  if [[ "$(cat "$load_marker" 2>/dev/null)" != "configured" ]]; then
+    echo "FAIL: OpenCode invokes the AgentGuard config callback" >&2
+    exit 1
+  fi
+  echo "PASS: OpenCode invokes the AgentGuard config callback"
+fi

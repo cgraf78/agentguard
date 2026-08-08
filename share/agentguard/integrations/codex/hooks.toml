@@ -1,0 +1,84 @@
+[features]
+hooks = true
+
+# Lifecycle hooks use the shared agent-hook-* scripts. Codex does not
+# consistently export a Codex-specific env var to hook subprocesses, so the
+# managed commands set AGENTGUARD_NAME and AGENTGUARD_SESSION_ID at the config
+# boundary.
+# Depending on the Codex runtime, lifecycle hooks may include SessionEnd while
+# attention hooks arrive as PermissionRequest. Wire every supported shared
+# agent-hook-* entry here so base Codex config stays agentguard-complete.
+# Depending on the Codex runtime, shell commands arrive as either Bash or
+# exec_command tool calls; both carry shell text and need the same guards.
+# File edits likewise arrive as Edit/Write or apply_patch, depending on
+# whether the runtime exposes Claude-compatible or Codex API tool names.
+
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-session-start"
+timeout = 10
+
+[[hooks.PreToolUse]]
+matcher = "Bash|exec_command|functions[.]exec_command"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-pre-bash"
+timeout = 600
+
+[[hooks.PreToolUse]]
+matcher = "Edit|Write|apply_patch|functions[.]apply_patch"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-pre-edit"
+timeout = 10
+
+[[hooks.PreToolUse]]
+matcher = "mcp__"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-pre-mcp"
+timeout = 10
+
+[[hooks.PostToolUse]]
+matcher = "Edit|Write|apply_patch|functions[.]apply_patch"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-post-edit"
+timeout = 60
+
+[[hooks.PostToolUse]]
+matcher = "Bash|exec_command|functions[.]exec_command"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-post-bash"
+timeout = 120
+
+[[hooks.PostToolUse]]
+matcher = "mcp__"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-post-mcp"
+timeout = 10
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-stop"
+
+[[hooks.SessionEnd]]
+[[hooks.SessionEnd.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-session-end"
+timeout = 3
+
+[[hooks.PermissionRequest]]
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-notification"
+
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-prompt-submit"
+timeout = 10

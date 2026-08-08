@@ -49,6 +49,8 @@ program	test/suites/agent-hook-mcp-test
 program	test/suites/agent-hook-performance-test
 program	test/suites/agent-hook-session-test
 program	test/suites/bootstrap-test
+program	test/suites/integration-assets-test
 program	test/suites/manpage-test
+program	test/suites/opencode-agentguard-test
 program	test/suites/runner-test
 program	test/suites/timeout-test

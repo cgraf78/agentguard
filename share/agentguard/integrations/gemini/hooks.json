@@ -1,0 +1,124 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-session-start",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-session-end",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "BeforeAgent": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-prompt-submit",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ],
+    "AfterAgent": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-stop",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ],
+    "BeforeTool": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-pre-bash",
+            "timeout": 600,
+            "type": "command"
+          }
+        ],
+        "matcher": "run_shell_command"
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-pre-edit",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "replace|write_file"
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-pre-mcp",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "mcp__"
+      }
+    ],
+    "AfterTool": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-post-edit",
+            "timeout": 60,
+            "type": "command"
+          }
+        ],
+        "matcher": "replace|write_file"
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-post-bash",
+            "timeout": 120,
+            "type": "command"
+          }
+        ],
+        "matcher": "run_shell_command"
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-post-mcp",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "mcp__"
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-notification",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ]
+  }
+}
