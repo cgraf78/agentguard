@@ -187,6 +187,23 @@ async function waitForProcessExit(pid, description) {
   assert.fail(`${description} process ${pid} survived cleanup`);
 }
 
+async function waitForPidFile(file, description, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const contents = fs.readFileSync(file, "utf8").trim();
+      if (/^[1-9][0-9]*$/.test(contents)) {
+        const pid = Number(contents);
+        if (Number.isSafeInteger(pid) && pid > 1) return pid;
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`${description} did not publish a valid PID within ${timeoutMs}ms`);
+}
+
 async function plugin(config = {}, client) {
   const hooks = await AgentGuardPlugin({ directory: sourceDirectory, client });
   await hooks.config?.(config);
@@ -1274,27 +1291,35 @@ await check("isolates timeout cleanup from project modules and PATH", async () =
     `#!/bin/sh\nprintf ran >${JSON.stringify(pathPsMarker)}\nexec ${JSON.stringify(realPs)} "$@"\n`,
     { mode: 0o755 },
   );
-  behavior("agent-hook-pre-edit", { delayMs: 2_000, descendantPidFile });
+  behavior("agent-hook-pre-edit", { delayMs: 20_000, descendantPidFile });
   const normalTimeoutScale = process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE;
-  process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = "0.05";
+  // This case must prove cleanup of a descendant that really started. A 500ms
+  // timeout made that premise scheduler-dependent: under the full parallel
+  // suite, the hook could be killed before a second Node process published its
+  // PID. Give readiness the same five-second budget as ordinary fixtures and
+  // leave another five seconds before the hook timeout, then poll the PID file
+  // contents instead of guessing when the child is ready.
+  process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = "1";
   process.env.PATH = `${cleanupBin}${path.delimiter}${savedPath}`;
   let hooks;
   let descendantPid;
   try {
     hooks = await plugin();
-    await assert.rejects(
+    const timedOut = assert.rejects(
       hooks["tool.execute.before"](
         { tool: "edit", sessionID: "cleanup-python", callID: "cleanup-python-call" },
         { args: { filePath: "a", oldString: "b", newString: "c" } },
       ),
       /timed out/i,
     );
+    // Attach the rejection assertion before polling so a very slow runner
+    // cannot turn the expected timeout into an unhandled promise rejection.
+    descendantPid = await waitForPidFile(descendantPidFile, "timeout-cleanup descendant");
+    await timedOut;
     assert.equal(fs.existsSync(siteMarker), false);
     assert.equal(fs.existsSync(subprocessMarker), false);
     assert.equal(fs.existsSync(pathPythonMarker), false);
     assert.equal(fs.existsSync(pathPsMarker), false);
-    descendantPid = Number.parseInt(fs.readFileSync(descendantPidFile, "utf8"), 10);
-    assert.equal(Number.isSafeInteger(descendantPid) && descendantPid > 1, true);
     await waitForProcessExit(descendantPid, "timeout-cleanup descendant");
   } finally {
     if (descendantPid) {
