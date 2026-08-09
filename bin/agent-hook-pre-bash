@@ -598,8 +598,12 @@ case "$-" in
       return 1
     }
 
+    # AgentGuard owns the generic safety reminder, while consumers own their
+    # rule IDs, playbook routes, and naming conventions. Describe the behavior
+    # to apply so this reusable hook cannot become coupled to one consumer's
+    # generated-rule schema or require synchronized identifier renames.
     _commit_review_nudge() {
-      _hook_remind 'Consider running /review or /simplify on your changes before committing, and apply agent-rule-id: review-adversarial-fresh-eyes for non-trivial work. Review the final diff for correctness, scope, stale docs/tests, edge cases, and accidental unrelated changes.'
+      _hook_remind 'Consider running /review or /simplify on your changes before committing. For non-trivial work, follow the configured fresh-eyes review guidance. Review the final diff for correctness, scope, stale docs/tests, edge cases, and accidental unrelated changes.'
     }
 
     _vcs_authoring_fragment() {
@@ -1088,7 +1092,7 @@ case "$-" in
     fi
 
     if [ "$_GUARD_GIT_COMMIT" -eq 1 ]; then
-      _hook_remind 'This command is authoring a Git commit message. Apply agent-rule-id: git-commit-message-format.'
+      _hook_remind 'This command is authoring a Git commit message. Follow the configured commit-message format.'
       _hook_remind 'If this commit targets a public repo, verify no private or environment-specific details leak into staged code, comments, tests, generated files, docs, or the commit message.'
     fi
 
