@@ -33,6 +33,10 @@ runtime_shell_files=(
   "$root/support/sync-hook-bootstrap"
 )
 
+example_shell_files=(
+  "$root/examples/hooks/agent-hook-pre-bash-work"
+)
+
 check_runtime_shell_inventory() {
   local file first_line listed discovered
   listed=$(
@@ -81,6 +85,7 @@ check_runtime_shell_inventory
 if [[ "${AGENTGUARD_SKIP_SHELLCHECK:-0}" != 1 ]]; then
   shellcheck -x -P SCRIPTDIR \
     "${runtime_shell_files[@]}" \
+    "${example_shell_files[@]}" \
     "$test_dir/agentguard-test" \
     "$test_dir/helpers.sh" \
     "$test_dir/run-suites" \

@@ -1,0 +1,56 @@
+{
+  "features": {
+    "hooks": false,
+    "telemetry": false
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env AGENTGUARD_NAME=example old agent-hook-pre-bash"
+          },
+          {
+            "type": "command",
+            "command": "user-owned-pre-hook"
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "user-owned-read-hook"
+          }
+        ]
+      }
+    ],
+    "RetiredEvent": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=example old agent-hook-stop"
+          }
+        ]
+      }
+    ],
+    "OtherAgent": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env AGENTGUARD_NAME=other other agent-hook-stop"
+          }
+        ]
+      }
+    ],
+    "state": {
+      "recentFailures": []
+    }
+  },
+  "theme": "light"
+}

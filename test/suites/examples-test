@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+# examples-test - exercise public examples through AgentGuard's real runtime.
+
+set -u
+
+test_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+root="${test_dir%/test/suites}"
+
+# shellcheck source=../helpers.sh
+. "$root/test/helpers.sh"
+
+extension="$root/examples/hooks/agent-hook-pre-bash-work"
+live="$root/examples/reconcile/live.json"
+provider="$root/examples/reconcile/provider.json"
+expected="$root/examples/reconcile/expected.json"
+filter="$root/share/agentguard/integrations/_shared/reconcile-hooks.jq"
+
+echo ""
+echo "=== agentguard: checked-in examples ==="
+
+_assert_file_exists "examples: host-policy hook extension is tracked" "$extension"
+_assert_file_exists "examples: reconciliation live fixture is tracked" "$live"
+_assert_file_exists "examples: reconciliation provider fixture is tracked" "$provider"
+_assert_file_exists "examples: reconciliation expected output is tracked" "$expected"
+
+example_dir=$(_tmpdir)
+result="$example_dir/result.json"
+second="$example_dir/second.json"
+
+reconcile_status=0
+jq -n --arg agent example \
+  --slurpfile d "$live" \
+  --slurpfile s "$provider" \
+  -f "$filter" >"$result" || reconcile_status=$?
+_assert_exit "examples: reconciliation executes" 0 "$reconcile_status"
+
+# Compare canonical JSON in Bash instead of depending on diffutils, which is
+# intentionally absent from some minimal CI images. This remains an exact
+# structural comparison because jq sorts every object key before serialization.
+expected_canonical=$(jq -cS . "$expected")
+result_canonical=$(jq -cS . "$result")
+if [[ "$reconcile_status" -eq 0 &&
+  "$expected_canonical" == "$result_canonical" ]]; then
+  _pass "examples: reconciliation produces documented output"
+else
+  _fail "examples: reconciliation produces documented output"
+  printf 'expected: %s\nactual:   %s\n' \
+    "$expected_canonical" "$result_canonical" >&2
+fi
+
+second_status=0
+jq -n --arg agent example \
+  --slurpfile d "$result" \
+  --slurpfile s "$provider" \
+  -f "$filter" >"$second" || second_status=$?
+second_canonical=$(jq -cS . "$second")
+if [[ "$second_status" -eq 0 &&
+  "$result_canonical" == "$second_canonical" ]]; then
+  _pass "examples: reconciliation is idempotent"
+else
+  _fail "examples: reconciliation is idempotent"
+fi
+
+hook_self="$example_dir/agent-hook-pre-bash"
+ln -s "$extension" "$hook_self-work"
+hook_input='{"tool_input":{"command":"example-deploy --production"}}'
+hook_stdout="$example_dir/hook.out"
+hook_stderr="$example_dir/hook.err"
+
+set +e
+printf '%s' "$hook_input" | env \
+  AGENTGUARD_HOOK_SELF="$hook_self" \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=0 \
+  AGENTGUARD_PROCESS_DETECT=0 \
+  AGENTGUARD_NAME=example \
+  AGENTGUARD_SESSION_ID=example-session \
+  XDG_RUNTIME_DIR="$example_dir" \
+  "$root/bin/agent-hook-pre-bash" >"$hook_stdout" 2>"$hook_stderr"
+hook_status=$?
+set -e
+_assert_exit "examples: extension blocks an unapproved synthetic deployment" 2 "$hook_status"
+_assert_contains "examples: extension emits its actionable reason" \
+  "EXAMPLE_CHANGE_TICKET" "$(cat "$hook_stderr")"
+
+set +e
+printf '%s' "$hook_input" | env \
+  AGENTGUARD_HOOK_SELF="$hook_self" \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=0 \
+  AGENTGUARD_PROCESS_DETECT=0 \
+  AGENTGUARD_NAME=example \
+  AGENTGUARD_SESSION_ID=example-session-approved \
+  EXAMPLE_CHANGE_TICKET=EXAMPLE-42 \
+  XDG_RUNTIME_DIR="$example_dir" \
+  "$root/bin/agent-hook-pre-bash" >"$hook_stdout" 2>"$hook_stderr"
+hook_status=$?
+set -e
+_assert_exit "examples: extension allows the explicitly approved command" 0 "$hook_status"
+_assert_not_contains "examples: approved command has no extension block" \
+  "EXAMPLE_CHANGE_TICKET" "$(cat "$hook_stderr")"
+
+_test_summary
