@@ -1,0 +1,62 @@
+{
+  "features": {
+    "hooks": true,
+    "telemetry": false
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "user-owned-pre-hook"
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "user-owned-read-hook"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=example current agent-hook-pre-bash"
+          }
+        ]
+      }
+    ],
+    "OtherAgent": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env AGENTGUARD_NAME=other other agent-hook-stop"
+          }
+        ]
+      }
+    ],
+    "state": {
+      "recentFailures": []
+    },
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=example current agent-hook-post-bash"
+          }
+        ]
+      }
+    ]
+  },
+  "theme": "light"
+}

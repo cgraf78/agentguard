@@ -14,6 +14,7 @@ program	bin/agent-hook-session-start-claude
 program	bin/agent-hook-stop
 program	bin/agentguard-classify-command
 program	bin/claude-session-name
+program	examples/hooks/agent-hook-pre-bash-work
 program	lib/agentguard/agentguard.sh
 program	lib/agentguard/detect.sh
 program	lib/agentguard/hook-command-classifier.sh
@@ -49,6 +50,7 @@ program	test/suites/agent-hook-mcp-test
 program	test/suites/agent-hook-performance-test
 program	test/suites/agent-hook-session-test
 program	test/suites/bootstrap-test
+program	test/suites/examples-test
 program	test/suites/integration-assets-test
 program	test/suites/manpage-test
 program	test/suites/opencode-agentguard-test

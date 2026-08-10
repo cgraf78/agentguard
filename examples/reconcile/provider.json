@@ -1,0 +1,29 @@
+{
+  "features": {
+    "hooks": true
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=example current agent-hook-pre-bash"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=example current agent-hook-post-bash"
+          }
+        ]
+      }
+    ]
+  }
+}

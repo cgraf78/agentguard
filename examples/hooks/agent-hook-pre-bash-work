@@ -1,0 +1,15 @@
+# shellcheck shell=bash
+# Example environment-policy extension for agent-hook-pre-bash.
+#
+# The base hook has already parsed stdin before sourcing this file. Extensions
+# should consume the documented AGENTGUARD_* facts and public accumulator
+# helpers; they should not parse each agent runtime's native JSON independently.
+
+case "${AGENTGUARD_CMD_TRIMMED:-}" in
+  "example-deploy --production" | "example-deploy --production "*)
+    if [[ -z "${EXAMPLE_CHANGE_TICKET:-}" ]]; then
+      _hook_block \
+        "example-deploy --production requires EXAMPLE_CHANGE_TICKET to name the approved change."
+    fi
+    ;;
+esac

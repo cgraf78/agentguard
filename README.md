@@ -83,6 +83,13 @@ shared hook schema. `AGENTGUARD_OPENCODE_NAME` can override the default
 executables are invoked directly with shell startup controls removed so their
 documented launcher boundary remains intact.
 
+## Examples
+
+[`examples/`](examples/) contains a neutral environment-policy hook extension
+and complete reconciliation fixtures with expected output. Repo tests load the
+extension through the real pre-Bash hook, execute the provider-owned `jq`
+filter, compare its output, and prove a second reconciliation is unchanged.
+
 ## Dependencies
 
 - Bash 4 or newer for hook scripts that use the command classifier. On macOS,
