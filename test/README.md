@@ -12,6 +12,9 @@ Prefer narrow suites that match a hook family or policy area:
 - protected Git operation handling
 - edit, MCP, prompt, stop, session, and notification hooks
 - host-specific payload compatibility
+- `install-test` covers the standalone checkout-backed command and manpage
+  links, idempotent retargeting, custom destinations, complete source
+  preflight, and refusal to overwrite user-owned paths.
 
 Tests should assert machine behavior: exit status, emitted JSON/text fragments
 that are part of the contract, and filesystem side effects. Avoid asserting
