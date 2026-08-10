@@ -193,11 +193,14 @@ _assert_hook_median_under \
   "$PRE_MCP" \
   '{"tool_name":"functions.exec_command","tool_input":{"cmd":"true"}}'
 
+# This synthetic 20-fragment path varied from 248ms to 513ms for the same hook
+# revision on hosted macOS runners. Keep enough host-load headroom to catch
+# gross classification regressions without failing on runner variance.
 _assert_hook_median_under \
   "pre-bash safe compound command stays fast" \
   "$PRE_BASH" \
   "$compound_input" \
-  "${AGENTGUARD_PERF_COMPOUND_MAX_MEDIAN_MS:-500}" \
+  "${AGENTGUARD_PERF_COMPOUND_MAX_MEDIAN_MS:-600}" \
   "${AGENTGUARD_PERF_COMPOUND_MAX_SAMPLE_MS:-1500}"
 
 _assert_hook_median_under \
