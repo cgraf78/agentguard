@@ -16,6 +16,8 @@ program	bin/agentguard-classify-command
 program	bin/claude-session-name
 program	examples/hooks/agent-hook-pre-bash-work
 program	install.sh
+program	scripts/checkout-installer.conf
+program	support/install-checkout.sh
 program	lib/agentguard/agentguard.sh
 program	lib/agentguard/detect.sh
 program	lib/agentguard/hook-command-classifier.sh

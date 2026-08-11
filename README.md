@@ -11,9 +11,19 @@ PATH-visible symlinks.
 The hooks are agent-agnostic and work with Claude Code, Codex, Gemini CLI, or
 another tool that follows the same hook protocol.
 
-## Install from a checkout
+## Install
 
-Keep the checkout at a stable path and run:
+```bash
+curl -fsSL https://raw.githubusercontent.com/cgraf78/agentguard/main/install.sh | bash
+```
+
+This keeps a durable managed checkout under `$XDG_DATA_HOME` when that path is
+absolute, or under `$HOME/.local/share` otherwise, and publishes links to its
+commands and manual pages. Rerunning the curl command safely updates the clean
+managed checkout before republishing the links.
+
+To choose and manage the checkout yourself instead, keep it at a stable path
+and run:
 
 ```bash
 ./install.sh
