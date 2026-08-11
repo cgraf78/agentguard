@@ -11,6 +11,27 @@ PATH-visible symlinks.
 The hooks are agent-agnostic and work with Claude Code, Codex, Gemini CLI, or
 another tool that follows the same hook protocol.
 
+## Install from a checkout
+
+Keep the checkout at a stable path and run:
+
+```bash
+./install.sh
+```
+
+The installer creates checkout-backed symlinks for every public command under
+`$HOME/.local/bin` and for each matching manual page under
+`$HOME/.local/share/man/man1`. Set `PREFIX` to relocate both trees, or set
+`BIN_DIR` and `MAN_DIR` independently. Re-running the installer is safe and
+retargets existing symlinks, but it refuses to replace a non-symlink path.
+Moving or deleting the checkout breaks the installed links.
+
+The direct command links preserve AgentGuard's secure-launcher boundary and
+allow consumer hook extensions to remain adjacent to the invoked links. The
+installer deliberately leaves `lib/agentguard/` and `share/agentguard/` in the
+checkout and creates no completion tree. Continue to resolve those non-binary
+assets through shdeps, or use their absolute paths in this checkout.
+
 ## Public API
 
 - `bin/agent-hook-*` files are the PATH-visible hook entry points.
