@@ -52,6 +52,7 @@ program	test/suites/agent-hook-helpers.sh
 program	test/suites/agent-hook-mcp-test
 program	test/suites/agent-hook-performance-test
 program	test/suites/agent-hook-session-test
+program	test/suites/agentguard-api-test
 program	test/suites/bootstrap-test
 program	test/suites/examples-test
 program	test/suites/integration-assets-test

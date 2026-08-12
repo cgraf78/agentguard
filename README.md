@@ -50,7 +50,8 @@ assets through shdeps, or use their absolute paths in this checkout.
 - `bin/claude-session-name` names Claude transcript sessions for
   `agent-hook-session-end-claude` and for manual transcript backfills.
 - `lib/agentguard/agentguard.sh` is the sourceable detection API for non-hook
-  callers.
+  callers. It exposes `agentguard_is_session`, `agentguard_agent_name`, and
+  `agentguard_session_id` so launchers share one runtime-identity contract.
 - `lib/agentguard/hook-helpers.sh` is the hook-runtime API used by hook entry
   points and hook extensions.
   Sourced extensions can read `AGENTGUARD_CMD_TRIMMED`,
@@ -83,6 +84,16 @@ dependency manager's contract:
 ```bash
 . "$(shdeps dep-file cgraf78/agentguard lib/agentguard/agentguard.sh)"
 ```
+
+`agentguard_session_id [fallback_namespace]` prints a caller-supplied
+`AGENTGUARD_SESSION_ID` first, then a native runtime id when one is available.
+For detected runtimes without a native id it returns a namespaced
+parent-process fallback, which is stable for the direct-call lifetime. The
+optional namespace labels only a generic fallback; native ids and
+runtime-specific fallbacks still win. With neither a detected runtime nor a
+caller namespace, an ordinary human shell returns status 1 and prints nothing.
+Hook entry points additionally have JSON payloads and therefore use their
+JSON-aware session-state layer in `hook-helpers.sh`.
 
 ## Native Agent Integrations
 

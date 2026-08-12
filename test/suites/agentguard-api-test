@@ -1,0 +1,136 @@
+#!/usr/bin/env bash
+# agentguard-api-test — public sourceable runtime-detection contract.
+
+set -u
+set -o pipefail
+export NO_COLOR=1
+
+TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+AGENTGUARD_ROOT="${TEST_DIR%/test}"
+AGENTGUARD_API="$AGENTGUARD_ROOT/lib/agentguard/agentguard.sh"
+
+# shellcheck disable=SC1091 # Runtime path is derived from the suite location.
+. "$TEST_DIR/helpers.sh"
+
+echo "=== agentguard public session identity ==="
+
+# Run every probe in a clean child environment. CI and local test runs commonly
+# inherit an agent identity from the process that launched the suite; allowing
+# that ambient identity into a public-API test would make the supposedly human
+# case depend on which agent happened to run it.
+_session_probe() {
+  # shellcheck disable=SC2016 # Child Bash expands the probe body.
+  env \
+    -u AGENTGUARD_NAME \
+    -u AGENTGUARD_SESSION_ID \
+    -u CODEX_THREAD_ID \
+    -u CODEX_INTERNAL_ORIGINATOR_OVERRIDE \
+    -u CLAUDE_CODE_CURRENT_SESSION_ID \
+    -u CLAUDE_CODE_SESSION_ID \
+    -u GEMINI_PROJECT_DIR \
+    -u AGENTGUARD_TEST_SESSION_NAMESPACE \
+    AGENTGUARD_PROCESS_DETECT=0 \
+    "$@" \
+    bash -c '
+      source "$1"
+      status=0
+      if [[ -n "${AGENTGUARD_TEST_SESSION_NAMESPACE:-}" ]]; then
+        session=$(agentguard_session_id "$AGENTGUARD_TEST_SESSION_NAMESPACE") || status=$?
+      else
+        session=$(agentguard_session_id) || status=$?
+      fi
+      printf "status=%s\n" "$status"
+      printf "ppid=%s\n" "$PPID"
+      printf "session=%s\n" "$session"
+    ' _ "$AGENTGUARD_API"
+}
+
+_probe_field() {
+  local probe="$1" field="$2" line
+  while IFS= read -r line; do
+    case "$line" in
+      "$field="*)
+        printf '%s\n' "${line#*=}"
+        return 0
+        ;;
+    esac
+  done <<<"$probe"
+  return 1
+}
+
+probe=$(_session_probe \
+  AGENTGUARD_SESSION_ID=neutral-session \
+  CODEX_THREAD_ID=codex-session \
+  CLAUDE_CODE_CURRENT_SESSION_ID=claude-session \
+  GEMINI_PROJECT_DIR=/tmp/project)
+_assert_eq "session id: neutral override wins" \
+  "neutral-session" "$(_probe_field "$probe" session)"
+
+probe=$(_session_probe CODEX_THREAD_ID=codex-session)
+_assert_eq "session id: Codex uses its thread id" \
+  "codex-session" "$(_probe_field "$probe" session)"
+
+probe=$(_session_probe CODEX_INTERNAL_ORIGINATOR_OVERRIDE=codex)
+probe_ppid=$(_probe_field "$probe" ppid)
+_assert_eq "session id: Codex without a thread uses its stable parent" \
+  "codex-$probe_ppid" "$(_probe_field "$probe" session)"
+
+probe=$(_session_probe \
+  CLAUDE_CODE_CURRENT_SESSION_ID=claude-current \
+  CLAUDE_CODE_SESSION_ID=claude-fallback)
+_assert_eq "session id: Claude current id wins" \
+  "claude-current" "$(_probe_field "$probe" session)"
+
+probe=$(_session_probe CLAUDE_CODE_SESSION_ID=claude-fallback)
+_assert_eq "session id: Claude accepts its subprocess id" \
+  "claude-fallback" "$(_probe_field "$probe" session)"
+
+probe=$(_session_probe GEMINI_PROJECT_DIR=/tmp/project)
+probe_ppid=$(_probe_field "$probe" ppid)
+_assert_eq "session id: Gemini uses its stable parent" \
+  "gemini-$probe_ppid" "$(_probe_field "$probe" session)"
+
+probe=$(_session_probe \
+  GEMINI_PROJECT_DIR=/tmp/project \
+  CLAUDE_CODE_CURRENT_SESSION_ID=claude-current)
+probe_ppid=$(_probe_field "$probe" ppid)
+_assert_eq "session id: Gemini identity wins over inherited Claude context" \
+  "gemini-$probe_ppid" "$(_probe_field "$probe" session)"
+
+probe=$(_session_probe \
+  AGENTGUARD_NAME=example-agent \
+  CODEX_THREAD_ID=codex-session)
+probe_ppid=$(_probe_field "$probe" ppid)
+_assert_eq "session id: explicit agent name controls synthetic identity" \
+  "example-agent-$probe_ppid" "$(_probe_field "$probe" session)"
+
+probe=$(_session_probe \
+  AGENTGUARD_TEST_SESSION_NAMESPACE=hive-label \
+  AGENTGUARD_NAME=example-agent)
+probe_ppid=$(_probe_field "$probe" ppid)
+_assert_eq "session id: caller can namespace a generic synthetic fallback" \
+  "hive-label-$probe_ppid" "$(_probe_field "$probe" session)"
+
+probe=$(_session_probe \
+  AGENTGUARD_TEST_SESSION_NAMESPACE=hive-label \
+  CODEX_INTERNAL_ORIGINATOR_OVERRIDE=codex)
+probe_ppid=$(_probe_field "$probe" ppid)
+_assert_eq "session id: caller namespace does not replace a runtime fallback" \
+  "codex-$probe_ppid" "$(_probe_field "$probe" session)"
+
+probe=$(_session_probe AGENTGUARD_TEST_SESSION_NAMESPACE=hive-label)
+probe_ppid=$(_probe_field "$probe" ppid)
+_assert_eq "session id: caller namespace can identify a compatible context" \
+  "hive-label-$probe_ppid" "$(_probe_field "$probe" session)"
+
+probe=$(_session_probe AGENTGUARD_SESSION_ID=neutral-session)
+_assert_eq "session id: neutral id works without a concrete agent name" \
+  "neutral-session" "$(_probe_field "$probe" session)"
+
+probe=$(_session_probe)
+_assert_eq "session id: unknown human shell returns no identity" \
+  "1" "$(_probe_field "$probe" status)"
+_assert_eq "session id: unknown human shell prints nothing" \
+  "" "$(_probe_field "$probe" session)"
+
+_test_summary

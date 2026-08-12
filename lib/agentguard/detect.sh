@@ -144,3 +144,58 @@ _agent_name() {
     echo "unknown"
   fi
 }
+
+# Print the best available session identity for a detected agent. This is the
+# non-hook counterpart to the JSON-aware session state in hook-helpers.sh:
+# direct child processes have no hook payload to consult, so they use stable
+# runtime environment ids where available and the long-lived parent otherwise.
+#
+# Keep this inference next to _agent_name so sourceable consumers cannot drift
+# into subtly different precedence rules. In particular, AGENTGUARD_NAME is an
+# explicit runtime selection: when it is present, inherited variables from an
+# outer or compatible agent must not silently change the synthetic identity.
+#
+# An optional caller namespace applies only to the generic parent fallback. It
+# lets an adapter retain its own public identity without duplicating this
+# precedence matrix. Native ids and runtime-specific fallbacks deliberately
+# ignore it so relabeling a Codex, Claude, or Gemini call cannot split one
+# runtime session into unrelated identities. Return 1 without output for an
+# ordinary human shell when the caller supplies no namespace.
+_agent_session_id() {
+  local fallback_namespace="${1:-}" name
+
+  if [ -n "${AGENTGUARD_SESSION_ID:-}" ]; then
+    printf '%s\n' "$AGENTGUARD_SESSION_ID"
+    return 0
+  fi
+
+  name=$(_agent_name)
+  case "$name" in
+    unknown)
+      if [ -n "$fallback_namespace" ]; then
+        printf '%s-%s\n' "$fallback_namespace" "$PPID"
+      else
+        return 1
+      fi
+      ;;
+    codex)
+      printf '%s\n' "${CODEX_THREAD_ID:-codex-$PPID}"
+      ;;
+    claude)
+      printf '%s\n' \
+        "${CLAUDE_CODE_CURRENT_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-claude-$PPID}}"
+      ;;
+    gemini)
+      # Gemini does not currently expose a durable session id to ordinary
+      # subprocesses. Its parent CLI remains stable for the direct-call
+      # lifetime, matching AgentGuard's hook fallback.
+      printf 'gemini-%s\n' "$PPID"
+      ;;
+    *)
+      # Compatible runtimes can opt in with AGENTGUARD_NAME even before they
+      # have a native stable-id variable. Namespacing the parent avoids cross-
+      # runtime collisions while keeping repeated direct calls correlated.
+      printf '%s-%s\n' "${fallback_namespace:-$name}" "$PPID"
+      ;;
+  esac
+}
