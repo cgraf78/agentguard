@@ -8,7 +8,8 @@ another tool that follows the same hook protocol.
 ## Public API
 
 - `agentguard.sh` is the sourceable detection API for scripts outside the hook
-  runtime.
+  runtime. It exposes `agentguard_is_session`, `agentguard_agent_name`, and
+  `agentguard_session_id`.
 - `agentguard-classify-command` is the supported command-line API for non-hook
   consumers that need AgentGuard's command classifier output as structured JSON.
 - `claude-session-name` is a PATH-visible helper used by
@@ -40,6 +41,24 @@ Use shdeps to locate sourceable files instead of reconstructing install paths:
 ```bash
 . "$(shdeps dep-file cgraf78/agentguard lib/agentguard/agentguard.sh)"
 ```
+
+The three functions deliberately separate detection from policy:
+
+- `agentguard_is_session` returns success when an agent runtime is present.
+- `agentguard_agent_name` prints the explicit or detected runtime name, or
+  `unknown`.
+- `agentguard_session_id [fallback_namespace]` prints the neutral override or
+  best runtime session id. Runtimes without a native id use a namespaced
+  parent-process fallback. The optional namespace lets a caller label only a
+  generic fallback without reimplementing runtime precedence; native ids and
+  Codex, Claude, or Gemini fallbacks remain runtime-owned. With neither a
+  detected runtime nor a caller namespace, an ordinary human shell returns
+  status 1 without output.
+
+Non-hook callers should consume these functions instead of independently
+interpreting runtime environment variables. Hook entry points can also inspect
+their JSON payload, so their richer session-state precedence remains in
+`hook-helpers.sh`.
 
 ## Dependencies
 

@@ -28,3 +28,12 @@ agentguard_is_session() {
 agentguard_agent_name() {
   _agent_name
 }
+
+# agentguard_session_id [fallback_namespace]
+#   Print the detected session id, or return 1 without output when the current
+#   process is not running under a known or explicitly named agent. An optional
+#   namespace identifies a caller-known context and names only generic
+#   parent-process fallbacks; native and runtime-specific identities still win.
+agentguard_session_id() {
+  _agent_session_id "$@"
+}
