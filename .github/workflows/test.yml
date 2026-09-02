@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   shell:
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@de3f6086e36a77eec8ee62f2c9871266e4b5c05c
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@dc7be3dcf6da264083f229d78818c2ad087a3d34
     with:
       matrix-set: full
       profiles: base,jq,python
@@ -38,7 +38,7 @@ jobs:
       # files, so `.github/cgraf78-actions.lock` cannot be interpolated. This gate
       # verifies every unavoidable cgraf78/actions literal still matches that
       # single reviewed dependency decision.
-      - uses: cgraf78/actions/.github/actions/verify-consumer-sync@de3f6086e36a77eec8ee62f2c9871266e4b5c05c
+      - uses: cgraf78/actions/.github/actions/verify-consumer-sync@dc7be3dcf6da264083f229d78818c2ad087a3d34
 
   opencode:
     name: Public OpenCode adapter
@@ -53,7 +53,7 @@ jobs:
 
       - name: Install pinned OpenCode
         shell: bash
-        run: |-
+        run: |- # zizmor: ignore[adhoc-packages]
           set -euo pipefail
           prefix="$RUNNER_TEMP/opencode"
           npm install --prefix "$prefix" --no-save --package-lock=false \
