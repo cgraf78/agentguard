@@ -2,14 +2,14 @@
 # hook-helpers.sh — shared helpers for AI agent hook scripts.
 # Source at the top of every hook. Provides accumulators for blocks,
 # warnings, and context, plus work-variant sourcing and final emission.
-# Agent-agnostic: works with Claude Code, Codex, Gemini CLI, or any
+# Agent-agnostic: works with Claude Code, Codex, Gemini CLI, Muse, or any
 # agent that follows the same hook protocol (JSON on stdout, exit 2
 # to block).
 #
 # Every base hook follows the same lifecycle:
 #   source helpers → base logic → _hook_source_extensions → _hook_finish
 # Order is most-general to most-specific: base (universal) → agent
-# (Claude/Codex/Gemini specific) → work (environment specific) → emit + exit.
+# (Claude/Codex/Gemini/Muse specific) → work (environment specific) → emit + exit.
 
 # --- State (computed once at source time, no subshells) ---
 
@@ -995,7 +995,7 @@ _hook_agent_name() {
 
 # --- Delegation ---
 
-# Sources the agent-specific extension (-claude, -codex, or -gemini)
+# Sources the agent-specific extension (-claude, -codex, -gemini, -muse)
 # based on which agent is running. Auto-discovers by appending the
 # agent name to the hook's own filename (e.g., hook-pre-bash-gemini).
 _hook_source_agent() {
@@ -1062,9 +1062,22 @@ _hook_finish_codex_stop() {
   printf '{}\n'
 }
 
+# Agents whose runners validate hook output strictly. They reject unknown
+# top-level fields such as the legacy `context` key and enforce a per-event
+# hookSpecificOutput schema, so they receive additionalContext only.
+_hook_strict_output_agent() {
+  case "$(_hook_agent_name)" in
+    codex | muse) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Emits one JSON response and exits. Must be the last call in every hook.
 # Emits legacy "context" for Claude plus Gemini-compatible additionalContext.
-# Codex uses strict per-event hookSpecificOutput schemas with no legacy fields.
+# Strict agents (Codex, Muse) use per-event hookSpecificOutput schemas with
+# no legacy fields. Only Codex requests suppressOutput; Muse managed hooks
+# emit additionalContext alone, and Muse has no documented suppressOutput
+# contract, so Muse output stays minimal.
 _hook_finish() {
   # Handle Codex Stop before the generic context/block branches. A Stop
   # extension can call _hook_block without adding _HOOK_CTX; falling through
@@ -1079,7 +1092,7 @@ _hook_finish() {
   esac
 
   if [ -n "$_HOOK_CTX" ]; then
-    if [ "$(_hook_agent_name)" = "codex" ]; then
+    if _hook_strict_output_agent; then
       local hook_event_name
       hook_event_name=$(_hook_event_name)
       if [ -n "$_HOOK_BLOCKED" ]; then
@@ -1093,7 +1106,7 @@ _hook_finish() {
         # Successful context-injection hooks are intentionally quiet. Codex
         # still receives additionalContext, but the transcript does not get a
         # repetitive "hook context" status block after every prompt.
-        if _hook_codex_supports_suppress_output "$hook_event_name"; then
+        if [ "$(_hook_agent_name)" = "codex" ] && _hook_codex_supports_suppress_output "$hook_event_name"; then
           printf '%s' "$_HOOK_CTX" | jq -Rsc --arg hook_event_name "$hook_event_name" '{
             suppressOutput: true,
             hookSpecificOutput: {

@@ -2488,6 +2488,82 @@ _assert_eq "hook_finish: Codex thread output includes hookEventName" "0" "$?"
 echo "$codex_thread_json" | jq -e '.hookSpecificOutput.additionalContext == "hello world"' >/dev/null 2>&1
 _assert_eq "hook_finish: Codex thread output includes additionalContext" "0" "$?"
 
+# Muse validates hook output strictly: the legacy top-level `context` field
+# is rejected (UserPromptSubmit fails with "unsupported `context`"), and
+# emitting it also doubles SessionStart output past the 16KB ceiling.
+# Managed Muse hooks emit hookSpecificOutput.additionalContext only, with
+# no suppressOutput, so Muse receives exactly that shape.
+muse_ctx_json=$(
+  AGENTGUARD_NAME="muse"
+  export AGENTGUARD_NAME
+  _HOOK_SELF="$BIN_DIR/agent-hook-prompt-submit"
+  source "$HELPERS"
+  _hook_context "hello world"
+  _hook_finish 2>/dev/null
+)
+echo "$muse_ctx_json" | jq -e 'has("context") | not' >/dev/null 2>&1
+_assert_eq "hook_finish: Muse output omits legacy context field" "0" "$?"
+echo "$muse_ctx_json" | jq -e 'has("suppressOutput") | not' >/dev/null 2>&1
+_assert_eq "hook_finish: Muse output omits suppressOutput" "0" "$?"
+echo "$muse_ctx_json" | jq -e '.hookSpecificOutput.hookEventName == "UserPromptSubmit"' >/dev/null 2>&1
+_assert_eq "hook_finish: Muse output includes hookEventName" "0" "$?"
+echo "$muse_ctx_json" | jq -e '.hookSpecificOutput.additionalContext == "hello world"' >/dev/null 2>&1
+_assert_eq "hook_finish: Muse output includes additionalContext" "0" "$?"
+
+# The strict shape also applies to SessionStart, where the duplicated
+# `context` copy pushed real Hive Memory output past the 16KB ceiling.
+muse_session_json=$(
+  AGENTGUARD_NAME="muse"
+  export AGENTGUARD_NAME
+  _HOOK_SELF="$BIN_DIR/agent-hook-session-start"
+  source "$HELPERS"
+  _hook_context "hello world"
+  _hook_finish 2>/dev/null
+)
+echo "$muse_session_json" | jq -e 'has("context") | not' >/dev/null 2>&1
+_assert_eq "hook_finish: Muse SessionStart omits legacy context field" "0" "$?"
+echo "$muse_session_json" | jq -e '.hookSpecificOutput.hookEventName == "SessionStart"' >/dev/null 2>&1
+_assert_eq "hook_finish: Muse SessionStart includes hookEventName" "0" "$?"
+
+# A 15KB context body fits the 16KB hook ceiling exactly once. The legacy
+# shape duplicated it into `context` and `additionalContext` (~30KB) and
+# failed; the strict Muse shape must stay under the ceiling.
+muse_big_body=$(printf 'x%.0s' $(seq 1 15000))
+muse_big_json=$(
+  AGENTGUARD_NAME="muse"
+  export AGENTGUARD_NAME
+  _HOOK_SELF="$BIN_DIR/agent-hook-session-start"
+  source "$HELPERS"
+  _hook_context "$muse_big_body"
+  _hook_finish 2>/dev/null
+)
+muse_big_bytes=$(printf '%s' "$muse_big_json" | wc -c)
+if [ "$muse_big_bytes" -lt 16384 ]; then
+  muse_big_status=0
+else
+  muse_big_status=1
+fi
+_assert_eq "hook_finish: Muse 15KB context fits hook output ceiling" "0" "$muse_big_status"
+echo "$muse_big_json" | jq -e 'has("context") | not' >/dev/null 2>&1
+_assert_eq "hook_finish: Muse 15KB output omits legacy context field" "0" "$?"
+
+# A blocked Muse hook keeps the strict shape and still exits 2.
+muse_block_rc=0
+muse_block_json=$(
+  AGENTGUARD_NAME="muse"
+  export AGENTGUARD_NAME
+  _HOOK_SELF="$BIN_DIR/agent-hook-prompt-submit"
+  source "$HELPERS"
+  _hook_context "hello world"
+  _hook_block "need input"
+  _hook_finish
+) 2>/dev/null || muse_block_rc=$?
+_assert_eq "hook_finish: Muse blocked hook exits 2" "2" "$muse_block_rc"
+echo "$muse_block_json" | jq -e 'has("context") | not' >/dev/null 2>&1
+_assert_eq "hook_finish: Muse blocked output omits legacy context field" "0" "$?"
+echo "$muse_block_json" | jq -e '.hookSpecificOutput.additionalContext == "hello world"' >/dev/null 2>&1
+_assert_eq "hook_finish: Muse blocked output includes additionalContext" "0" "$?"
+
 # _hook_finish still emits valid JSON when no context and no block
 empty_out=$(
   source "$HELPERS"

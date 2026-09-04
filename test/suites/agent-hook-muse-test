@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# agent-hook-muse-test — Muse hook behavior and settings.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+# ---------------------------------------------------------------------------
+# Tests: hooks under Muse env (end-to-end)
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== muse env: end-to-end hooks ==="
+
+# session-start under Muse env must not emit the legacy top-level `context`
+# field: Muse rejects it ("unsupported `context`"), and the duplicated copy
+# pushed real Hive Memory output past the 16KB hook ceiling. A dirty fixture
+# repo guarantees context is present so the shape assertion is not vacuous.
+MOCK_MUSE_GIT=$(_tmpdir)
+_install_hook_fixture "$MOCK_MUSE_GIT" agent-hook-session-start
+git init "$MOCK_MUSE_GIT/repo" >/dev/null 2>&1
+touch "$MOCK_MUSE_GIT/repo/newfile"
+muse_ss_out=$(
+  cd "$MOCK_MUSE_GIT/repo" &&
+    AGENTGUARD_NAME="muse" \
+      AGENTGUARD_SESSION_ID="$TEST_SID-muse" \
+      TMPDIR="$TEST_TMPDIR" \
+      "$MOCK_MUSE_GIT/bin/agent-hook-session-start" </dev/null 2>/dev/null
+)
+echo "$muse_ss_out" | jq -e 'has("context") | not' >/dev/null 2>&1
+_assert_eq "muse: session-start omits legacy context field" "0" "$?"
+echo "$muse_ss_out" | jq -e '.hookSpecificOutput.additionalContext | contains("Uncommitted changes")' >/dev/null 2>&1
+_assert_eq "muse: session-start emits additionalContext" "0" "$?"
+# The 16KB ceiling is covered deterministically at the _hook_finish unit
+# level (15KB synthetic body in agent-hook-helpers-test): this fixture is
+# one untracked file with Hive Memory disabled, so a byte count here could
+# never approach the ceiling and would pass vacuously.
+
+_test_summary
