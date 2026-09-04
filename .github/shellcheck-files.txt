@@ -50,6 +50,7 @@ program	test/suites/agent-hook-gemini-test
 program	test/suites/agent-hook-helpers-test
 program	test/suites/agent-hook-helpers.sh
 program	test/suites/agent-hook-mcp-test
+program	test/suites/agent-hook-muse-test
 program	test/suites/agent-hook-performance-test
 program	test/suites/agent-hook-session-test
 program	test/suites/agentguard-api-test
