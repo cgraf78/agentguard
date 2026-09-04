@@ -8,8 +8,8 @@
 `agentguard` owns shared helper code and reusable entry points for
 `agent-hook-*` scripts. `shdeps` installs the executable files in `bin/` as
 PATH-visible symlinks.
-The hooks are agent-agnostic and work with Claude Code, Codex, Gemini CLI, or
-another tool that follows the same hook protocol.
+The hooks are agent-agnostic and work with Claude Code, Codex, Gemini CLI,
+Muse, or another tool that follows the same hook protocol.
 
 ## Install
 
