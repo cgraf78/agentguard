@@ -89,3 +89,12 @@ exercises the executable adapter's complete callback surface and failure
 behavior. Downstream consumers should test only their merge or installation
 mechanics plus a small end-to-end wiring smoke test; duplicating AgentGuard's
 protocol suite would let the copies drift independently.
+
+## Adding a runtime
+
+1. Add `integrations/<name>/` with a `README.md`, a row in the asset table above,
+   and one native fragment (`hooks.json`, `hooks.toml`, or a plugin adapter).
+2. Self-identify with `AGENTGUARD_NAME=<name>` in every hook command; no
+   `detect.sh` change is needed unless the runtime needs auto-detection.
+3. Add an optional `$hook-<name>` extension only if a hook needs
+   runtime-specific behavior (`_hook_source_agent` discovers it by filename).

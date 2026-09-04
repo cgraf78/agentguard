@@ -237,4 +237,28 @@ else
   _fail "integration reconciliation: refreshes only the selected provider hooks"
 fi
 
+echo ""
+echo "=== integration inventory ==="
+
+# Every shipped runtime dir must be a complete integration: adding a new
+# runtime dir without its promised assets must fail this suite. _shared is
+# provider-agnostic plumbing, not a runtime, so it is excluded.
+checked=0
+for dir in "$root/share/agentguard/integrations/"*/; do
+  name=$(basename "$dir")
+  [[ "$name" == _shared || "$name" == README.md ]] && continue
+  checked=$((checked + 1))
+  _assert_file_exists "integration inventory: $name ships README.md" "$dir/README.md"
+  if [[ -f "$dir/hooks.json" || -f "$dir/hooks.toml" || -f "$dir/agentguard.js" ]]; then
+    _pass "integration inventory: $name ships a native asset (hooks.json/hooks.toml/agentguard.js)"
+  else
+    _fail "integration inventory: $name ships a native asset (hooks.json/hooks.toml/agentguard.js) (none found in $dir)"
+  fi
+done
+if [[ "$checked" -gt 0 ]]; then
+  _pass "integration inventory: scanned $checked runtime dirs"
+else
+  _fail "integration inventory: scanned $checked runtime dirs (expected at least one runtime dir)"
+fi
+
 _test_summary
