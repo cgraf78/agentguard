@@ -91,6 +91,9 @@ expected = {
     },
     "grok": {
         "Notification": [("", "agent-hook-notification", None)],
+        "PostToolUseFailure": [
+            ("mcp__|.+__", "agent-hook-post-mcp", 10),
+        ],
         "PostToolUse": [
             ("Edit|Write|search_replace", "agent-hook-post-edit", 60),
             ("Bash|run_terminal_command", "agent-hook-post-bash", 120),

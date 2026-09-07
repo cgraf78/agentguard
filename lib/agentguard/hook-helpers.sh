@@ -238,7 +238,7 @@ _hook_stop_active() {
   [ -n "${_HOOK_INPUT:-}" ] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   printf '%s' "$_HOOK_INPUT" |
-    jq -e '.stop_hook_active == true' >/dev/null 2>&1
+    jq -e '.stop_hook_active == true or .stopHookActive == true' >/dev/null 2>&1
 }
 
 # Atomically claim the one audible notification in a prompt cycle. Unlike
@@ -1111,6 +1111,14 @@ _hook_finish() {
     agent-hook-stop*)
       if [ "$(_hook_agent_name)" = "codex" ]; then
         _hook_finish_codex_stop
+        exit 0
+      fi
+      if [ "$(_hook_agent_name)" = "grok" ]; then
+        # Grok Stop additionalContext is non-error keep-working feedback, not
+        # a silent annotation. Hive Memory or git context must not retrigger
+        # the turn the way a Claude-shaped dual payload would.
+        printf '{}\n'
+        [ -n "$_HOOK_BLOCKED" ] && exit 2
         exit 0
       fi
       ;;

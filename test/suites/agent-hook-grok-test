@@ -50,4 +50,21 @@ _run_hook_grok "$POST_MCP" '{"toolName":"gsrv__tool","tool_result_is_error":fals
 _run_hook_grok "$PRE_MCP" '{"toolName":"gsrv__tool","toolInput":{}}'
 _assert_eq "grok: circuit breaker resets after success" "0" "$HOOK_EXIT"
 
+rm -rf "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID-grok"
+_run_hook_grok "$POST_MCP" '{"toolName":"gsrv__tool","isError":true}'
+_run_hook_grok "$POST_MCP" '{"toolName":"gsrv__tool","isError":true}'
+_run_hook_grok "$POST_MCP" '{"toolName":"gsrv__tool","isError":true}'
+_run_hook_grok "$PRE_MCP" '{"toolName":"gsrv__tool","toolInput":{}}'
+_assert_eq "grok: circuit breaker accepts isError" "2" "$HOOK_EXIT"
+
+grok_stop_out=$(
+  GROK_SESSION_ID="$TEST_SID-grok" \
+    AGENTGUARD_NAME="grok" \
+    AGENTGUARD_SESSION_ID="$TEST_SID-grok" \
+    TMPDIR="$TEST_TMPDIR" \
+    "$BIN_DIR/agent-hook-stop" </dev/null 2>/dev/null
+)
+echo "$grok_stop_out" | jq -e '. == {}' >/dev/null 2>&1
+_assert_eq "grok: Stop emits empty JSON instead of keep-working context" "0" "$?"
+
 _test_summary

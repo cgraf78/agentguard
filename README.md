@@ -105,6 +105,7 @@ AgentGuard publishes native, policy-free integration assets:
 | Claude Code | `share/agentguard/integrations/claude/hooks.json` |
 | Codex | `share/agentguard/integrations/codex/hooks.toml` |
 | Gemini CLI | `share/agentguard/integrations/gemini/hooks.json` |
+| Grok | `share/agentguard/integrations/grok/hooks.json` |
 | Muse | `share/agentguard/integrations/muse/hooks.json` |
 | OpenCode | `share/agentguard/integrations/opencode/agentguard.js` |
 
@@ -236,8 +237,8 @@ while `_HOOK_BIN_DIR` resolves through that symlink to load dependency libraries
 
 Extension scripts are sourced, not executed:
 
-- `-claude`, `-codex`, and `-gemini` files are selected from agent-specific
-  environment variables.
+- `-claude`, `-codex`, `-gemini`, `-muse`, and `-grok` files are selected from
+  agent-specific environment variables.
 - `-work` files are environment-specific overlays.
 
 Each hook emits one JSON response through `_hook_finish`.
@@ -267,8 +268,9 @@ after hook JSON is read. A neutral `AGENTGUARD_SESSION_ID` wins when a launcher
 supplies one. Managed Codex hooks prefer JSON `session_id` after stdin is
 available, because nested Codex launches can inherit an outer
 `CODEX_THREAD_ID`. Without JSON, Codex uses `CODEX_THREAD_ID` or its parent
-process key, Claude uses `CLAUDE_CODE_CURRENT_SESSION_ID`, Gemini uses
-`gemini-$PPID`, and unknown agents fall back to `$$`.
+process key, Grok uses `GROK_SESSION_ID` or `grok-$PPID`, Claude uses
+`CLAUDE_CODE_CURRENT_SESSION_ID`, Gemini uses `gemini-$PPID`, and unknown
+agents fall back to `$$`.
 
 The state root itself is per-user, never a shared, predictable `/tmp`
 directory: an absolute `$XDG_RUNTIME_DIR/agentguard/hook-state` when available

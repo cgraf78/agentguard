@@ -11,6 +11,18 @@
         "matcher": ""
       }
     ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-post-mcp",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "mcp__|.+__"
+      }
+    ],
     "PostToolUse": [
       {
         "hooks": [

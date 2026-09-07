@@ -13,6 +13,12 @@ aliases (Grok maps `Bash` to `run_terminal_command` and `Edit`/`Write` to
 expansion is disabled. MCP uses `mcp__|.+__` because Grok's real tool name is
 the qualified `server__tool` id, not Claude's `mcp__` prefix.
 
+Grok reports failed tool calls on `PostToolUseFailure` rather than
+`PostToolUse`, so MCP circuit-breaker tracking is wired to that event as well
+as successful post-tool MCP calls. Grok Stop `additionalContext` keeps the
+agent working, so Stop hooks stay fail-open empty JSON instead of injecting
+Hive Memory context.
+
 The fragment contains no permission rules, models, MCP servers, or other user
 settings. Consume it with `../_shared/reconcile-hooks.jq` as one
 provider-owned generation, then put personal or machine policy in a separate
