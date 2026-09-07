@@ -2,14 +2,14 @@
 # hook-helpers.sh — shared helpers for AI agent hook scripts.
 # Source at the top of every hook. Provides accumulators for blocks,
 # warnings, and context, plus work-variant sourcing and final emission.
-# Agent-agnostic: works with Claude Code, Codex, Gemini CLI, Muse, or any
+# Agent-agnostic: works with Claude Code, Codex, Gemini CLI, Muse, Grok, or any
 # agent that follows the same hook protocol (JSON on stdout, exit 2
 # to block).
 #
 # Every base hook follows the same lifecycle:
 #   source helpers → base logic → _hook_source_extensions → _hook_finish
 # Order is most-general to most-specific: base (universal) → agent
-# (Claude/Codex/Gemini/Muse specific) → work (environment specific) → emit + exit.
+# (Claude/Codex/Gemini/Muse/Grok specific) → work (environment specific) → emit + exit.
 
 # --- State (computed once at source time, no subshells) ---
 
@@ -63,7 +63,7 @@ source "$_AGENTGUARD_LIB_DIR/detect.sh"
 _hook_codex_process_key() {
   case "${AGENTGUARD_NAME:-}" in
     codex) ;;
-    claude | gemini) return 1 ;;
+    claude | gemini | grok) return 1 ;;
     *)
       [ -n "${CODEX_THREAD_ID:-}" ] || [ "${CODEX_INTERNAL_ORIGINATOR_OVERRIDE:-}" = "codex" ] ||
         [ "${AGENTGUARD_PROCESS_DETECT:-1}" != "0" ] || return 1
@@ -130,15 +130,19 @@ _hook_mkstate() {
 # user launches nested Codex, so once Codex JSON has been read its session_id is
 # the authoritative key. If Codex does not expose one, managed hooks fall back
 # to the long-lived Codex parent process instead of each short-lived hook
-# process. Gemini also lacks a durable id, so its parent CLI process remains
-# the key. Other hook runners may only provide a JSON session_id on stdin;
-# parsers refresh after reading it. Empty or session-less JSON must still fall
-# through to the Codex process key; otherwise reading a closed stdin would
-# downgrade an already-stable session to this one hook process.
+# process. Grok injects GROK_SESSION_ID on hook processes; Gemini lacks a
+# durable id, so its parent CLI process remains the key. Other hook runners
+# may only provide a JSON session_id / sessionId on stdin; parsers refresh
+# after reading it. Empty or session-less JSON must still fall through to the
+# Codex process key; otherwise reading a closed stdin would downgrade an
+# already-stable session to this one hook process.
 _hook_refresh_state_dir() {
   local session_key='' input_session='' codex_key=''
   if [ -n "${_HOOK_INPUT+x}" ]; then
-    input_session=$(printf '%s' "$_HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+    # Grok's hook envelope is camelCase (sessionId); Claude/Codex remain
+    # snake_case. Prefer snake_case so an existing runtime stays authoritative
+    # if a payload ever contains both.
+    input_session=$(printf '%s' "$_HOOK_INPUT" | jq -r '.session_id // .sessionId // empty' 2>/dev/null)
   fi
 
   if [ "${AGENTGUARD_NAME:-}" = "codex" ] && [ -n "$input_session" ]; then
@@ -147,6 +151,8 @@ _hook_refresh_state_dir() {
     session_key="$AGENTGUARD_SESSION_ID"
   elif [ -n "${CODEX_THREAD_ID:-}" ]; then
     session_key="$CODEX_THREAD_ID"
+  elif [ -n "${GROK_SESSION_ID:-}" ]; then
+    session_key="$GROK_SESSION_ID"
   elif [ "${AGENTGUARD_NAME:-}" != "codex" ] && [ -n "${CLAUDE_CODE_CURRENT_SESSION_ID:-}" ]; then
     session_key="$CLAUDE_CODE_CURRENT_SESSION_ID"
   elif [ -n "$input_session" ]; then
@@ -155,6 +161,8 @@ _hook_refresh_state_dir() {
 
   if [ -z "$session_key" ] && codex_key=$(_hook_codex_process_key); then
     session_key="$codex_key"
+  elif [ -z "$session_key" ] && [ "${AGENTGUARD_NAME:-}" = "grok" ]; then
+    session_key="grok-$PPID"
   elif [ -z "$session_key" ] && [ -n "${GEMINI_PROJECT_DIR:-}" ]; then
     session_key="gemini-$PPID"
   fi
@@ -230,7 +238,7 @@ _hook_stop_active() {
   [ -n "${_HOOK_INPUT:-}" ] || return 1
   command -v jq >/dev/null 2>&1 || return 1
   printf '%s' "$_HOOK_INPUT" |
-    jq -e '.stop_hook_active == true' >/dev/null 2>&1
+    jq -e '.stop_hook_active == true or .stopHookActive == true' >/dev/null 2>&1
 }
 
 # Atomically claim the one audible notification in a prompt cycle. Unlike
@@ -418,7 +426,7 @@ _hook_parse_command() {
     exit 0
   fi
   local cmd
-  cmd=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_input.command // .tool_input.cmd // empty' 2>/dev/null)
+  cmd=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_input.command // .tool_input.cmd // .toolInput.command // .toolInput.cmd // empty' 2>/dev/null)
   # Valid JSON but no command field: there is nothing to run, so nothing to guard.
   [ -z "$cmd" ] && exit 0
   AGENTGUARD_CMD_TRIMMED=$(printf '%s' "$cmd" | sed 's/^[[:space:]]*//')
@@ -440,6 +448,7 @@ _hook_tool_stdout() {
     [
       text_value(.tool_response.stdout?),
       text_value(.tool_result.stdout?),
+      text_value(.toolResult.stdout?),
       text_value(.tool_output.stdout?),
       text_value(.response.stdout?),
       text_value(.result.stdout?),
@@ -459,16 +468,18 @@ _hook_parse_edit_files() {
     return 0
   fi
   AGENTGUARD_EDIT_FILES=$(printf '%s' "$_HOOK_INPUT" | jq -r '
+    def tool_payload:
+      .tool_input // .toolInput;
     def patch_text:
-      if (.tool_input | type) == "string" then .tool_input
-      elif (.tool_input | type) == "object" then
-        (.tool_input.patch // .tool_input.input // .tool_input.diff // empty)
+      if (tool_payload | type) == "string" then tool_payload
+      elif (tool_payload | type) == "object" then
+        (tool_payload.patch // tool_payload.input // tool_payload.diff // empty)
       else empty end;
     def first_seen:
       reduce .[] as $item ([]; if index($item) then . else . + [$item] end);
     [
-      (.tool_input.file_path? // empty),
-      (.tool_input.path? // empty),
+      (tool_payload.file_path? // empty),
+      (tool_payload.path? // empty),
       (patch_text | strings | split("\n")[] |
         select(test("^\\*\\*\\* (Update|Add|Delete) File: |^\\*\\*\\* Move to: ")) |
         sub("^\\*\\*\\* (Update|Add|Delete) File: "; "") |
@@ -486,17 +497,24 @@ _hook_parse_edit_files() {
 _hook_parse_mcp() {
   _hook_read_input || exit 0
   local tool_name remainder
-  tool_name=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_name // empty')
+  tool_name=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_name // .toolName // empty')
   [ -z "$tool_name" ] && exit 0
   case "$tool_name" in
-    mcp__*__*) ;;
+    mcp__*__*)
+      remainder="${tool_name#mcp__}"
+      _HOOK_MCP_SERVER="${remainder%__*}"
+      _HOOK_MCP_TOOL_NAME="${remainder##*__}"
+      ;;
+    *__*)
+      # Grok (and Cursor-compat) MCP calls arrive as qualified server__tool
+      # names, not Claude's mcp__server__tool prefix. Split on the first
+      # separator so a tool name that itself contains __ stays intact.
+      _HOOK_MCP_SERVER="${tool_name%%__*}"
+      _HOOK_MCP_TOOL_NAME="${tool_name#*__}"
+      ;;
     *) exit 0 ;;
   esac
-
-  remainder="${tool_name#mcp__}"
-  _HOOK_MCP_SERVER="${remainder%__*}"
   [ -z "$_HOOK_MCP_SERVER" ] && exit 0
-  _HOOK_MCP_TOOL_NAME="${remainder##*__}"
   [ -z "$_HOOK_MCP_TOOL_NAME" ] && exit 0
 
   _HOOK_MCP_TOOL="$tool_name"
@@ -583,7 +601,11 @@ _hook_hm_project_hint() {
         .tool_input.file_path?,
         .tool_input.path?,
         .tool_input.cwd?,
+        .toolInput.file_path?,
+        .toolInput.path?,
+        .toolInput.cwd?,
         .cwd?,
+        .workspaceRoot?,
         .workspace.current_dir?,
         .project_dir?
       ] | map(select(type == "string" and . != "")) | .[0] // empty
@@ -608,7 +630,8 @@ _hook_hm_prompt_text() {
       .user_prompt?,
       .message?,
       .input?,
-      .tool_input.prompt?
+      .tool_input.prompt?,
+      .toolInput.prompt?
     ]
     | map(select(type == "string" and . != ""))
     | .[0] // empty
@@ -635,6 +658,8 @@ _hook_hm_tool_status() {
     // .tool_response.status
     // .tool_result.exit_code
     // .tool_result.status
+    // .toolResult.exit_code
+    // .toolResult.status
     // .tool_result_is_error
     // .status
     // 0
@@ -995,7 +1020,7 @@ _hook_agent_name() {
 
 # --- Delegation ---
 
-# Sources the agent-specific extension (-claude, -codex, -gemini, -muse)
+# Sources the agent-specific extension (-claude, -codex, -gemini, -muse, -grok)
 # based on which agent is running. Auto-discovers by appending the
 # agent name to the hook's own filename (e.g., hook-pre-bash-gemini).
 _hook_source_agent() {
@@ -1086,6 +1111,14 @@ _hook_finish() {
     agent-hook-stop*)
       if [ "$(_hook_agent_name)" = "codex" ]; then
         _hook_finish_codex_stop
+        exit 0
+      fi
+      if [ "$(_hook_agent_name)" = "grok" ]; then
+        # Grok Stop additionalContext is non-error keep-working feedback, not
+        # a silent annotation. Hive Memory or git context must not retrigger
+        # the turn the way a Claude-shaped dual payload would.
+        printf '{}\n'
+        [ -n "$_HOOK_BLOCKED" ] && exit 2
         exit 0
       fi
       ;;

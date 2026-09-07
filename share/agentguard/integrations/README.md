@@ -24,6 +24,7 @@ different configuration-management strategies.
 | Claude Code | `claude/hooks.json` | Hook-only JSON settings fragment |
 | Codex | `codex/hooks.toml` | Hook activation and hook-only TOML fragment |
 | Gemini CLI | `gemini/hooks.json` | Hook-only JSON settings fragment |
+| Grok | `grok/hooks.json` | Hook-only JSON settings fragment |
 | Muse | `muse/hooks.json` | Supported hook-only JSON settings fragment |
 | OpenCode | `opencode/agentguard.js` | Native plugin adapter |
 
@@ -76,8 +77,9 @@ network failure must not silently remove security hooks from an otherwise valid
 installation.
 
 AgentGuard publishes assets but does not mutate `~/.claude`, `~/.codex`,
-`~/.gemini`, `~/.config/muse`, or `~/.config/opencode`. Consumers retain control
-over activation, merge ordering, ownership markers, and rollback behavior.
+`~/.gemini`, `~/.grok`, `~/.config/muse`, or `~/.config/opencode`. Consumers
+retain control over activation, merge ordering, ownership markers, and
+rollback behavior.
 
 ## Compatibility Tests
 
@@ -94,7 +96,9 @@ protocol suite would let the copies drift independently.
 
 1. Add `integrations/<name>/` with a `README.md`, a row in the asset table above,
    and one native fragment (`hooks.json`, `hooks.toml`, or a plugin adapter).
-2. Self-identify with `AGENTGUARD_NAME=<name>` in every hook command; no
-   `detect.sh` change is needed unless the runtime needs auto-detection.
+2. Self-identify with `AGENTGUARD_NAME=<name>` in every hook command. Add
+   `detect.sh` auto-detection when the runtime exports a stable env var or
+   needs process-tree fallback for unmanaged child processes (Grok uses
+   `GROK_SESSION_ID` plus the `grok` binary name).
 3. Add an optional `$hook-<name>` extension only if a hook needs
    runtime-specific behavior (`_hook_source_agent` discovers it by filename).

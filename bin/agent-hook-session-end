@@ -34,8 +34,8 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
 # END GENERATED LAUNCHER BOOTSTRAP
 
 _hook_read_input || exit 0
-sid=$(printf '%s' "$_HOOK_INPUT" | jq -r '.session_id // empty')
-tp=$(printf '%s' "$_HOOK_INPUT" | jq -r '.transcript_path // empty')
+sid=$(printf '%s' "$_HOOK_INPUT" | jq -r '.session_id // .sessionId // empty')
+tp=$(printf '%s' "$_HOOK_INPUT" | jq -r '.transcript_path // .transcriptPath // empty')
 export sid tp
 
 [ -z "$sid" ] && exit 0

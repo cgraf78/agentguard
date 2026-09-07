@@ -3,7 +3,7 @@
 `agentguard` owns shared helper code for `agent-hook-*` scripts. `shdeps`
 installs the executable files in `bin/` as PATH-visible symlinks.
 The hooks are agent-agnostic and work with Claude Code, Codex, Gemini CLI,
-Muse, or another tool that follows the same hook protocol. Muse validates
+Grok, Muse, or another tool that follows the same hook protocol. Muse validates
 hook output strictly, so it receives the Codex-style
 `hookSpecificOutput.additionalContext` shape with no legacy `context` field
 and no `suppressOutput` (see `_hook_strict_output_agent`).
@@ -54,7 +54,7 @@ The three functions deliberately separate detection from policy:
   best runtime session id. Runtimes without a native id use a namespaced
   parent-process fallback. The optional namespace lets a caller label only a
   generic fallback without reimplementing runtime precedence; native ids and
-  Codex, Claude, Gemini, or Muse fallbacks remain runtime-owned. With neither a
+  Codex, Claude, Gemini, Grok, or Muse fallbacks remain runtime-owned. With neither a
   detected runtime nor a caller namespace, an ordinary human shell returns
   status 1 without output.
 
@@ -153,7 +153,7 @@ while `_HOOK_BIN_DIR` resolves through that symlink to load dependency libraries
 
 Extension scripts are sourced, not executed:
 
-- `-claude`, `-codex`, `-gemini`, and `-muse` files are selected from
+- `-claude`, `-codex`, `-gemini`, `-muse`, and `-grok` files are selected from
   agent-specific environment variables.
 - `-work` files are environment-specific overlays.
 
@@ -184,8 +184,9 @@ after hook JSON is read. A neutral `AGENTGUARD_SESSION_ID` wins when a launcher
 supplies one. Managed Codex hooks prefer JSON `session_id` after stdin is
 available, because nested Codex launches can inherit an outer
 `CODEX_THREAD_ID`. Without JSON, Codex uses `CODEX_THREAD_ID` or its parent
-process key, Claude uses `CLAUDE_CODE_CURRENT_SESSION_ID`, Gemini uses
-`gemini-$PPID`, and unknown agents fall back to `$$`.
+process key, Grok uses `GROK_SESSION_ID` or `grok-$PPID`, Claude uses
+`CLAUDE_CODE_CURRENT_SESSION_ID`, Gemini uses `gemini-$PPID`, and unknown
+agents fall back to `$$`.
 
 The state root itself is per-user, never a shared, predictable `/tmp`
 directory: an absolute `$XDG_RUNTIME_DIR/agentguard/hook-state` when available

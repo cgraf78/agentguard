@@ -15,7 +15,8 @@ export AGENTGUARD_PROCESS_DETECT=0
 # hermetic regardless of which agent runs the suite. Tests that need a signal set
 # it explicitly in their own subshell.
 unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID \
-  CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR
+  CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR \
+  GROK_SESSION_ID GROK_HOOK_EVENT GROK_WORKSPACE_ROOT GROK_HOOK_NAME
 # The hook state root resolves from XDG_RUNTIME_DIR/XDG_STATE_HOME, and the
 # protected-bare classifier cache resolves from XDG_CACHE_HOME. Scrub the ambient
 # values (devservers set XDG_RUNTIME_DIR=/run/user/<uid>) so nothing leaks into
@@ -207,6 +208,22 @@ _run_hook_gemini() {
     AGENTGUARD_SESSION_ID=
     CLAUDE_CODE_CURRENT_SESSION_ID=
     AGENTGUARD_NAME="gemini"
+    TMPDIR="$TEST_TMPDIR"
+  )
+  _run_hook_env "$@"
+}
+
+# Run a hook with Grok env vars. Grok injects GROK_SESSION_ID on hook
+# processes and sends camelCase envelopes; tests that need that payload pass
+# it as stdin rather than relying on this helper to rewrite JSON.
+_run_hook_grok() {
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    GROK_SESSION_ID="$TEST_SID-grok"
+    AGENTGUARD_SESSION_ID="$TEST_SID-grok"
+    AGENTGUARD_NAME="grok"
+    CLAUDE_CODE_CURRENT_SESSION_ID=
+    CLAUDE_CODE_SESSION_ID=
     TMPDIR="$TEST_TMPDIR"
   )
   _run_hook_env "$@"

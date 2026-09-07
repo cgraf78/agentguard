@@ -37,7 +37,7 @@ _hook_parse_mcp
 
 # Track consecutive failures per server so the pre-mcp circuit breaker
 # can block calls to a down server. Reset on any success.
-is_error=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_result_is_error // false')
+is_error=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_result_is_error // .isError // false')
 
 if [ "$is_error" = "true" ]; then
   _hook_counter_increment "$_HOOK_MCP_FAIL_FILE"

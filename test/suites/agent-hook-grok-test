@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# agent-hook-grok-test — Grok hook behavior and camelCase payloads.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+echo ""
+echo "=== grok env: end-to-end hooks ==="
+
+# pre-bash blocks rm -rf / from a Grok camelCase envelope
+_run_hook_grok "$PRE_BASH" '{"toolName":"run_terminal_command","toolInput":{"command":"rm -rf /"}}'
+_assert_eq "grok: rm -rf / blocked" "2" "$HOOK_EXIT"
+_assert_contains "grok: rm -rf / BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+# pre-bash allows safe commands under Grok env
+_run_hook_grok "$PRE_BASH" '{"toolName":"run_terminal_command","toolInput":{"command":"ls -la"}}'
+_assert_eq "grok: ls passes" "0" "$HOOK_EXIT"
+_assert_not_contains "grok: ls no warning" "WARNING" "$HOOK_STDERR"
+
+# session-start emits Claude-compatible dual context under Grok
+MOCK_GROK_GIT=$(_tmpdir)
+_install_hook_fixture "$MOCK_GROK_GIT" agent-hook-session-start
+git init "$MOCK_GROK_GIT/repo" >/dev/null 2>&1
+touch "$MOCK_GROK_GIT/repo/newfile"
+grok_ss_out=$(
+  cd "$MOCK_GROK_GIT/repo" &&
+    GROK_SESSION_ID="$TEST_SID-grok" \
+      AGENTGUARD_NAME="grok" \
+      AGENTGUARD_SESSION_ID="$TEST_SID-grok" \
+      TMPDIR="$TEST_TMPDIR" \
+      "$MOCK_GROK_GIT/bin/agent-hook-session-start" </dev/null 2>/dev/null
+)
+echo "$grok_ss_out" | jq -e '.context' >/dev/null 2>&1
+_assert_eq "grok: session-start emits context" "0" "$?"
+echo "$grok_ss_out" | jq -e '.hookSpecificOutput.additionalContext' >/dev/null 2>&1
+_assert_eq "grok: session-start emits additionalContext" "0" "$?"
+
+# Grok MCP calls use server__tool rather than mcp__server__tool. The failure
+# flag still uses the shared tool_result_is_error contract so this asserts
+# name parsing, not a Grok-only error schema.
+rm -rf "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID-grok"
+_run_hook_grok "$POST_MCP" '{"toolName":"gsrv__tool","tool_result_is_error":true}'
+_run_hook_grok "$POST_MCP" '{"toolName":"gsrv__tool","tool_result_is_error":true}'
+_run_hook_grok "$POST_MCP" '{"toolName":"gsrv__tool","tool_result_is_error":true}'
+_run_hook_grok "$PRE_MCP" '{"toolName":"gsrv__tool","toolInput":{}}'
+_assert_eq "grok: circuit breaker blocks qualified MCP names" "2" "$HOOK_EXIT"
+
+_run_hook_grok "$POST_MCP" '{"toolName":"gsrv__tool","tool_result_is_error":false}'
+_run_hook_grok "$PRE_MCP" '{"toolName":"gsrv__tool","toolInput":{}}'
+_assert_eq "grok: circuit breaker resets after success" "0" "$HOOK_EXIT"
+
+rm -rf "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID-grok"
+_run_hook_grok "$POST_MCP" '{"toolName":"gsrv__tool","isError":true}'
+_run_hook_grok "$POST_MCP" '{"toolName":"gsrv__tool","isError":true}'
+_run_hook_grok "$POST_MCP" '{"toolName":"gsrv__tool","isError":true}'
+_run_hook_grok "$PRE_MCP" '{"toolName":"gsrv__tool","toolInput":{}}'
+_assert_eq "grok: circuit breaker accepts isError" "2" "$HOOK_EXIT"
+
+grok_stop_out=$(
+  GROK_SESSION_ID="$TEST_SID-grok" \
+    AGENTGUARD_NAME="grok" \
+    AGENTGUARD_SESSION_ID="$TEST_SID-grok" \
+    TMPDIR="$TEST_TMPDIR" \
+    "$BIN_DIR/agent-hook-stop" </dev/null 2>/dev/null
+)
+echo "$grok_stop_out" | jq -e '. == {}' >/dev/null 2>&1
+_assert_eq "grok: Stop emits empty JSON instead of keep-working context" "0" "$?"
+
+_test_summary
