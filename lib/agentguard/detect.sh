@@ -6,8 +6,10 @@
 #
 # Detection relies primarily on environment variables each agent runtime exports
 # into child processes. The check order matters: Codex can coexist with
-# Claude-compatible vars, and Gemini sets CLAUDE_PROJECT_DIR (but not the
-# session ID), so the most-specific check must come first.
+# Claude-compatible vars, Gemini sets CLAUDE_PROJECT_DIR (but not the
+# session ID), and Grok injects CLAUDE_PROJECT_DIR on hook processes as a
+# compatibility alias for GROK_WORKSPACE_ROOT, so the most-specific check must
+# come first.
 #
 # Claude Code exports CLAUDE_CODE_SESSION_ID into every tool subprocess, but
 # only the hook runtime sees the CLAUDE_CODE_CURRENT_SESSION_ID variant. We must
@@ -20,13 +22,11 @@
 # produce Codex-shaped hook JSON even before regenerated config can inject
 # AGENTGUARD_NAME=codex explicitly.
 
-_agent_process_tree_snapshot_pid() {
+_agent_match_process_snapshot() {
   local target="$1"
-  local snapshot
+  local snapshot="$2"
 
-  snapshot=$(ps -axo pid=,ppid=,comm= 2>/dev/null) || return 2
   [ -n "$snapshot" ] || return 2
-
   printf '%s\n' "$snapshot" | awk -v start="$$" -v target="$target" '
     {
       pid = $1
@@ -63,13 +63,17 @@ _agent_process_tree_snapshot_pid() {
   '
 }
 
-_agent_process_tree_pid() {
+_agent_process_tree_snapshot_pid() {
   local target="$1"
-  local snapshot_status pid parent comm
+  local snapshot
 
-  _agent_process_tree_snapshot_pid "$target" && return 0
-  snapshot_status=$?
-  [ "$snapshot_status" -ne 2 ] && return "$snapshot_status"
+  snapshot=$(ps -axo pid=,ppid=,comm= 2>/dev/null) || return 2
+  _agent_match_process_snapshot "$target" "$snapshot"
+}
+
+_agent_process_tree_walk_pid() {
+  local target="$1"
+  local pid parent comm
 
   # Fall back for minimal or older `ps` implementations without a portable
   # all-process snapshot. This path is slower but preserves detection rather
@@ -96,17 +100,57 @@ _agent_process_tree_pid() {
   return 1
 }
 
+_agent_process_tree_pid() {
+  local target="$1"
+  local snapshot_status
+
+  _agent_process_tree_snapshot_pid "$target" && return 0
+  snapshot_status=$?
+  [ "$snapshot_status" -ne 2 ] && return "$snapshot_status"
+  _agent_process_tree_walk_pid "$target"
+}
+
 _agent_codex_process_pid() {
   _agent_process_tree_pid codex
 }
 
+_agent_grok_process_pid() {
+  # Match the grok binary only. The installer also links `agent` to the same
+  # image, but `agent` is a generic process name and would misattribute
+  # unrelated tools the way argv scanning once misattributed Codex.
+  _agent_process_tree_pid grok
+}
+
 _agent_name_from_process_tree() {
+  local snapshot snapshot_status=0 match_status target
+
   [ "${AGENTGUARD_PROCESS_DETECT:-1}" != "0" ] || return 1
 
-  if _agent_codex_process_pid >/dev/null; then
-    echo "codex"
-    return 0
+  # One process snapshot, then Codex before Grok on that same table. A second
+  # `ps` per runtime would make every human `hm` invocation pay for Grok even
+  # when the tree is already a complete non-match.
+  snapshot=$(ps -axo pid=,ppid=,comm= 2>/dev/null) || snapshot=""
+  if [ -n "$snapshot" ]; then
+    for target in codex grok; do
+      _agent_match_process_snapshot "$target" "$snapshot" >/dev/null
+      match_status=$?
+      case "$match_status" in
+        0)
+          echo "$target"
+          return 0
+          ;;
+        2) snapshot_status=2 ;;
+      esac
+    done
+    [ "$snapshot_status" -ne 2 ] && return 1
   fi
+
+  for target in codex grok; do
+    if _agent_process_tree_walk_pid "$target" >/dev/null; then
+      echo "$target"
+      return 0
+    fi
+  done
 
   return 1
 }
@@ -117,6 +161,7 @@ _is_agent_session() {
     [ -n "${AGENTGUARD_SESSION_ID:-}" ] ||
     [ -n "${CODEX_THREAD_ID:-}" ] ||
     [ "${CODEX_INTERNAL_ORIGINATOR_OVERRIDE:-}" = "codex" ] ||
+    [ -n "${GROK_SESSION_ID:-}" ] ||
     [ -n "${CLAUDE_CODE_CURRENT_SESSION_ID:-}" ] ||
     [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] ||
     [ -n "${GEMINI_PROJECT_DIR:-}" ] ||
@@ -134,6 +179,11 @@ _agent_name() {
     echo "codex"
   elif [ -n "${GEMINI_PROJECT_DIR:-}" ]; then
     echo "gemini"
+  elif [ -n "${GROK_SESSION_ID:-}" ]; then
+    # Grok hook subprocesses also export CLAUDE_PROJECT_DIR as an alias for
+    # GROK_WORKSPACE_ROOT. Identify Grok by its own session id before Claude
+    # session vars so a future Claude-compat export cannot relabel the runtime.
+    echo "grok"
   elif [ -n "${CLAUDE_CODE_CURRENT_SESSION_ID:-}" ] || [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
     echo "claude"
   elif [ -n "${AGENTGUARD_SESSION_ID:-}" ]; then
@@ -158,9 +208,9 @@ _agent_name() {
 # An optional caller namespace applies only to the generic parent fallback. It
 # lets an adapter retain its own public identity without duplicating this
 # precedence matrix. Native ids and runtime-specific fallbacks deliberately
-# ignore it so relabeling a Codex, Claude, or Gemini call cannot split one
-# runtime session into unrelated identities. Return 1 without output for an
-# ordinary human shell when the caller supplies no namespace.
+# ignore it so relabeling a Codex, Claude, Gemini, or Grok call cannot split
+# one runtime session into unrelated identities. Return 1 without output for
+# an ordinary human shell when the caller supplies no namespace.
 _agent_session_id() {
   local fallback_namespace="${1:-}" name
 
@@ -190,6 +240,9 @@ _agent_session_id() {
       # subprocesses. Its parent CLI remains stable for the direct-call
       # lifetime, matching AgentGuard's hook fallback.
       printf 'gemini-%s\n' "$PPID"
+      ;;
+    grok)
+      printf '%s\n' "${GROK_SESSION_ID:-grok-$PPID}"
       ;;
     *)
       # Compatible runtimes can opt in with AGENTGUARD_NAME even before they

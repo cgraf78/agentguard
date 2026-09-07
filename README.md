@@ -9,7 +9,7 @@
 `agent-hook-*` scripts. `shdeps` installs the executable files in `bin/` as
 PATH-visible symlinks.
 The hooks are agent-agnostic and work with Claude Code, Codex, Gemini CLI,
-Muse, or another tool that follows the same hook protocol.
+Grok, Muse, or another tool that follows the same hook protocol.
 
 ## Install
 
@@ -60,7 +60,7 @@ assets through shdeps, or use their absolute paths in this checkout.
 - `share/agentguard/shell.sh` is a stable no-op shell loader for integration
   harnesses that source each dependency's shell API uniformly.
 - `share/agentguard/integrations/` contains canonical native hook fragments for
-  Claude Code, Codex, Gemini CLI, and Muse, plus the OpenCode runtime adapter.
+  Claude Code, Codex, Gemini CLI, Grok, and Muse, plus the OpenCode runtime adapter.
 - `agent-hook-pre-edit` warns after `AGENTGUARD_EDIT_CHURN_WARN` edits to a
   file and blocks after `AGENTGUARD_EDIT_CHURN_BLOCK` edits. Defaults are `5`
   and `10`. Set `AGENTGUARD_EDIT_CHURN_BYPASS=1` to bypass the churn warning

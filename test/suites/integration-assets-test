@@ -89,6 +89,23 @@ expected = {
         "Stop": [("", "agent-hook-stop", None)],
         "UserPromptSubmit": [("", "agent-hook-prompt-submit", 10)],
     },
+    "grok": {
+        "Notification": [("", "agent-hook-notification", None)],
+        "PostToolUse": [
+            ("Edit|Write|search_replace", "agent-hook-post-edit", 60),
+            ("Bash|run_terminal_command", "agent-hook-post-bash", 120),
+            ("mcp__|.+__", "agent-hook-post-mcp", 10),
+        ],
+        "PreToolUse": [
+            ("Bash|run_terminal_command", "agent-hook-pre-bash", 600),
+            ("Edit|Write|search_replace", "agent-hook-pre-edit", 10),
+            ("mcp__|.+__", "agent-hook-pre-mcp", 10),
+        ],
+        "SessionEnd": [(None, "agent-hook-session-end", 30)],
+        "SessionStart": [(None, "agent-hook-session-start", 10)],
+        "Stop": [("", "agent-hook-stop", None)],
+        "UserPromptSubmit": [("", "agent-hook-prompt-submit", 10)],
+    },
 }
 
 identity_prefixes = {
@@ -96,6 +113,7 @@ identity_prefixes = {
     "codex": 'env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID="${CODEX_THREAD_ID:-}" ',
     "gemini": 'env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID="gemini-${PPID}" ',
     "muse": 'env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID="${MUSE_SESSION_ID:-$PPID}" ',
+    "grok": 'env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID="${GROK_SESSION_ID:-}" ',
 }
 
 paths = {
@@ -103,6 +121,7 @@ paths = {
     "codex": assets / "codex" / "hooks.toml",
     "gemini": assets / "gemini" / "hooks.json",
     "muse": assets / "muse" / "hooks.json",
+    "grok": assets / "grok" / "hooks.json",
 }
 
 for runtime, path in paths.items():

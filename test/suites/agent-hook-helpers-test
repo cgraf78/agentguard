@@ -552,6 +552,26 @@ _assert_eq "state_dir: claude session ID wins over gemini" "0" "$?"
 ) | _stdin_contains PASS
 _assert_eq "state_dir: refresh uses input session_id" "0" "$?"
 
+(
+  unset CODEX_THREAD_ID CLAUDE_CODE_CURRENT_SESSION_ID GEMINI_PROJECT_DIR GROK_SESSION_ID 2>/dev/null
+  XDG_RUNTIME_DIR="/tmp/json-sessionid-test"
+  source "$HELPERS"
+  _HOOK_INPUT='{"sessionId":"json-sessionid-123"}'
+  _hook_refresh_state_dir
+  [ "$_HOOK_STATE_DIR" = "/tmp/json-sessionid-test/agentguard/hook-state/json-sessionid-123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | _stdin_contains PASS
+_assert_eq "state_dir: refresh uses Grok camelCase sessionId" "0" "$?"
+
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  GROK_SESSION_ID="grok-session-123"
+  CLAUDE_CODE_CURRENT_SESSION_ID="claude-current"
+  XDG_RUNTIME_DIR="/tmp/grok-state-test"
+  source "$HELPERS"
+  [ "$_HOOK_STATE_DIR" = "/tmp/grok-state-test/agentguard/hook-state/grok-session-123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | _stdin_contains PASS
+_assert_eq "state_dir: Grok session id wins over inherited Claude context" "0" "$?"
+
 # Existing env-derived keys continue to win over JSON session_id.
 # shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
 (
@@ -2700,6 +2720,16 @@ _assert_eq "parse_command: AGENTGUARD_CMD_TRIMMED retains all lines" "0" "$?"
   [ "$AGENTGUARD_CMD_LINE1" = "ls -la" ] && echo "PASS" || echo "FAIL: '$AGENTGUARD_CMD_LINE1'"
 ) | _stdin_contains PASS
 _assert_eq "parse_command: AGENTGUARD_CMD_LINE1 strips leading whitespace" "0" "$?"
+
+# Grok hook stdin uses camelCase envelopes. Keep snake_case payloads working
+# while still extracting the command from toolInput.command.
+(
+  source "$HELPERS"
+  _HOOK_INPUT='{"toolInput":{"command":"ls -la /tmp"}}'
+  _hook_parse_command 2>/dev/null </dev/null
+  [ "$AGENTGUARD_CMD_TRIMMED" = "ls -la /tmp" ] && echo "PASS" || echo "FAIL: '$AGENTGUARD_CMD_TRIMMED'"
+) | _stdin_contains PASS
+_assert_eq "parse_command: Grok camelCase toolInput.command" "0" "$?"
 
 # ---------------------------------------------------------------------------
 # Tests: hook-helpers.sh — _hook_cd_to_target

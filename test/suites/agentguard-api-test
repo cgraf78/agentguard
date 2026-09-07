@@ -28,6 +28,7 @@ _session_probe() {
     -u CLAUDE_CODE_CURRENT_SESSION_ID \
     -u CLAUDE_CODE_SESSION_ID \
     -u GEMINI_PROJECT_DIR \
+    -u GROK_SESSION_ID \
     -u AGENTGUARD_TEST_SESSION_NAMESPACE \
     AGENTGUARD_PROCESS_DETECT=0 \
     "$@" \
@@ -89,6 +90,21 @@ probe=$(_session_probe GEMINI_PROJECT_DIR=/tmp/project)
 probe_ppid=$(_probe_field "$probe" ppid)
 _assert_eq "session id: Gemini uses its stable parent" \
   "gemini-$probe_ppid" "$(_probe_field "$probe" session)"
+
+probe=$(_session_probe GROK_SESSION_ID=grok-session)
+_assert_eq "session id: Grok uses its session id" \
+  "grok-session" "$(_probe_field "$probe" session)"
+
+probe=$(_session_probe \
+  GROK_SESSION_ID=grok-session \
+  CLAUDE_CODE_CURRENT_SESSION_ID=claude-current)
+_assert_eq "session id: Grok identity wins over inherited Claude context" \
+  "grok-session" "$(_probe_field "$probe" session)"
+
+probe=$(_session_probe AGENTGUARD_NAME=grok)
+probe_ppid=$(_probe_field "$probe" ppid)
+_assert_eq "session id: managed Grok without a session uses its stable parent" \
+  "grok-$probe_ppid" "$(_probe_field "$probe" session)"
 
 probe=$(_session_probe \
   GEMINI_PROJECT_DIR=/tmp/project \
