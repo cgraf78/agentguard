@@ -22,10 +22,13 @@ SubagentStop `additionalContext` keep the agent working, so both stay
 fail-open empty JSON instead of injecting Hive Memory context.
 
 Child events carry camelCase `subagentType` (and sometimes a distinct JSON
-`sessionId`). Hook state is then keyed as `${GROK_SESSION_ID}:${subagentType}`
-or that child session id so overlapping children do not share circuit-breaker
-or Hive Memory markers with the parent. Parent SessionStart/Stop omit
-`subagentType` and keep the unsuffixed `GROK_SESSION_ID` key.
+`sessionId`). Hook state is then keyed as that child session id when it
+differs from the parent, otherwise
+`${GROK_SESSION_ID}:${subagentType}` plus `:${promptId}` when Grok supplies
+one so two concurrent children of the same type do not share circuit-breaker
+or Hive Memory markers. Parent SessionStart/Stop omit `subagentType` and keep
+the unsuffixed `GROK_SESSION_ID` key. SubagentStop reuses `agent-hook-stop`
+for the empty-JSON gate but does not ring the foreground completion bell.
 
 The fragment contains no permission rules, models, MCP servers, or other user
 settings. Consume it with `../_shared/reconcile-hooks.jq` as one

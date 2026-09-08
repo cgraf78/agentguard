@@ -145,7 +145,7 @@ _hook_mkstate() {
 # circuit-breaker or Hive Memory markers with the parent. Parent SessionStart
 # and Stop omit subagentType and keep the unsuffixed key.
 _hook_refresh_state_dir() {
-  local session_key='' input_session='' input_subagent='' codex_key=''
+  local session_key='' input_session='' input_subagent='' input_prompt='' codex_key=''
   if [ -n "${_HOOK_INPUT+x}" ]; then
     # Grok's hook envelope is camelCase (sessionId, subagentType); Claude/Codex
     # remain snake_case. Prefer snake_case so an existing runtime stays
@@ -154,9 +154,11 @@ _hook_refresh_state_dir() {
     {
       IFS= read -r input_session || true
       IFS= read -r input_subagent || true
+      IFS= read -r input_prompt || true
     } < <(printf '%s' "$_HOOK_INPUT" | jq -r '
-      (.session_id // .sessionId // empty),
-      (.subagent_type // .subagentType // empty)
+      (.session_id // .sessionId // ""),
+      (.subagent_type // .subagentType // ""),
+      (.prompt_id // .promptId // "")
     ' 2>/dev/null)
   fi
 
@@ -193,7 +195,11 @@ _hook_refresh_state_dir() {
         [ "$input_session" != "${AGENTGUARD_SESSION_ID:-}" ]; then
         session_key="$input_session"
       else
+        # Two concurrent children of the same type share GROK_SESSION_ID
+        # and subagentType. promptId is the remaining stable discriminator
+        # when Grok does not mint a distinct child sessionId.
         session_key="$session_key:$input_subagent"
+        [ -n "$input_prompt" ] && session_key="$session_key:$input_prompt"
       fi
     fi
   fi
@@ -286,8 +292,19 @@ _hook_stop_claim_notification() {
 # AgentGuard state is canonical across runtimes; stop_hook_active is only an
 # additional recursion guard when a host exposes that compatible field.
 _hook_stop_should_notify() {
+  local child_type='' event_name=''
   _hook_hm_read_input
   _hook_stop_active && return 1
+  # SubagentStop is not the user's foreground turn. Grok still delivers it
+  # through agent-hook-stop because that launcher is the empty-JSON gate.
+  if [ -n "${_HOOK_INPUT+x}" ]; then
+    child_type=$(printf '%s' "$_HOOK_INPUT" | jq -r '.subagent_type // .subagentType // empty' 2>/dev/null) || child_type=''
+    [ -n "$child_type" ] && return 1
+    event_name=$(printf '%s' "$_HOOK_INPUT" | jq -r '.hookEventName // .hook_event_name // empty' 2>/dev/null) || event_name=''
+    case "$event_name" in
+      SubagentStop | subagent_stop | SubagentEnd | subagent_end) return 1 ;;
+    esac
+  fi
   _hook_stop_claim_notification
 }
 

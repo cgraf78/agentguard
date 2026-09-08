@@ -259,6 +259,24 @@ stop_claim_marker_failure=$(
 _assert_eq "stop notification claim: marker write failure stays silent" \
   "silent" "$stop_claim_marker_failure"
 
+stop_claim_subagent=$(
+  bash -c '
+    source "$1"
+    AGENTGUARD_NAME=grok
+    GROK_SESSION_ID="grok-session-123"
+    _HOOK_INPUT="{\"sessionId\":\"grok-session-123\",\"subagentType\":\"explore\"}"
+    _HOOK_INPUT_STATE_REFRESHED=1
+    _HOOK_STATE_DIR="$2"
+    if _hook_stop_should_notify; then
+      printf "notify\n"
+    else
+      printf "silent\n"
+    fi
+  ' _ "$HELPERS" "$stop_claim_root/subagent-stop"
+)
+_assert_eq "stop notification claim: Grok SubagentStop stays silent" \
+  "silent" "$stop_claim_subagent"
+
 echo ""
 echo "=== hook-helpers: PATH fallback ==="
 
@@ -612,6 +630,34 @@ _assert_eq "state_dir: Grok subagentType suffixes the parent session key" "0" "$
   [ "$_HOOK_STATE_DIR" = "/tmp/grok-child-session-test/agentguard/hook-state/child-session-9" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
 ) | _stdin_contains PASS
 _assert_eq "state_dir: Grok child sessionId wins over subagentType suffix" "0" "$?"
+
+# Missing sessionId must not steal subagentType into the session slot. jq
+# `empty` would print one line and leave the child on the parent key.
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  AGENTGUARD_NAME=grok
+  AGENTGUARD_SESSION_ID="grok-session-123"
+  GROK_SESSION_ID="grok-session-123"
+  XDG_RUNTIME_DIR="/tmp/grok-subagent-nosession-test"
+  source "$HELPERS"
+  _HOOK_INPUT='{"subagentType":"explore"}'
+  _hook_refresh_state_dir
+  [ "$_HOOK_STATE_DIR" = "/tmp/grok-subagent-nosession-test/agentguard/hook-state/grok-session-123:explore" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | _stdin_contains PASS
+_assert_eq "state_dir: Grok subagentType suffixes when sessionId is absent" "0" "$?"
+
+# shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
+(
+  AGENTGUARD_NAME=grok
+  AGENTGUARD_SESSION_ID="grok-session-123"
+  GROK_SESSION_ID="grok-session-123"
+  XDG_RUNTIME_DIR="/tmp/grok-subagent-prompt-test"
+  source "$HELPERS"
+  _HOOK_INPUT='{"sessionId":"grok-session-123","subagentType":"explore","promptId":"turn-7"}'
+  _hook_refresh_state_dir
+  [ "$_HOOK_STATE_DIR" = "/tmp/grok-subagent-prompt-test/agentguard/hook-state/grok-session-123:explore:turn-7" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | _stdin_contains PASS
+_assert_eq "state_dir: Grok promptId separates same-type children" "0" "$?"
 
 # Existing env-derived keys continue to win over JSON session_id.
 # shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
