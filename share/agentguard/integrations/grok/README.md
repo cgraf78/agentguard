@@ -15,9 +15,20 @@ the qualified `server__tool` id, not Claude's `mcp__` prefix.
 
 Grok reports failed tool calls on `PostToolUseFailure` rather than
 `PostToolUse`, so MCP circuit-breaker tracking is wired to that event as well
-as successful post-tool MCP calls. Grok Stop `additionalContext` keeps the
-agent working, so Stop hooks stay fail-open empty JSON instead of injecting
-Hive Memory context.
+as successful post-tool MCP calls. Grok SessionStart does not fire for
+subagent sessions, so `SubagentStart` runs the same `agent-hook-session-start`
+command and `SubagentStop` reuses `agent-hook-stop`. Grok Stop and
+SubagentStop `additionalContext` keep the agent working, so both stay
+fail-open empty JSON instead of injecting Hive Memory context.
+
+Child events carry camelCase `subagentType` (and sometimes a distinct JSON
+`sessionId`). Hook state is then keyed as that child session id when it
+differs from the parent, otherwise
+`${GROK_SESSION_ID}:${subagentType}` plus `:${promptId}` when Grok supplies
+one so two concurrent children of the same type do not share circuit-breaker
+or Hive Memory markers. Parent SessionStart/Stop omit `subagentType` and keep
+the unsuffixed `GROK_SESSION_ID` key. SubagentStop reuses `agent-hook-stop`
+for the empty-JSON gate but does not ring the foreground completion bell.
 
 The fragment contains no permission rules, models, MCP servers, or other user
 settings. Consume it with `../_shared/reconcile-hooks.jq` as one

@@ -106,7 +106,9 @@ expected = {
         ],
         "SessionEnd": [(None, "agent-hook-session-end", 30)],
         "SessionStart": [(None, "agent-hook-session-start", 10)],
+        "SubagentStart": [(None, "agent-hook-session-start", 10)],
         "Stop": [("", "agent-hook-stop", None)],
+        "SubagentStop": [("", "agent-hook-stop", None)],
         "UserPromptSubmit": [("", "agent-hook-prompt-submit", 10)],
     },
 }
