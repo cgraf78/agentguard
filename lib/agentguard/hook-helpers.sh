@@ -136,13 +136,28 @@ _hook_mkstate() {
 # after reading it. Empty or session-less JSON must still fall through to the
 # Codex process key; otherwise reading a closed stdin would downgrade an
 # already-stable session to this one hook process.
+#
+# Grok SessionStart does not fire for subagent sessions, so children inherit
+# the parent GROK_SESSION_ID (and AGENTGUARD_SESSION_ID copied from it) or fall
+# back to grok-$PPID. Child events carry camelCase subagentType; when that is
+# present, prefer a distinct JSON sessionId as Grok's child session, otherwise
+# suffix the parent key with subagentType so overlapping children do not share
+# circuit-breaker or Hive Memory markers with the parent. Parent SessionStart
+# and Stop omit subagentType and keep the unsuffixed key.
 _hook_refresh_state_dir() {
-  local session_key='' input_session='' codex_key=''
+  local session_key='' input_session='' input_subagent='' codex_key=''
   if [ -n "${_HOOK_INPUT+x}" ]; then
-    # Grok's hook envelope is camelCase (sessionId); Claude/Codex remain
-    # snake_case. Prefer snake_case so an existing runtime stays authoritative
-    # if a payload ever contains both.
-    input_session=$(printf '%s' "$_HOOK_INPUT" | jq -r '.session_id // .sessionId // empty' 2>/dev/null)
+    # Grok's hook envelope is camelCase (sessionId, subagentType); Claude/Codex
+    # remain snake_case. Prefer snake_case so an existing runtime stays
+    # authoritative if a payload ever contains both. One jq keeps the large
+    # PostToolUse payload under the cached-parse jq budget.
+    {
+      IFS= read -r input_session || true
+      IFS= read -r input_subagent || true
+    } < <(printf '%s' "$_HOOK_INPUT" | jq -r '
+      (.session_id // .sessionId // empty),
+      (.subagent_type // .subagentType // empty)
+    ' 2>/dev/null)
   fi
 
   if [ "${AGENTGUARD_NAME:-}" = "codex" ] && [ -n "$input_session" ]; then
@@ -168,6 +183,21 @@ _hook_refresh_state_dir() {
   fi
 
   [ -n "$session_key" ] || session_key="$$"
+
+  if [ -n "$input_subagent" ]; then
+    if [ "${AGENTGUARD_NAME:-}" = "grok" ] ||
+      { [ -z "${AGENTGUARD_NAME:-}" ] && [ -n "${GROK_SESSION_ID:-}" ]; }; then
+      if [ -n "$input_session" ] &&
+        [ "$input_session" != "$session_key" ] &&
+        [ "$input_session" != "${GROK_SESSION_ID:-}" ] &&
+        [ "$input_session" != "${AGENTGUARD_SESSION_ID:-}" ]; then
+        session_key="$input_session"
+      else
+        session_key="$session_key:$input_subagent"
+      fi
+    fi
+  fi
+
   _HOOK_SESSION_KEY="$session_key"
   _HOOK_STATE_DIR="$(_hook_state_root)/$_HOOK_SESSION_KEY"
   if [ -n "${_HOOK_INPUT+x}" ]; then
@@ -1116,7 +1146,9 @@ _hook_finish() {
       if [ "$(_hook_agent_name)" = "grok" ]; then
         # Grok Stop additionalContext is non-error keep-working feedback, not
         # a silent annotation. Hive Memory or git context must not retrigger
-        # the turn the way a Claude-shaped dual payload would.
+        # the turn the way a Claude-shaped dual payload would. SubagentStop
+        # reuses this launcher (`agent-hook-stop*`), so it stays fail-open
+        # empty JSON too.
         printf '{}\n'
         [ -n "$_HOOK_BLOCKED" ] && exit 2
         exit 0

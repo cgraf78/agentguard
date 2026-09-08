@@ -67,4 +67,94 @@ grok_stop_out=$(
 echo "$grok_stop_out" | jq -e '. == {}' >/dev/null 2>&1
 _assert_eq "grok: Stop emits empty JSON instead of keep-working context" "0" "$?"
 
+echo ""
+echo "=== grok: subagent lifecycle ==="
+
+GROK_HOOKS="$AGENTGUARD_ROOT/share/agentguard/integrations/grok/hooks.json"
+# Literal identity envelope from hooks.json; the ${GROK_SESSION_ID:-} is Grok's.
+# shellcheck disable=SC2016
+grok_identity='env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID="${GROK_SESSION_ID:-}" '
+
+_assert_eq "grok: SubagentStart uses session-start" \
+  "${grok_identity}agent-hook-session-start" \
+  "$(jq -r '.hooks.SubagentStart[0].hooks[0].command' "$GROK_HOOKS")"
+_assert_eq "grok: SubagentStart timeout is 10" \
+  "10" \
+  "$(jq -r '.hooks.SubagentStart[0].hooks[0].timeout' "$GROK_HOOKS")"
+_assert_eq "grok: SubagentStart omits matcher" \
+  "false" \
+  "$(jq -r '.hooks.SubagentStart[0] | has("matcher")' "$GROK_HOOKS")"
+_assert_eq "grok: SubagentStop uses stop" \
+  "${grok_identity}agent-hook-stop" \
+  "$(jq -r '.hooks.SubagentStop[0].hooks[0].command' "$GROK_HOOKS")"
+_assert_eq "grok: SubagentStop has no timeout" \
+  "false" \
+  "$(jq -r '.hooks.SubagentStop[0].hooks[0] | has("timeout")' "$GROK_HOOKS")"
+_assert_eq "grok: SubagentStop matcher is empty" \
+  "" \
+  "$(jq -r '.hooks.SubagentStop[0].matcher' "$GROK_HOOKS")"
+
+# SessionStart does not fire for Grok children, so SubagentStart must attach
+# Hive Memory under a distinct session key rather than reuse the parent marker.
+MOCK_GROK_SUB=$(_tmpdir)
+_install_hook_fixture "$MOCK_GROK_SUB" agent-hook-session-start
+mkdir -p "$MOCK_GROK_SUB/home/.config/hive-memory"
+touch "$MOCK_GROK_SUB/home/.config/hive-memory/config.toml"
+cat >"$MOCK_GROK_SUB/bin/hm" <<'MOCK'
+#!/usr/bin/env bash
+printf 'session=%s\n' "${HIVE_MEMORY_SESSION_ID:-}" >>"$HM_LOG"
+printf '%s\n' '{"warnings":[],"actions":[{"kind":"inject_context","body":"memory ctx"}]}'
+MOCK
+chmod +x "$MOCK_GROK_SUB/bin/hm"
+GROK_SUB_HM_LOG="$MOCK_GROK_SUB/hm.log"
+: >"$GROK_SUB_HM_LOG"
+rm -rf "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID-grok" \
+  "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID-grok:explore"
+
+printf '%s' "{\"hookEventName\":\"session_start\",\"sessionId\":\"$TEST_SID-grok\"}" |
+  env -u XDG_CONFIG_HOME \
+    HOME="$MOCK_GROK_SUB/home" \
+    HIVE_MEMORY_CONFIG="$MOCK_GROK_SUB/home/.config/hive-memory/config.toml" \
+    PATH="$MOCK_GROK_SUB/bin:$PATH" \
+    HM_LOG="$GROK_SUB_HM_LOG" \
+    AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+    GROK_SESSION_ID="$TEST_SID-grok" \
+    AGENTGUARD_NAME="grok" \
+    AGENTGUARD_SESSION_ID="$TEST_SID-grok" \
+    TMPDIR="$TEST_TMPDIR" \
+    "$MOCK_GROK_SUB/bin/agent-hook-session-start" >/dev/null 2>/dev/null
+
+printf '%s' "{\"hookEventName\":\"subagent_start\",\"sessionId\":\"$TEST_SID-grok\",\"subagentType\":\"explore\"}" |
+  env -u XDG_CONFIG_HOME \
+    HOME="$MOCK_GROK_SUB/home" \
+    HIVE_MEMORY_CONFIG="$MOCK_GROK_SUB/home/.config/hive-memory/config.toml" \
+    PATH="$MOCK_GROK_SUB/bin:$PATH" \
+    HM_LOG="$GROK_SUB_HM_LOG" \
+    AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+    GROK_SESSION_ID="$TEST_SID-grok" \
+    AGENTGUARD_NAME="grok" \
+    AGENTGUARD_SESSION_ID="$TEST_SID-grok" \
+    TMPDIR="$TEST_TMPDIR" \
+    "$MOCK_GROK_SUB/bin/agent-hook-session-start" >/dev/null 2>/dev/null
+
+_assert_file_exists "grok: parent SessionStart writes HM emitted marker" \
+  "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID-grok/hm-session-start-context-emitted"
+_assert_file_exists "grok: SubagentStart writes a distinct HM emitted marker" \
+  "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID-grok:explore/hm-session-start-context-emitted"
+_assert_eq "grok: SubagentStart does not reuse parent HM session-start" \
+  "session=$TEST_SID-grok
+session=$TEST_SID-grok:explore" \
+  "$(cat "$GROK_SUB_HM_LOG")"
+
+grok_subagent_stop_out=$(
+  printf '%s' "{\"hookEventName\":\"subagent_stop\",\"sessionId\":\"$TEST_SID-grok\",\"subagentType\":\"explore\"}" |
+    GROK_SESSION_ID="$TEST_SID-grok" \
+      AGENTGUARD_NAME="grok" \
+      AGENTGUARD_SESSION_ID="$TEST_SID-grok" \
+      TMPDIR="$TEST_TMPDIR" \
+      "$BIN_DIR/agent-hook-stop" 2>/dev/null
+)
+echo "$grok_subagent_stop_out" | jq -e '. == {}' >/dev/null 2>&1
+_assert_eq "grok: SubagentStop emits empty JSON like Stop" "0" "$?"
+
 _test_summary

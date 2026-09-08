@@ -109,7 +109,29 @@
         ]
       }
     ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-session-start",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
     "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-stop",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ],
+    "SubagentStop": [
       {
         "hooks": [
           {
