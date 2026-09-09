@@ -16,3 +16,11 @@ last valid settings target.
 The exact compatibility contract lives in
 `test/suites/integration-assets-test`; downstream suites should use neutral
 fixtures to test their merge logic rather than copying Muse's event map.
+
+Matchers use Claude-style tool names (`Bash`, `Edit`/`Write`) because that
+is what Muse matches hooks against: the native `bash` tool fires the
+`Bash` matcher and `edit_file` fires `Edit`. The pre-search matcher is
+`Grep|Search` for the same reason — Muse maps its native `search` tool to
+the Claude-style `Grep` name, so a bare `Search` matcher never fires
+(observed: repeated `search` calls, zero hook invocations). `Search` is
+kept so the guard still fires if Muse ever matches native names.

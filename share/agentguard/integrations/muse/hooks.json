@@ -61,7 +61,7 @@
             "type": "command"
           }
         ],
-        "matcher": "Search"
+        "matcher": "Grep|Search"
       },
       {
         "hooks": [
