@@ -263,7 +263,7 @@ for launcher in "$root"/bin/agent-hook-*; do
   [[ -e "$launcher" ]] || continue
   relative_path="${launcher#"$root"/}"
   case "$relative_path" in
-    *-claude | *-codex | *-gemini | *-work) continue ;;
+    *-claude | *-codex | *-gemini | *-muse | *-work) continue ;;
     bin/agent-hook-pre-bash) continue ;;
   esac
   require_launcher_entry "$relative_path" hook

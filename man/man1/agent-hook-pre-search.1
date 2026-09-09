@@ -1,0 +1,22 @@
+.TH AGENT-HOOK-PRE-SEARCH 1 "2026-09-09" "agentguard" "User Commands"
+.SH NAME
+agent-hook-pre-search \- dispatch file-search guards before execution
+.SH SYNOPSIS
+.B agent-hook-pre-search
+.SH DESCRIPTION
+.B agent-hook-pre-search
+reads a PreToolUse hook JSON payload from standard input. The base hook
+enforces nothing itself: file-search tools differ per agent, so
+agent-specific extensions
+.RB ( agent-hook-pre-search\- <agent>)
+carry the policy. Fail-open throughout: an uninspectable payload never
+blocks the tool call.
+.SH EXIT STATUS
+.TP
+.B 0
+The search call is allowed, possibly with warnings.
+.TP
+.B 2
+An extension blocked the search call.
+.SH SEE ALSO
+.BR agent-hook-pre-search-muse (1)

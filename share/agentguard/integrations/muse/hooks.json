@@ -56,6 +56,16 @@
       {
         "hooks": [
           {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-pre-search",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "Search"
+      },
+      {
+        "hooks": [
+          {
             "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-pre-mcp",
             "timeout": 10,
             "type": "command"

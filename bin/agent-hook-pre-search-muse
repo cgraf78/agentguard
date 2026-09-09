@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# agent-hook-pre-search-muse — Muse-specific PreToolUse extension: every file
+# search must follow symlinks. Sourced by agent-hook-pre-search via
+# _hook_source_agent (only when the running agent is Muse).
+# Rule/config trees contain symlinked files that default search skips
+# silently, so a search without the follow-symlinks option is blocked with a
+# remediation message. Fail-open on anything uninspectable: only block a
+# positively identified file-search payload whose option is absent or false.
+
+_agentguard_muse_pre_search() {
+  command -v jq >/dev/null 2>&1 || return 0
+  [ -n "${_HOOK_INPUT:-}" ] || return 0
+  printf '%s' "$_HOOK_INPUT" | jq empty >/dev/null 2>&1 || return 0
+
+  # Only file-search payloads carry `pattern`; anything else is not our tool,
+  # so matcher overreach can never break an unrelated call.
+  local is_search
+  is_search=$(printf '%s' "$_HOOK_INPUT" | jq -r '
+    (.tool_input // .toolInput // {}) | if has("pattern") then "yes" else empty end
+  ' 2>/dev/null) || return 0
+  [ "$is_search" = "yes" ] || return 0
+
+  local follow
+  follow=$(printf '%s' "$_HOOK_INPUT" | jq -r '
+    (.tool_input // .toolInput // {})
+    | (.follow_symlinks // .followSymlinks // empty)
+    | if type == "boolean" then (if . then "true" else "false" end) else empty end
+  ' 2>/dev/null) || return 0
+  if [ "$follow" != "true" ]; then
+    _hook_block 'search must follow symlinks: rule/config trees contain symlinked files that default search skips silently. Retry with the follow-symlinks option set (follow_symlinks=true on structured search, -L on rg/fd).'
+  fi
+}
+
+_agentguard_muse_pre_search "$@"

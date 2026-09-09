@@ -5,6 +5,7 @@ hook bin/agent-hook-post-mcp
 secure-hook bin/agent-hook-pre-bash
 hook bin/agent-hook-pre-edit
 hook bin/agent-hook-pre-mcp
+hook bin/agent-hook-pre-search
 hook bin/agent-hook-prompt-submit
 hook bin/agent-hook-session-end
 hook bin/agent-hook-session-start

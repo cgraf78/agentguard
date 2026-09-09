@@ -15,6 +15,8 @@ runtime_shell_files=(
   "$root/bin/agent-hook-pre-bash"
   "$root/bin/agent-hook-pre-edit"
   "$root/bin/agent-hook-pre-mcp"
+  "$root/bin/agent-hook-pre-search"
+  "$root/bin/agent-hook-pre-search-muse"
   "$root/bin/agent-hook-prompt-submit"
   "$root/bin/agent-hook-session-end"
   "$root/bin/agent-hook-session-end-claude"

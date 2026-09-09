@@ -6,6 +6,8 @@ program	bin/agent-hook-post-mcp
 program	bin/agent-hook-pre-bash
 program	bin/agent-hook-pre-edit
 program	bin/agent-hook-pre-mcp
+program	bin/agent-hook-pre-search
+program	bin/agent-hook-pre-search-muse
 program	bin/agent-hook-prompt-submit
 program	bin/agent-hook-session-end
 program	bin/agent-hook-session-end-claude
@@ -54,6 +56,7 @@ program	test/suites/agent-hook-mcp-test
 program	test/suites/agent-hook-muse-test
 program	test/suites/agent-hook-performance-test
 program	test/suites/agent-hook-session-test
+program	test/suites/agent-hook-search-test
 program	test/suites/agentguard-api-test
 program	test/suites/bootstrap-test
 program	test/suites/examples-test

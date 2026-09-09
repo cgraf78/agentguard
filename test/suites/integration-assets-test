@@ -83,6 +83,7 @@ expected = {
         "PreToolUse": [
             ("Bash", "agent-hook-pre-bash", 600),
             ("Edit|Write", "agent-hook-pre-edit", 10),
+            ("Search", "agent-hook-pre-search", 10),
             ("mcp__", "agent-hook-pre-mcp", 10),
         ],
         "SessionStart": [(None, "agent-hook-session-start", 10)],
