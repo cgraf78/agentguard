@@ -27,6 +27,8 @@ commands=(
   agent-hook-pre-bash
   agent-hook-pre-edit
   agent-hook-pre-mcp
+  agent-hook-pre-search
+  agent-hook-pre-search-muse
   agent-hook-prompt-submit
   agent-hook-session-end
   agent-hook-session-end-claude

@@ -75,6 +75,7 @@ POST_MCP="$BIN_DIR/agent-hook-post-mcp"
 PRE_BASH="$BIN_DIR/agent-hook-pre-bash"
 PRE_EDIT="$BIN_DIR/agent-hook-pre-edit"
 POST_EDIT="$BIN_DIR/agent-hook-post-edit"
+PRE_SEARCH="$BIN_DIR/agent-hook-pre-search"
 SESSION_START="$BIN_DIR/agent-hook-session-start"
 
 _install_hook_fixture() {
@@ -225,6 +226,33 @@ _run_hook_grok() {
     CLAUDE_CODE_CURRENT_SESSION_ID=
     CLAUDE_CODE_SESSION_ID=
     TMPDIR="$TEST_TMPDIR"
+  )
+  _run_hook_env "$@"
+}
+
+# Run a hook with Muse env vars. Same capture contract.
+_run_hook_muse() {
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    MUSE_SESSION_ID="$TEST_SID-muse"
+    AGENTGUARD_SESSION_ID="$TEST_SID-muse"
+    AGENTGUARD_NAME="muse"
+    CLAUDE_CODE_CURRENT_SESSION_ID=
+    TMPDIR="$TEST_TMPDIR"
+  )
+  _run_hook_env "$@"
+}
+
+# Run a hook under an explicitly named agent. Same capture contract.
+_run_hook_named_agent() {
+  local agent_name="$1"
+  shift
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    AGENTGUARD_SESSION_ID="$TEST_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="$agent_name"
+    CODEX_THREAD_ID=
   )
   _run_hook_env "$@"
 }

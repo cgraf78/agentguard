@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# agent-hook-search-test — search hook behavior (symlink-following enforcement).
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+# ---------------------------------------------------------------------------
+# Tests: agent-hook-pre-search under muse — enforcement
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-search (muse): enforcement ==="
+
+_reset_state
+
+# Flag set → passes
+_run_hook_muse "$PRE_SEARCH" '{"tool_name":"Search","tool_input":{"pattern":"x","follow_symlinks":true}}'
+_assert_eq "flag true: exit 0" "0" "$HOOK_EXIT"
+_assert_eq "flag true: no stderr" "" "$HOOK_STDERR"
+
+# Flag missing → blocks (the option defaults off, so omission is a violation)
+_run_hook_muse "$PRE_SEARCH" '{"tool_name":"Search","tool_input":{"pattern":"x"}}'
+_assert_eq "flag missing: exit 2" "2" "$HOOK_EXIT"
+_assert_contains "flag missing: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+# Flag false → blocks
+_run_hook_muse "$PRE_SEARCH" '{"tool_name":"Search","tool_input":{"pattern":"x","follow_symlinks":false}}'
+_assert_eq "flag false: exit 2" "2" "$HOOK_EXIT"
+_assert_contains "flag false: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+# camelCase envelope with flag set → passes
+_run_hook_muse "$PRE_SEARCH" '{"toolName":"Search","toolInput":{"pattern":"x","followSymlinks":true}}'
+_assert_eq "camelCase flag true: exit 0" "0" "$HOOK_EXIT"
+
+# camelCase envelope with flag missing → blocks
+_run_hook_muse "$PRE_SEARCH" '{"toolName":"Search","toolInput":{"pattern":"x"}}'
+_assert_eq "camelCase flag missing: exit 2" "2" "$HOOK_EXIT"
+
+# ---------------------------------------------------------------------------
+# Tests: agent-hook-pre-search under muse — passthrough and fail-open
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-search (muse): passthrough and fail-open ==="
+
+# Non-search payload (no pattern field) → passes: matcher overreach must not
+# break unrelated tools
+_run_hook_muse "$PRE_SEARCH" '{"tool_name":"WebSearch","tool_input":{"query":"x"}}'
+_assert_eq "non-search tool: exit 0" "0" "$HOOK_EXIT"
+_assert_eq "non-search tool: no stderr" "" "$HOOK_STDERR"
+
+# Empty tool_input object → passes (nothing to enforce on)
+_run_hook_muse "$PRE_SEARCH" '{"tool_name":"Search","tool_input":{}}'
+_assert_eq "empty input: exit 0" "0" "$HOOK_EXIT"
+
+# Invalid JSON → passes: this is a quality guard, not a security boundary,
+# so an uninspectable payload must not break the tool call
+_run_hook_muse "$PRE_SEARCH" 'not json'
+_assert_eq "invalid JSON: exit 0" "0" "$HOOK_EXIT"
+
+# ---------------------------------------------------------------------------
+# Tests: agent-hook-pre-search under other agents — never breaks them
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-search (other agents): passthrough ==="
+
+# Generic agent without the muse extension loaded → passes even though the
+# flag is absent: other agents' search tools may not offer the option
+_run_hook "$PRE_SEARCH" '{"tool_name":"Search","tool_input":{"pattern":"x"}}'
+_assert_eq "generic agent: exit 0" "0" "$HOOK_EXIT"
+_assert_eq "generic agent: no stderr" "" "$HOOK_STDERR"
+
+# Named non-muse agents → passes: the muse extension only loads under muse
+_run_hook_named_agent "codex" "$PRE_SEARCH" '{"tool_name":"Search","tool_input":{"pattern":"x"}}'
+_assert_eq "codex: exit 0" "0" "$HOOK_EXIT"
+_run_hook_named_agent "claude" "$PRE_SEARCH" '{"tool_name":"Search","tool_input":{"pattern":"x"}}'
+_assert_eq "claude: exit 0" "0" "$HOOK_EXIT"
+_run_hook_gemini "$PRE_SEARCH" '{"tool_name":"Search","tool_input":{"pattern":"x"}}'
+_assert_eq "gemini: exit 0" "0" "$HOOK_EXIT"
+_run_hook_grok "$PRE_SEARCH" '{"tool_name":"Search","tool_input":{"pattern":"x"}}'
+_assert_eq "grok: exit 0" "0" "$HOOK_EXIT"
+
+_test_summary

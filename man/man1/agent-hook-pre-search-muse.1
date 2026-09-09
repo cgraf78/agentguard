@@ -1,0 +1,23 @@
+.TH AGENT-HOOK-PRE-SEARCH-MUSE 1 "2026-09-09" "agentguard" "User Commands"
+.SH NAME
+agent-hook-pre-search-muse \- require symlink-following file search under Muse
+.SH SYNOPSIS
+.B agent-hook-pre-search-muse
+.SH DESCRIPTION
+.B agent-hook-pre-search-muse
+is sourced by
+.B agent-hook-pre-search
+when the running agent is Muse. It blocks file-search calls whose
+follow-symlinks option is absent or false, because rule and config trees
+contain symlinked files that default search skips silently. Payloads
+without a file-search shape pass through, and anything uninspectable
+fails open, so unrelated tools and other agents are never affected.
+.SH EXIT STATUS
+.TP
+.B 0
+The search call is allowed, possibly with warnings.
+.TP
+.B 2
+The search call is blocked.
+.SH SEE ALSO
+.BR agent-hook-pre-search (1)
