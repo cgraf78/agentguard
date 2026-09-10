@@ -14,6 +14,7 @@ program	bin/agent-hook-session-end-claude
 program	bin/agent-hook-session-start
 program	bin/agent-hook-session-start-claude
 program	bin/agent-hook-stop
+program	bin/agentguard-churn-bypass
 program	bin/agentguard-classify-command
 program	bin/claude-session-name
 program	examples/hooks/agent-hook-pre-bash-work
@@ -33,6 +34,7 @@ program	test/helpers.sh
 program	test/run-suites
 program	test/suites/agent-bash-reexec-test
 program	test/suites/agent-command-classifier-test
+program	test/suites/agent-churn-bypass-test
 program	test/suites/agent-hook-bash-fast-test
 program	test/suites/agent-hook-bash-find-grep-test
 program	test/suites/agent-hook-bash-gate-test

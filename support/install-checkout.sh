@@ -28,6 +28,7 @@ commands=(
   agent-hook-session-start
   agent-hook-session-start-claude
   agent-hook-stop
+  agentguard-churn-bypass
   agentguard-classify-command
   claude-session-name
 )

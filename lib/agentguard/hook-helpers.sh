@@ -346,6 +346,178 @@ _hook_counter_reset() {
   rm -f "$1" 2>/dev/null || true
 }
 
+# --- Edit-churn bypass: hook predicate plus agent-shell resolver ---
+#
+# The churn guard counts per-file edits in the session state dir. The bypass
+# used to live only in $AGENTGUARD_EDIT_CHURN_BYPASS, which a hook reads from
+# its own environment — inherited from the agent process at spawn time. An
+# `export` in an agent tool shell cannot reach that environment (a Unix child
+# cannot change its parent's env), so a mid-session bypass needs a channel
+# the agent itself can write: a marker file in the session state dir. The
+# marker is session-scoped (a new session resolves a new state dir) and
+# opt-in (absent by default), so the guard's default behavior is unchanged.
+
+_hook_edit_churn_bypass_file() {
+  printf '%s/edit-churn-bypass\n' "$_HOOK_STATE_DIR"
+}
+
+_hook_edit_churn_bypassed() {
+  _hook_flag_enabled "${AGENTGUARD_EDIT_CHURN_BYPASS:-}" && return 0
+  [ -f "$(_hook_edit_churn_bypass_file)" ]
+}
+
+# Every plausible per-user hook state root, most-preferred first. Hook
+# processes often run with XDG_* scrubbed from their environment, so an
+# agent-shell helper must probe each root instead of trusting its own env
+# (mirrors the _hook_state_root tiers without picking one).
+_hook_state_roots() {
+  local root seen=' '
+  for root in \
+    "${XDG_RUNTIME_DIR:+$XDG_RUNTIME_DIR/agentguard/hook-state}" \
+    "${XDG_STATE_HOME:+$XDG_STATE_HOME/agentguard/hook-state}" \
+    "${HOME:+$HOME/.local/state/agentguard/hook-state}" \
+    "${TMPDIR:-/tmp}/agentguard-hook-state-$(id -u 2>/dev/null || echo 0)"; do
+    [ -n "$root" ] || continue
+    case "$root" in /*) ;; *) continue ;; esac
+    case "$seen" in *" $root "*) continue ;; esac
+    seen="$seen$root "
+    printf '%s\n' "$root"
+  done
+}
+
+# Nearest long-lived agent ancestor formatted as a hook session key. Mirrors
+# the $PPID fallbacks in _hook_refresh_state_dir for runtimes that do not
+# inject a stable id: Muse hooks fall back to a bare parent pid, Codex to
+# codex-<pid>, Grok to grok-<pid>, Gemini to gemini-<pid>. Match on the
+# executable name only, never argv (see detect.sh for why argv lies).
+_hook_agent_ancestor_key() {
+  [ "${AGENTGUARD_PROCESS_DETECT:-1}" != "0" ] || return 1
+  local snapshot
+  snapshot=$(ps -axo pid=,ppid=,comm= 2>/dev/null) || return 1
+  [ -n "$snapshot" ] || return 1
+  printf '%s\n' "$snapshot" | awk -v start="$$" '
+    {
+      pid = $1
+      parent[pid] = $2
+      $1 = $2 = ""
+      sub(/^[[:space:]]+/, "")
+      command[pid] = $0
+    }
+    END {
+      if (!(start in command)) exit 1
+      pid = start
+      while (pid != "" && pid != "0" && !seen[pid]++) {
+        name = command[pid]
+        sub(/^.*\//, "", name)
+        if (name == "muse.real" || name == "muse") { print pid; exit 0 }
+        if (name == "codex") { print "codex-" pid; exit 0 }
+        if (name == "grok") { print "grok-" pid; exit 0 }
+        if (name == "gemini") { print "gemini-" pid; exit 0 }
+        if (name == "claude") { print "claude-" pid; exit 0 }
+        if (!(pid in parent)) exit 1
+        next_pid = parent[pid]
+        if (next_pid == pid) exit 1
+        pid = next_pid
+      }
+      exit 1
+    }
+  '
+}
+
+# Candidate hook session keys visible from an agent tool shell, best first:
+# explicit runtime ids (same precedence as _hook_refresh_state_dir, plus
+# MUSE_SESSION_ID, which launchers map to AGENTGUARD_SESSION_ID only in hook
+# env), then the agent-ancestor fallback. Callers verify candidates against
+# on-disk state instead of trusting the first one blindly.
+_hook_agent_shell_session_keys() {
+  local key ancestor seen=' '
+  for key in \
+    "${AGENTGUARD_SESSION_ID:-}" \
+    "${MUSE_SESSION_ID:-}" \
+    "${CODEX_THREAD_ID:-}" \
+    "${GROK_SESSION_ID:-}" \
+    "${CLAUDE_CODE_CURRENT_SESSION_ID:-}" \
+    "${CLAUDE_CODE_SESSION_ID:-}"; do
+    [ -n "$key" ] || continue
+    case "$seen" in *" $key "*) continue ;; esac
+    seen="$seen$key "
+    printf '%s\n' "$key"
+  done
+  ancestor=$(_hook_agent_ancestor_key 2>/dev/null) || ancestor=''
+  if [ -n "$ancestor" ]; then
+    case "$seen" in *" $ancestor "*) ;; *) printf '%s\n' "$ancestor" ;; esac
+  fi
+}
+
+# First candidate key, for marker creation when no session state exists yet.
+_hook_agent_shell_primary_key() {
+  local key
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    printf '%s\n' "$key"
+    return 0
+  done < <(_hook_agent_shell_session_keys)
+  return 1
+}
+
+# Every existing <root>/<key> session dir for this tool shell, across
+# plausible roots and candidate keys. Hooks deterministically use one root
+# tier, but a tool shell cannot know which (hook env often has XDG_* scrubbed
+# while the shell does not), so marker management covers each live view.
+_hook_agent_shell_state_dirs() {
+  local key root candidate found=0
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    while IFS= read -r root; do
+      [ -n "$root" ] || continue
+      candidate="$root/$key"
+      [ -d "$candidate" ] || continue
+      printf '%s\n' "$candidate"
+      found=1
+    done < <(_hook_state_roots)
+  done < <(_hook_agent_shell_session_keys)
+  [ "$found" -eq 1 ]
+}
+
+# Newest write inside a session dir: the dir itself plus its churn counters
+# and bypass marker. Counter rewrites do not bump the dir mtime, so comparing
+# bare dir mtimes lets a freshly created tier beat a live one.
+_hook_state_dir_newest() {
+  local dir="$1" entry newest=''
+  for entry in "$dir" "$dir"/edit-churn/* "$dir"/edit-churn-bypass; do
+    [ -e "$entry" ] || continue
+    if [ -z "$newest" ] || [ "$entry" -nt "$newest" ]; then
+      newest="$entry"
+    fi
+  done
+  printf '%s\n' "$newest"
+}
+
+# Resolve this tool shell's primary hook session dir: the existing
+# <root>/<key> with the most recent write inside. Newest-contents wins so a
+# live session beats a stale same-key dir left behind in another root tier.
+_hook_agent_shell_state_dir() {
+  local key root candidate best='' best_new='' new
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    while IFS= read -r root; do
+      [ -n "$root" ] || continue
+      candidate="$root/$key"
+      [ -d "$candidate" ] || continue
+      new=$(_hook_state_dir_newest "$candidate")
+      if [ -z "$best" ]; then
+        best="$candidate"
+        best_new="$new"
+      elif [ -n "$new" ] && { [ -z "$best_new" ] || [ "$new" -nt "$best_new" ]; }; then
+        best="$candidate"
+        best_new="$new"
+      fi
+    done < <(_hook_state_roots)
+  done < <(_hook_agent_shell_session_keys)
+  [ -n "$best" ] || return 1
+  printf '%s\n' "$best"
+}
+
 _hook_require_sley() {
   if ! command -v sley >/dev/null 2>&1; then
     _hook_block "sley command missing; install cgraf78/sley with shdeps"

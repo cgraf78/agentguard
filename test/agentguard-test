@@ -23,6 +23,7 @@ runtime_shell_files=(
   "$root/bin/agent-hook-session-start"
   "$root/bin/agent-hook-session-start-claude"
   "$root/bin/agent-hook-stop"
+  "$root/bin/agentguard-churn-bypass"
   "$root/bin/agentguard-classify-command"
   "$root/bin/claude-session-name"
   "$root/lib/agentguard/agentguard.sh"

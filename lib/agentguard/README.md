@@ -17,6 +17,10 @@ and no `suppressOutput` (see `_hook_strict_output_agent`).
   consumers that need AgentGuard's command classifier output as structured JSON.
 - `claude-session-name` is a PATH-visible helper used by
   `agent-hook-session-end-claude` to name Claude transcript sessions.
+- `agentguard-churn-bypass` is the PATH-visible mid-session API for the
+  edit-churn guard: `on`/`off` manage a session-scoped bypass marker the
+  agent itself can write (a tool-shell `export` cannot reach hook
+  processes), and `status` reports bypass state and churn totals.
 - `hook-helpers.sh` is the hook-runtime API for `agent-hook-*` entry points and
   sourced extensions.
   Sourced extensions can read `AGENTGUARD_CMD_TRIMMED`,
@@ -28,8 +32,9 @@ and no `suppressOutput` (see `_hook_strict_output_agent`).
   merging; AgentGuard owns the reusable runtime protocol mapping.
 - `agent-hook-pre-edit` warns after `AGENTGUARD_EDIT_CHURN_WARN` edits to a
   file and blocks after `AGENTGUARD_EDIT_CHURN_BLOCK` edits. Defaults are `5`
-  and `10`. Set `AGENTGUARD_EDIT_CHURN_BYPASS=1` to bypass the churn warning
-  and block for a deliberate edit pass.
+  and `10`. Run `agentguard-churn-bypass on` for a deliberate mid-session edit
+  pass, or set `AGENTGUARD_EDIT_CHURN_BYPASS=1` in the hook/launcher
+  environment for a launch-time bypass.
 - `agent-hook-pre-bash` can guard a broad bare-Git work tree when an integration
   sets `AGENTGUARD_PROTECTED_BARE_GIT_DIR`. Optional companion settings are
   `AGENTGUARD_PROTECTED_BARE_GIT_WORK_TREE` (defaults to `$HOME`),

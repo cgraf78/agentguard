@@ -63,8 +63,11 @@ assets through shdeps, or use their absolute paths in this checkout.
   Claude Code, Codex, Gemini CLI, Grok, and Muse, plus the OpenCode runtime adapter.
 - `agent-hook-pre-edit` warns after `AGENTGUARD_EDIT_CHURN_WARN` edits to a
   file and blocks after `AGENTGUARD_EDIT_CHURN_BLOCK` edits. Defaults are `5`
-  and `10`. Set `AGENTGUARD_EDIT_CHURN_BYPASS=1` to bypass the churn warning
-  and block for a deliberate edit pass.
+  and `10`. Run `agentguard-churn-bypass on` for a deliberate mid-session edit
+  pass (writes a session-scoped marker the agent itself can manage);
+  `AGENTGUARD_EDIT_CHURN_BYPASS=1` in the hook/launcher environment bypasses
+  the same guard at launch time. An `export` in an agent tool shell cannot
+  reach hook processes, so it never bypasses the guard.
 - `agent-hook-pre-bash` can guard a broad bare-Git work tree when an integration
   sets `AGENTGUARD_PROTECTED_BARE_GIT_DIR`. Optional companion settings are
   `AGENTGUARD_PROTECTED_BARE_GIT_WORK_TREE` (defaults to `$HOME`),
@@ -314,7 +317,8 @@ To add a new managed agent runtime:
 - `agent-hook-pre-edit` parses edited paths, reminds once per user prompt on
   code/config edits to apply AGENTS.md design/workflow/code-style guidance plus
   any loaded language-specific rule fragments, warns or blocks repeated edits to
-  the same file unless `AGENTGUARD_EDIT_CHURN_BYPASS` is enabled, and leaves
+  the same file unless bypassed (`agentguard-churn-bypass on`, or
+  `AGENTGUARD_EDIT_CHURN_BYPASS` in the hook environment), and leaves
   room for environment-specific generated-file or readonly-file guards.
 - `agent-hook-post-edit` formats changed files through
   `sley hook format-file`. Broader lint and verification policy stays in the

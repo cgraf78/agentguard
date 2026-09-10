@@ -11,3 +11,4 @@ hook bin/agent-hook-session-end
 hook bin/agent-hook-session-start
 hook bin/agent-hook-stop
 secure-classifier bin/agentguard-classify-command
+hook bin/agentguard-churn-bypass
