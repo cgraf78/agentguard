@@ -95,6 +95,27 @@ _run_hook "$PRE_BASH" '{"tool_input":{"command":"use rg instead of grep -r"}}'
 _assert_eq "grep -r end of sentence: not blocked" "0" "$HOOK_EXIT"
 _assert_not_contains "grep -r end of sentence: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
 
+# `-r` embedded in a quoted pattern operand is not a recursive flag → NOT
+# blocked. A bare quoted `"-r"` still blocks: the shell strips those quotes,
+# so grep really receives `-r`.
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'grep "foo -r" file' '{"tool_input":{"command":$c}}')"
+_assert_eq "grep quoted -r operand: not blocked" "0" "$HOOK_EXIT"
+_assert_not_contains "grep quoted -r operand: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "grep 'says -R loudly' file" '{"tool_input":{"command":$c}}')"
+_assert_eq "grep single-quoted -R operand: not blocked" "0" "$HOOK_EXIT"
+_assert_not_contains "grep single-quoted -R operand: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c 'grep "-r"' '{"tool_input":{"command":$c}}')"
+_assert_eq "grep bare quoted -r: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"grep --recursive pattern src/"}}'
+_assert_eq "grep --recursive: blocked" "2" "$HOOK_EXIT"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"grep -- -r"}}'
+_assert_eq "grep -- -r: not blocked" "0" "$HOOK_EXIT"
+_assert_not_contains "grep -- -r: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
 # `git absorb` creates fixup commits but leaves the caller to remember the
 # follow-up autosquash rebase. Agents should use the wrapper that performs the
 # whole workflow atomically so local branches do not accumulate loose fixups.
