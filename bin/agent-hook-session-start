@@ -55,5 +55,10 @@ if [ -n "$disk" ] && [ "$disk" -gt 90 ] 2>/dev/null; then
 fi
 
 _hook_hm_session_start
+# A reused session key (pid-derived fallbacks repeat after logout/reboot)
+# must not inherit a previous session's churn bypass: the marker persists in
+# the state-home tiers, so drop it at every session start. Runs after input
+# is read (above) so a JSON-only session id already refreshed the state dir.
+_hook_edit_churn_bypass_clear
 _hook_source_extensions
 _hook_finish

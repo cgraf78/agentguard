@@ -24,8 +24,19 @@ in an agent tool shell never reaches them. This command writes (or
 removes) a bypass marker file in the session state dir instead, a
 channel the agent can actually use mid-session. The marker resolves
 from runtime session ids when present and from the agent parent
-process otherwise, so it stays scoped to the current session. The
-bypass is deliberate and opt-in: it only exists after an explicit
+process otherwise, so it stays scoped to the current session. Only
+one session is ever managed: the first session id with existing
+state, or the first session id when no state exists yet. A nested
+agent's bypass never touches the outer session. Session ids
+containing
+.B /
+or
+.B ..
+are rejected. Every session start
+.RB ( agent-hook-session-start (1))
+removes any leftover marker, so a reused session key never inherits
+a previous session's bypass. The bypass is deliberate and opt-in: it
+only exists after an explicit
 .B on ,
 and a new session starts un-bypassed.
 .TP
@@ -35,7 +46,7 @@ state exists yet, the marker is planted under every plausible state
 root so the first hook to run finds it.
 .TP
 .B off
-Remove the bypass marker for this session from every state root.
+Remove this session's bypass marker from every state root.
 .TP
 .B status
 Show whether the bypass is active and current churn totals.
@@ -56,4 +67,5 @@ the bypass is not active.
 Usage error (missing or unknown subcommand).
 .SH SEE ALSO
 .BR agent-hook-pre-edit (1),
-.BR agent-hook-post-edit (1)
+.BR agent-hook-post-edit (1),
+.BR agent-hook-session-start (1)

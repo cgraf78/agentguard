@@ -96,7 +96,9 @@ _hook_codex_process_key() {
 # home for ephemeral runtime state and keeps stale per-session dirs from
 # accumulating. Fall back to an absolute XDG_STATE_HOME, then ~/.local/state,
 # and only to a uid-scoped tmp path when neither an XDG root nor HOME is
-# available, so hooks never hard-fail.
+# available, so hooks never hard-fail. Threat model: HOME-present
+# deployments are supported; the tmp fallback has no ownership/symlink
+# validation (pre-existing hardening follow-up).
 _hook_state_root() {
   local base=''
   case "${XDG_RUNTIME_DIR:-}" in
@@ -125,6 +127,66 @@ _hook_mkstate() {
   (umask 077 && mkdir -p "$1") 2>/dev/null
 }
 
+# Whether a session key is safe to use as a single state-dir path component.
+# Keys arrive from untrusted input (hook JSON, runtime env), and every state
+# path is built as <root>/<key> for mkdir, write, and rm. Reject anything that
+# could escape that component (`/`, `..`, `.`) or split the newline-delimited
+# key streams (`\n`). Callers skip or fall back on rejection; this predicate is
+# the structural layer every resolver and consumer also re-checks.
+_hook_session_key_safe() {
+  case "${1:-}" in
+    '' | . | */* | *..*) return 1 ;;
+  esac
+  case "${1:-}" in
+    *"
+"*) return 1 ;;
+  esac
+  return 0
+}
+
+# Nearest long-lived agent ancestor formatted as a hook session key. This is
+# the single shared pid-fallback resolver: the state-dir fallbacks below and
+# the agent-shell session enumerator must produce identical keys, or a
+# tool-shell command and its hooks resolve different state dirs. Defined up
+# here because the source-time state refresh calls it. Muse has no stable
+# runtime id, so its key is the bare agent pid; Codex/Grok/Gemini namespace
+# theirs. Match on the executable name only, never argv (see detect.sh for why
+# argv lies). No `claude` branch: hooks never synthesize a claude-* key
+# (Claude sessions always carry a session id), so emitting one would plant
+# state no hook reads.
+_hook_agent_ancestor_key() {
+  [ "${AGENTGUARD_PROCESS_DETECT:-1}" != "0" ] || return 1
+  local snapshot
+  snapshot=$(ps -axo pid=,ppid=,comm= 2>/dev/null) || return 1
+  [ -n "$snapshot" ] || return 1
+  printf '%s\n' "$snapshot" | awk -v start="$$" '
+    {
+      pid = $1
+      parent[pid] = $2
+      $1 = $2 = ""
+      sub(/^[[:space:]]+/, "")
+      command[pid] = $0
+    }
+    END {
+      if (!(start in command)) exit 1
+      pid = start
+      while (pid != "" && pid != "0" && !seen[pid]++) {
+        name = command[pid]
+        sub(/^.*\//, "", name)
+        if (name == "muse.real" || name == "muse") { print pid; exit 0 }
+        if (name == "codex") { print "codex-" pid; exit 0 }
+        if (name == "grok") { print "grok-" pid; exit 0 }
+        if (name == "gemini") { print "gemini-" pid; exit 0 }
+        if (!(pid in parent)) exit 1
+        next_pid = parent[pid]
+        if (next_pid == pid) exit 1
+        pid = next_pid
+      }
+      exit 1
+    }
+  '
+}
+
 # Session key for state directory isolation. Prefer stable runtime ids. Codex
 # hook commands can inherit CODEX_THREAD_ID from an outer Codex process when a
 # user launches nested Codex, so once Codex JSON has been read its session_id is
@@ -145,7 +207,7 @@ _hook_mkstate() {
 # circuit-breaker or Hive Memory markers with the parent. Parent SessionStart
 # and Stop omit subagentType and keep the unsuffixed key.
 _hook_refresh_state_dir() {
-  local session_key='' input_session='' input_subagent='' input_prompt='' codex_key=''
+  local session_key='' input_session='' input_subagent='' input_prompt='' codex_key='' ancestor=''
   if [ -n "${_HOOK_INPUT+x}" ]; then
     # Grok's hook envelope is camelCase (sessionId, subagentType); Claude/Codex
     # remain snake_case. Prefer snake_case so an existing runtime stays
@@ -179,12 +241,34 @@ _hook_refresh_state_dir() {
   if [ -z "$session_key" ] && codex_key=$(_hook_codex_process_key); then
     session_key="$codex_key"
   elif [ -z "$session_key" ] && [ "${AGENTGUARD_NAME:-}" = "grok" ]; then
-    session_key="grok-$PPID"
+    # Nearest grok ancestor, so hooks spawned through a wrapper resolve the
+    # same key as a tool shell in the same session (which cannot see this
+    # hook's $PPID). A foreign-runtime ancestor belongs to another session's
+    # state, so only a grok-shaped key is accepted here.
+    ancestor=$(_hook_agent_ancestor_key 2>/dev/null) || ancestor=''
+    case "$ancestor" in
+      grok-*) session_key="$ancestor" ;;
+      *) session_key="grok-$PPID" ;;
+    esac
   elif [ -z "$session_key" ] && [ -n "${GEMINI_PROJECT_DIR:-}" ]; then
-    session_key="gemini-$PPID"
+    ancestor=$(_hook_agent_ancestor_key 2>/dev/null) || ancestor=''
+    case "$ancestor" in
+      gemini-*) session_key="$ancestor" ;;
+      *) session_key="gemini-$PPID" ;;
+    esac
   fi
 
-  [ -n "$session_key" ] || session_key="$$"
+  if [ -z "$session_key" ]; then
+    # No runtime id anywhere (notably id-less Muse): the stable key is the
+    # agent ancestor pid, matching what a tool shell resolves. Only a bare
+    # pid is accepted: a namespaced key belongs to another runtime's session.
+    # Unreachable processes and disabled detection keep the historical `$$`.
+    ancestor=$(_hook_agent_ancestor_key 2>/dev/null) || ancestor=''
+    case "$ancestor" in
+      '' | *-* | *[!0-9]*) session_key="$$" ;;
+      *) session_key="$ancestor" ;;
+    esac
+  fi
 
   if [ -n "$input_subagent" ]; then
     if [ "${AGENTGUARD_NAME:-}" = "grok" ] ||
@@ -203,6 +287,12 @@ _hook_refresh_state_dir() {
       fi
     fi
   fi
+
+  # Env and JSON ids are untrusted input for a path component: a key
+  # containing `/` or `..` would escape the state tree for mkdir, counter
+  # writes, and marker removal alike, so an unsafe key falls back to this
+  # hook process instead of being trusted structurally anywhere downstream.
+  _hook_session_key_safe "$session_key" || session_key="$$"
 
   _HOOK_SESSION_KEY="$session_key"
   _HOOK_STATE_DIR="$(_hook_state_root)/$_HOOK_SESSION_KEY"
@@ -354,8 +444,9 @@ _hook_counter_reset() {
 # `export` in an agent tool shell cannot reach that environment (a Unix child
 # cannot change its parent's env), so a mid-session bypass needs a channel
 # the agent itself can write: a marker file in the session state dir. The
-# marker is session-scoped (a new session resolves a new state dir) and
-# opt-in (absent by default), so the guard's default behavior is unchanged.
+# marker is session-scoped (one primary key per shell, cleared at every
+# SessionStart so a reused key never inherits it) and opt-in (absent by
+# default), so the guard's default behavior is unchanged.
 
 _hook_edit_churn_bypass_file() {
   printf '%s/edit-churn-bypass\n' "$_HOOK_STATE_DIR"
@@ -364,6 +455,24 @@ _hook_edit_churn_bypass_file() {
 _hook_edit_churn_bypassed() {
   _hook_flag_enabled "${AGENTGUARD_EDIT_CHURN_BYPASS:-}" && return 0
   [ -f "$(_hook_edit_churn_bypass_file)" ]
+}
+
+# Remove this session's bypass marker from every root tier. Called from
+# SessionStart (wired for every runtime, including Grok subagents via
+# SubagentStart) so a new session always starts un-bypassed even when its key
+# is reused: pid-derived keys repeat after logout/reboot while markers persist
+# in the state-home tiers. This is the stale-marker mitigation; the predicate
+# above stays a cheap file test. Mid-session `on` is unaffected: the CLI runs
+# in a tool shell, which only exists after the session (and its SessionStart)
+# has fired.
+_hook_edit_churn_bypass_clear() {
+  local root
+  [ -n "${_HOOK_SESSION_KEY:-}" ] || return 0
+  _hook_session_key_safe "${_HOOK_SESSION_KEY:-}" || return 0
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    rm -f "$root/$_HOOK_SESSION_KEY/edit-churn-bypass" 2>/dev/null || true
+  done < <(_hook_state_roots)
 }
 
 # Every plausible per-user hook state root, most-preferred first. Hook
@@ -385,50 +494,12 @@ _hook_state_roots() {
   done
 }
 
-# Nearest long-lived agent ancestor formatted as a hook session key. Mirrors
-# the $PPID fallbacks in _hook_refresh_state_dir for runtimes that do not
-# inject a stable id: Muse hooks fall back to a bare parent pid, Codex to
-# codex-<pid>, Grok to grok-<pid>, Gemini to gemini-<pid>. Match on the
-# executable name only, never argv (see detect.sh for why argv lies).
-_hook_agent_ancestor_key() {
-  [ "${AGENTGUARD_PROCESS_DETECT:-1}" != "0" ] || return 1
-  local snapshot
-  snapshot=$(ps -axo pid=,ppid=,comm= 2>/dev/null) || return 1
-  [ -n "$snapshot" ] || return 1
-  printf '%s\n' "$snapshot" | awk -v start="$$" '
-    {
-      pid = $1
-      parent[pid] = $2
-      $1 = $2 = ""
-      sub(/^[[:space:]]+/, "")
-      command[pid] = $0
-    }
-    END {
-      if (!(start in command)) exit 1
-      pid = start
-      while (pid != "" && pid != "0" && !seen[pid]++) {
-        name = command[pid]
-        sub(/^.*\//, "", name)
-        if (name == "muse.real" || name == "muse") { print pid; exit 0 }
-        if (name == "codex") { print "codex-" pid; exit 0 }
-        if (name == "grok") { print "grok-" pid; exit 0 }
-        if (name == "gemini") { print "gemini-" pid; exit 0 }
-        if (name == "claude") { print "claude-" pid; exit 0 }
-        if (!(pid in parent)) exit 1
-        next_pid = parent[pid]
-        if (next_pid == pid) exit 1
-        pid = next_pid
-      }
-      exit 1
-    }
-  '
-}
-
 # Candidate hook session keys visible from an agent tool shell, best first:
 # explicit runtime ids (same precedence as _hook_refresh_state_dir, plus
 # MUSE_SESSION_ID, which launchers map to AGENTGUARD_SESSION_ID only in hook
-# env), then the agent-ancestor fallback. Callers verify candidates against
-# on-disk state instead of trusting the first one blindly.
+# env), then the agent-ancestor fallback. Unsafe ids are skipped here, so
+# every downstream consumer is safe by construction; consumers re-check
+# anyway (defense in depth).
 _hook_agent_shell_session_keys() {
   local key ancestor seen=' '
   for key in \
@@ -439,19 +510,37 @@ _hook_agent_shell_session_keys() {
     "${CLAUDE_CODE_CURRENT_SESSION_ID:-}" \
     "${CLAUDE_CODE_SESSION_ID:-}"; do
     [ -n "$key" ] || continue
+    _hook_session_key_safe "$key" || continue
     case "$seen" in *" $key "*) continue ;; esac
     seen="$seen$key "
     printf '%s\n' "$key"
   done
   ancestor=$(_hook_agent_ancestor_key 2>/dev/null) || ancestor=''
   if [ -n "$ancestor" ]; then
+    _hook_session_key_safe "$ancestor" || return 0
     case "$seen" in *" $ancestor "*) ;; *) printf '%s\n' "$ancestor" ;; esac
   fi
 }
 
-# First candidate key, for marker creation when no session state exists yet.
+# The ONE session this tool shell manages: the first candidate key with an
+# existing state dir in any root tier, else the first candidate key (for
+# marker creation before any hook has run). Single-key scoping keeps a nested
+# agent's bypass from disabling the outer session's guard; callers must never
+# fan out across keys. Tiers still fan out across roots: hooks deterministically
+# use one root tier, but a tool shell cannot know which (hook env often has
+# XDG_* scrubbed while the shell does not).
 _hook_agent_shell_primary_key() {
-  local key
+  local key root
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    while IFS= read -r root; do
+      [ -n "$root" ] || continue
+      if [ -d "$root/$key" ]; then
+        printf '%s\n' "$key"
+        return 0
+      fi
+    done < <(_hook_state_roots)
+  done < <(_hook_agent_shell_session_keys)
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     printf '%s\n' "$key"
@@ -460,22 +549,20 @@ _hook_agent_shell_primary_key() {
   return 1
 }
 
-# Every existing <root>/<key> session dir for this tool shell, across
-# plausible roots and candidate keys. Hooks deterministically use one root
-# tier, but a tool shell cannot know which (hook env often has XDG_* scrubbed
-# while the shell does not), so marker management covers each live view.
+# Every existing <root>/<key> session dir for this tool shell's primary
+# session key, across plausible roots. Single key, many tiers: the key picks
+# the session, the tiers cover the root the hooks actually read.
 _hook_agent_shell_state_dirs() {
   local key root candidate found=0
-  while IFS= read -r key; do
-    [ -n "$key" ] || continue
-    while IFS= read -r root; do
-      [ -n "$root" ] || continue
-      candidate="$root/$key"
-      [ -d "$candidate" ] || continue
-      printf '%s\n' "$candidate"
-      found=1
-    done < <(_hook_state_roots)
-  done < <(_hook_agent_shell_session_keys)
+  key=$(_hook_agent_shell_primary_key 2>/dev/null) || return 1
+  _hook_session_key_safe "$key" || return 1
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    candidate="$root/$key"
+    [ -d "$candidate" ] || continue
+    printf '%s\n' "$candidate"
+    found=1
+  done < <(_hook_state_roots)
   [ "$found" -eq 1 ]
 }
 
@@ -493,27 +580,28 @@ _hook_state_dir_newest() {
   printf '%s\n' "$newest"
 }
 
-# Resolve this tool shell's primary hook session dir: the existing
-# <root>/<key> with the most recent write inside. Newest-contents wins so a
-# live session beats a stale same-key dir left behind in another root tier.
+# Resolve this tool shell's primary hook session dir: the primary key's
+# existing tier with the most recent write inside. Newest-contents wins so a
+# live tier beats a stale same-key dir left behind in another root tier. The
+# key is fixed (never newest-across-keys) so a nested session cannot steal
+# the outer session's summary — or its bypass.
 _hook_agent_shell_state_dir() {
   local key root candidate best='' best_new='' new
-  while IFS= read -r key; do
-    [ -n "$key" ] || continue
-    while IFS= read -r root; do
-      [ -n "$root" ] || continue
-      candidate="$root/$key"
-      [ -d "$candidate" ] || continue
-      new=$(_hook_state_dir_newest "$candidate")
-      if [ -z "$best" ]; then
-        best="$candidate"
-        best_new="$new"
-      elif [ -n "$new" ] && { [ -z "$best_new" ] || [ "$new" -nt "$best_new" ]; }; then
-        best="$candidate"
-        best_new="$new"
-      fi
-    done < <(_hook_state_roots)
-  done < <(_hook_agent_shell_session_keys)
+  key=$(_hook_agent_shell_primary_key 2>/dev/null) || return 1
+  _hook_session_key_safe "$key" || return 1
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    candidate="$root/$key"
+    [ -d "$candidate" ] || continue
+    new=$(_hook_state_dir_newest "$candidate")
+    if [ -z "$best" ]; then
+      best="$candidate"
+      best_new="$new"
+    elif [ -n "$new" ] && { [ -z "$best_new" ] || [ "$new" -nt "$best_new" ]; }; then
+      best="$candidate"
+      best_new="$new"
+    fi
+  done < <(_hook_state_roots)
   [ -n "$best" ] || return 1
   printf '%s\n' "$best"
 }

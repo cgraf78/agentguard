@@ -52,17 +52,20 @@ Usage: agentguard-churn-bypass <on [reason...] | off | status>
 Manage the edit-churn guard bypass for the current agent session.
 
   on [reason...]   Bypass the churn warn/block for this session. Writes a
-                   marker file to every existing session-state view for this
-                   session (hooks read one root tier, and a tool shell cannot
-                   know which). When no session state exists yet, plants the
-                   marker under every plausible state root so the first hook
-                   to run finds it.
-  off              Remove the bypass marker for this session (all roots).
+                   marker file to each state-root tier holding this session
+                   (hooks read one root tier, and a tool shell cannot know
+                   which). Only this session is affected, even when other
+                   sessions have state on this host. When no session state
+                   exists yet, plants the marker under every plausible state
+                   root so the first hook to run finds it.
+  off              Remove this session's bypass marker (all roots).
   status           Show whether the bypass is active and current churn totals.
                    Exits 0 when bypassed, 1 when not.
 
 The bypass is session-scoped and deliberate: it only exists after an
-explicit `on`, and a new session starts un-bypassed.
+explicit `on`, and a new session starts un-bypassed (every SessionStart
+removes any marker left from a reused session key). Session ids
+containing `/` or `..` are rejected.
 EOF
 }
 
@@ -83,16 +86,35 @@ _churn_bypass_summary() {
   printf '%s tracked files, highest per-file count %s\n' "$tracked" "$max"
 }
 
-# Every <root>/<key>/edit-churn-bypass path this session could consult.
+# <root>/<primary-key>/edit-churn-bypass paths across tiers. Single-key: only
+# the primary session is ever managed. The key is re-checked here even though
+# the resolver already filters, so a future resolver change cannot turn this
+# rm/write path into a traversal.
 _churn_bypass_marker_paths() {
   local key root
-  while IFS= read -r key; do
-    [ -n "$key" ] || continue
-    while IFS= read -r root; do
-      [ -n "$root" ] || continue
-      printf '%s/%s/edit-churn-bypass\n' "$root" "$key"
-    done < <(_hook_state_roots)
-  done < <(_hook_agent_shell_session_keys)
+  key=$(_hook_agent_shell_primary_key 2>/dev/null) || return 0
+  _hook_session_key_safe "$key" || return 0
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    printf '%s/%s/edit-churn-bypass\n' "$root" "$key"
+  done < <(_hook_state_roots)
+}
+
+# True when identity env carries a value the key filter rejected, so the
+# caller can tell "no identity" apart from "identity refused".
+_churn_bypass_has_unsafe_identity() {
+  local id
+  for id in \
+    "${AGENTGUARD_SESSION_ID:-}" \
+    "${MUSE_SESSION_ID:-}" \
+    "${CODEX_THREAD_ID:-}" \
+    "${GROK_SESSION_ID:-}" \
+    "${CLAUDE_CODE_CURRENT_SESSION_ID:-}" \
+    "${CLAUDE_CODE_SESSION_ID:-}"; do
+    [ -n "$id" ] || continue
+    _hook_session_key_safe "$id" || return 0
+  done
+  return 1
 }
 
 _churn_bypass_on() {
@@ -100,8 +122,13 @@ _churn_bypass_on() {
   targets=$(_hook_agent_shell_state_dirs 2>/dev/null) || targets=''
   if [ -z "$targets" ]; then
     key=$(_hook_agent_shell_primary_key 2>/dev/null) || key=''
+    _hook_session_key_safe "$key" || key=''
     if [ -z "$key" ]; then
-      echo "agentguard-churn-bypass: no agent session identity found (no runtime id in env, no agent parent process); cannot place the bypass marker." >&2
+      if _churn_bypass_has_unsafe_identity; then
+        echo "agentguard-churn-bypass: ignoring unsafe session identity (a session id must not contain / or ..); cannot place the bypass marker." >&2
+      else
+        echo "agentguard-churn-bypass: no agent session identity found (no runtime id in env, no agent parent process); cannot place the bypass marker." >&2
+      fi
       return 1
     fi
     while IFS= read -r root; do
@@ -117,6 +144,9 @@ $root/$key"
   stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown-time)"
   while IFS= read -r target; do
     [ -n "$target" ] || continue
+    # Final layer: never mkdir outside the state tree, no matter what a
+    # resolver returned.
+    _hook_session_key_safe "${target##*/}" || continue
     _hook_mkstate "$target" || continue
     printf 'bypassed-at=%s pid=%s reason=%s\n' \
       "$stamp" "$$" "$reason" >"$target/edit-churn-bypass" 2>/dev/null || continue
@@ -132,9 +162,9 @@ $root/$key"
       "$key" "$written" "$([ "$written" -eq 1 ] && echo root || echo roots)"
     return 0
   fi
-  # The marker lands in every live view of this session: hooks read exactly
-  # one root tier, and a tool shell cannot know which (hook env often has
-  # XDG_* scrubbed while the shell does not). Report the primary view.
+  # The marker lands in every live tier of this one session: hooks read
+  # exactly one root tier, and a tool shell cannot know which (hook env often
+  # has XDG_* scrubbed while the shell does not). Report the primary view.
   primary=$(_hook_agent_shell_state_dir 2>/dev/null) || primary="$dir"
   if [ "$written" -gt 1 ]; then
     printf 'churn bypass on for this session (%s; marker in %s state dirs).\n' \
