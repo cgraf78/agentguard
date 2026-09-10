@@ -138,6 +138,14 @@ _churn_file() {
 
 _churn_key() { basename "$(_churn_file "$1")"; }
 
+_bypass_file() {
+  AGENTGUARD_SESSION_ID="$TEST_SID" \
+    AGENTGUARD_NAME="agent" \
+    TMPDIR="$TEST_TMPDIR" \
+    CODEX_THREAD_ID="" \
+    bash -c 'source "$1"; _hook_edit_churn_bypass_file' _ "$HELPERS"
+}
+
 _reset_state
 
 # Counter increments on each edit
@@ -187,7 +195,7 @@ _assert_eq "churn 5: exit 0 (warn doesn't block)" "0" "$HOOK_EXIT"
 _assert_contains "churn 5: WARNING in stderr" "WARNING" "$HOOK_STDERR"
 _assert_contains "churn 5: mentions count" "5 times" "$HOOK_STDERR"
 _assert_contains "churn 5: shows filename" "f.py" "$HOOK_STDERR"
-_assert_contains "churn 5: shows bypass" "AGENTGUARD_EDIT_CHURN_BYPASS=1" "$HOOK_STDERR"
+_assert_contains "churn 5: shows bypass" "agentguard-churn-bypass on" "$HOOK_STDERR"
 
 echo "=== edit churn: block at threshold ==="
 
@@ -201,7 +209,7 @@ _assert_eq "churn 10: exit 2 (blocked)" "2" "$HOOK_EXIT"
 _assert_contains "churn 10: BLOCKED in stderr" "BLOCKED" "$HOOK_STDERR"
 _assert_contains "churn 10: mentions count" "10 times" "$HOOK_STDERR"
 _assert_contains "churn 10: shows filename" "f.py" "$HOOK_STDERR"
-_assert_contains "churn 10: shows bypass" "AGENTGUARD_EDIT_CHURN_BYPASS=1" "$HOOK_STDERR"
+_assert_contains "churn 10: shows bypass" "agentguard-churn-bypass on" "$HOOK_STDERR"
 
 echo "=== edit churn: bypass ==="
 
@@ -236,6 +244,25 @@ rm -f "$out_file" "$err_file"
 _assert_eq "churn bypass true: exit 0" "0" "$HOOK_EXIT"
 _assert_not_contains "churn bypass true: no warning" "WARNING" "$HOOK_STDERR"
 _assert_not_contains "churn bypass true: no block" "BLOCKED" "$HOOK_STDERR"
+
+echo "=== edit churn: marker bypass ==="
+
+# f.py still sits at 10 edits from the block section, so pre-edit blocks
+# until the session marker exists.
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/tmp/test/f.py"}}'
+_assert_eq "churn marker: pre-bypass still blocked" "2" "$HOOK_EXIT"
+
+: >"$(_bypass_file)"
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/tmp/test/f.py"}}'
+_assert_eq "churn marker: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "churn marker: no warning" "WARNING" "$HOOK_STDERR"
+_assert_not_contains "churn marker: no block" "BLOCKED" "$HOOK_STDERR"
+
+rm -f "$(_bypass_file)"
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/tmp/test/f.py"}}'
+_assert_eq "churn marker removed: blocked again" "2" "$HOOK_EXIT"
+_assert_contains "churn marker removed: BLOCKED" "BLOCKED" "$HOOK_STDERR"
+_assert_contains "churn marker removed: names command" "agentguard-churn-bypass on" "$HOOK_STDERR"
 
 echo "=== edit churn: first edit has no warning ==="
 

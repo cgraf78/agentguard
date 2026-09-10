@@ -83,17 +83,20 @@ _pre_edit_comment_reminder() {
   done <<<"$AGENTGUARD_EDIT_FILES"
 }
 
-# Edit churn guard
-if ! _hook_flag_enabled "${AGENTGUARD_EDIT_CHURN_BYPASS:-}"; then
+# Edit churn guard. The bypass is a session marker file (see
+# agentguard-churn-bypass) or the launch-time env var. A tool-shell `export`
+# cannot reach hook processes, so the remediation names the command, not the
+# variable.
+if ! _hook_edit_churn_bypassed; then
   while IFS= read -r _fp; do
     [ -n "$_fp" ] || continue
     _churn_file=$(_hook_edit_churn_file "$_fp")
     if [ -f "$_churn_file" ]; then
       _count=$(_hook_counter_read "$_churn_file")
       if [ "${_count:-0}" -ge "${AGENTGUARD_EDIT_CHURN_BLOCK:-10}" ]; then
-        _hook_block "'$(basename "$_fp")' has been edited $_count times this session. Step back and rethink the approach, or set AGENTGUARD_EDIT_CHURN_BYPASS=1 for a deliberate edit pass."
+        _hook_block "'$(basename "$_fp")' has been edited $_count times this session. Step back and rethink the approach, or run \`agentguard-churn-bypass on\` for a deliberate edit pass."
       elif [ "${_count:-0}" -ge "${AGENTGUARD_EDIT_CHURN_WARN:-5}" ]; then
-        _hook_warn "'$(basename "$_fp")' has been edited $_count times this session. Consider whether you're making progress; set AGENTGUARD_EDIT_CHURN_BYPASS=1 for a deliberate edit pass."
+        _hook_warn "'$(basename "$_fp")' has been edited $_count times this session. Consider whether you're making progress; run \`agentguard-churn-bypass on\` for a deliberate edit pass."
       fi
     fi
   done <<<"$AGENTGUARD_EDIT_FILES"

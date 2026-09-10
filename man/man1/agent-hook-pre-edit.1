@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-PRE-EDIT 1 "2026-06-30" "agentguard" "User Commands"
+.TH AGENT-HOOK-PRE-EDIT 1 "2026-09-10" "agentguard" "User Commands"
 .SH NAME
 agent-hook-pre-edit \- guard agent file edits before they are applied
 .SH SYNOPSIS
@@ -14,9 +14,14 @@ The churn guard warns at
 .B AGENTGUARD_EDIT_CHURN_WARN
 edits to one file and blocks at
 .B AGENTGUARD_EDIT_CHURN_BLOCK .
-Set
+Run
+.B agentguard-churn-bypass on
+for a deliberate mid-session repeated-edit pass; the command writes a
+session-scoped bypass marker the agent itself can manage. Setting
 .B AGENTGUARD_EDIT_CHURN_BYPASS=1
-for a deliberate repeated-edit pass.
+in the hook or launcher environment bypasses the same guard at launch
+time. An export in an agent tool shell cannot reach hook processes, so
+it never bypasses the guard.
 .SH EXIT STATUS
 .TP
 .B 0
@@ -25,4 +30,5 @@ The edit is allowed, possibly with warnings or reminders.
 .B 2
 The edit is blocked.
 .SH SEE ALSO
-.BR agent-hook-post-edit (1)
+.BR agent-hook-post-edit (1),
+.BR agentguard-churn-bypass (1)

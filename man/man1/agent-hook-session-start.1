@@ -15,6 +15,11 @@ When a session is launched from
 .BR $HOME ,
 AgentGuard treats that as no active project instead of passing the home
 directory as a project hint.
+.PP
+Every start also removes the session's edit-churn bypass marker (see
+.BR agentguard-churn-bypass (1))
+from every state root, so a reused session key never inherits a
+previous session's bypass.
 .SH EXIT STATUS
 .TP
 .B 0

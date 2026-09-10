@@ -1,0 +1,522 @@
+#!/usr/bin/env bash
+# agent-churn-bypass-test — mid-session edit-churn bypass channel.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+CLI="$BIN_DIR/agentguard-churn-bypass"
+PRE_EDIT="$BIN_DIR/agent-hook-pre-edit"
+POST_EDIT="$BIN_DIR/agent-hook-post-edit"
+
+# The CLI probes every state root tier, including the HOME fallback. Mock HOME
+# (and TMPDIR per invocation) so the uid-tmp and home tiers stay hermetic.
+_mock_home
+export XDG_STATE_HOME="$TEST_TMPDIR/xdg-state"
+
+# Extra identity env for multi-session fixtures (e.g. a nested outer id
+# alongside the inner one). Callers set _RUN_CLI_ENV=(VAR=value ...) or leave
+# it empty.
+_RUN_CLI_ENV=()
+
+# Run the CLI for a session id with controlled env. Captures stdout into
+# $CLI_STDOUT, stderr into $CLI_STDERR, and exit code into $CLI_EXIT.
+_run_cli() {
+  local sid="$1"
+  shift
+  # shellcheck disable=SC2034 # consumed by assertions below via dynamic scope.
+  CLI_STDOUT=""
+  # shellcheck disable=SC2034
+  CLI_STDERR=""
+  # shellcheck disable=SC2034
+  CLI_EXIT=0
+  local out_file err_file
+  out_file=$(mktemp "$TEST_TMPDIR/cli-out.XXXXXX")
+  err_file=$(mktemp "$TEST_TMPDIR/cli-err.XXXXXX")
+  env "${_RUN_CLI_ENV[@]}" AGENTGUARD_SESSION_ID="$sid" TMPDIR="$TEST_TMPDIR" \
+    "$CLI" "$@" >"$out_file" 2>"$err_file" || CLI_EXIT=$?
+  CLI_STDOUT=$(cat "$out_file")
+  CLI_STDERR=$(cat "$err_file")
+  rm -f "$out_file" "$err_file"
+}
+
+_runtime_marker() {
+  printf '%s/agentguard/hook-state/%s/edit-churn-bypass\n' "$TEST_TMPDIR" "$1"
+}
+
+_state_home_marker() {
+  printf '%s/agentguard/hook-state/%s/edit-churn-bypass\n' "$XDG_STATE_HOME" "$1"
+}
+
+_home_marker() {
+  printf '%s/.local/state/agentguard/hook-state/%s/edit-churn-bypass\n' "$HOME" "$1"
+}
+
+_uid_tmp_marker() {
+  printf '%s/agentguard-hook-state-%s/%s/edit-churn-bypass\n' \
+    "$TEST_TMPDIR" "$(id -u)" "$1"
+}
+
+echo ""
+echo "=== churn-bypass: usage ==="
+
+_run_cli "$TEST_SID"
+_assert_exit "no args: exit 2" 2 "$CLI_EXIT"
+_assert_contains "no args: usage" "Usage:" "$CLI_STDERR"
+
+_run_cli "$TEST_SID" bogus
+_assert_exit "unknown subcommand: exit 2" 2 "$CLI_EXIT"
+_assert_contains "unknown subcommand: names it" "bogus" "$CLI_STDERR"
+
+_run_cli "$TEST_SID" --help
+_assert_exit "help: exit 0" 0 "$CLI_EXIT"
+_assert_contains "help: usage" "Usage:" "$CLI_STDOUT"
+
+echo "=== churn-bypass: preemptive on/off/status ==="
+
+FRESH_SID="agent-churn-bypass-fresh-$$"
+
+_run_cli "$FRESH_SID" status
+_assert_exit "fresh status: exit 1 when off" 1 "$CLI_EXIT"
+_assert_contains "fresh status: no bypass" "no bypass" "$CLI_STDOUT"
+_assert_contains "fresh status: no state" "no session state yet" "$CLI_STDOUT"
+
+_run_cli "$FRESH_SID" on deliberate pass
+_assert_exit "preemptive on: exit 0" 0 "$CLI_EXIT"
+_assert_contains "preemptive on: armed" "bypass armed for session key $FRESH_SID" "$CLI_STDOUT"
+
+# No session state existed, so the marker is planted under every tier: hooks
+# run with XDG_* scrubbed and may resolve a different root than this shell.
+_assert_file_exists "preemptive on: runtime marker" "$(_runtime_marker "$FRESH_SID")"
+_assert_file_exists "preemptive on: state-home marker" "$(_state_home_marker "$FRESH_SID")"
+_assert_file_exists "preemptive on: home marker" "$(_home_marker "$FRESH_SID")"
+_assert_file_exists "preemptive on: uid-tmp marker" "$(_uid_tmp_marker "$FRESH_SID")"
+_assert_contains "preemptive on: marker records reason" \
+  "reason=deliberate pass" "$(cat "$(_runtime_marker "$FRESH_SID")")"
+
+_run_cli "$FRESH_SID" status
+_assert_exit "armed status: exit 0 when on" 0 "$CLI_EXIT"
+_assert_contains "armed status: bypass on" "bypass on" "$CLI_STDOUT"
+
+_run_cli "$FRESH_SID" off
+_assert_exit "off: exit 0" 0 "$CLI_EXIT"
+_assert_contains "off: removed all tiers" "removed 4" "$CLI_STDOUT"
+_assert_file_missing "off: runtime marker gone" "$(_runtime_marker "$FRESH_SID")"
+_assert_file_missing "off: state-home marker gone" "$(_state_home_marker "$FRESH_SID")"
+_assert_file_missing "off: home marker gone" "$(_home_marker "$FRESH_SID")"
+_assert_file_missing "off: uid-tmp marker gone" "$(_uid_tmp_marker "$FRESH_SID")"
+
+_run_cli "$FRESH_SID" status
+_assert_exit "off status: exit 1 when off" 1 "$CLI_EXIT"
+
+_run_cli "$FRESH_SID" off
+_assert_exit "double off: exit 0" 0 "$CLI_EXIT"
+_assert_contains "double off: already off" "already off" "$CLI_STDOUT"
+
+echo "=== churn-bypass: existing session state ==="
+
+_reset_state
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  _run_hook "$POST_EDIT" '{"tool_input":{"file_path":"/tmp/test/f.py"}}'
+done
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/tmp/test/f.py"}}'
+_assert_eq "blocked before bypass: exit 2" "2" "$HOOK_EXIT"
+
+_run_cli "$TEST_SID" on
+_assert_exit "on with state: exit 0" 0 "$CLI_EXIT"
+_assert_contains "on with state: reports counts" "highest per-file count 10" "$CLI_STDOUT"
+
+# The live session dir already exists, so exactly that dir gets the marker.
+_assert_file_exists "on with state: runtime marker" "$(_runtime_marker "$TEST_SID")"
+_assert_file_missing "on with state: no state-home litter" "$(_state_home_marker "$TEST_SID")"
+_assert_file_missing "on with state: no home litter" "$(_home_marker "$TEST_SID")"
+_assert_file_missing "on with state: no uid-tmp litter" "$(_uid_tmp_marker "$TEST_SID")"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/tmp/test/f.py"}}'
+_assert_eq "bypassed edit: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "bypassed edit: no block" "BLOCKED" "$HOOK_STDERR"
+
+_run_cli "$TEST_SID" off
+_assert_exit "off with state: exit 0" 0 "$CLI_EXIT"
+
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/tmp/test/f.py"}}'
+_assert_eq "un-bypassed edit: blocked again" "2" "$HOOK_EXIT"
+
+echo "=== churn-bypass: hook reads a different tier than the shell ==="
+
+_run_hook_no_runtime() {
+  # Production Muse shape: hooks run with XDG_* scrubbed while the agent
+  # shell keeps XDG_RUNTIME_DIR, so each resolves a different state root.
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    -u XDG_RUNTIME_DIR
+    AGENTGUARD_SESSION_ID="$XROOT_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="agent"
+    CODEX_THREAD_ID=
+  )
+  _run_hook_env "$@"
+}
+
+XROOT_SID="agent-churn-bypass-xroot-$$"
+
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  _run_hook_no_runtime "$POST_EDIT" '{"tool_input":{"file_path":"/tmp/test/x.py"}}'
+done
+
+# A same-key dir also exists in the runtime tier (newer by dir mtime, with
+# no churn inside). The bypass must still reach the tier the hook reads.
+mkdir -p "$TEST_TMPDIR/agentguard/hook-state/$XROOT_SID"
+: >"$TEST_TMPDIR/agentguard/hook-state/$XROOT_SID/stale-note"
+
+_run_hook_no_runtime "$PRE_EDIT" '{"tool_input":{"file_path":"/tmp/test/x.py"}}'
+_assert_eq "xroot blocked before bypass: exit 2" "2" "$HOOK_EXIT"
+
+_run_cli "$XROOT_SID" on
+_assert_exit "xroot on: exit 0" 0 "$CLI_EXIT"
+_assert_file_exists "xroot on: state-home marker" "$(_state_home_marker "$XROOT_SID")"
+_assert_file_exists "xroot on: runtime marker" "$(_runtime_marker "$XROOT_SID")"
+
+_run_hook_no_runtime "$PRE_EDIT" '{"tool_input":{"file_path":"/tmp/test/x.py"}}'
+_assert_eq "xroot bypassed edit: exit 0" "0" "$HOOK_EXIT"
+_assert_not_contains "xroot bypassed edit: no block" "BLOCKED" "$HOOK_STDERR"
+
+_run_cli "$XROOT_SID" off
+_assert_exit "xroot off: exit 0" 0 "$CLI_EXIT"
+
+_run_hook_no_runtime "$PRE_EDIT" '{"tool_input":{"file_path":"/tmp/test/x.py"}}'
+_assert_eq "xroot un-bypassed edit: blocked again" "2" "$HOOK_EXIT"
+
+echo "=== churn-bypass: agent-ancestor session key ==="
+
+# The production Muse path: no runtime id in env, so the session key comes
+# from the nearest agent ancestor pid. Fake it hermetically with a bash copy
+# whose executable name (comm) is the agent name.
+_fake_agent_dir=$(_tmpdir)
+_fake_probe="$_fake_agent_dir/probe.sh"
+# shellcheck disable=SC2016 # Single quotes are intentional: expansion happens in the generated probe, not here.
+printf '%s\n' '#!/usr/bin/env bash' 'source "$1"' \
+  'printf "%s:%s" "$PPID" "$(_hook_agent_ancestor_key)"' >"$_fake_probe"
+chmod +x "$_fake_probe"
+if _real_bash=$(command -v bash) && [ -x "$_real_bash" ] &&
+  cp "$_real_bash" "$_fake_agent_dir/muse" 2>/dev/null &&
+  cp "$_real_bash" "$_fake_agent_dir/codex" 2>/dev/null &&
+  cp "$_real_bash" "$_fake_agent_dir/grok" 2>/dev/null &&
+  cp "$_real_bash" "$_fake_agent_dir/gemini" 2>/dev/null &&
+  cp "$_real_bash" "$_fake_agent_dir/claude" 2>/dev/null &&
+  _fake_comm=$("$_fake_agent_dir/muse" -c 'ps -o comm= -p "$$" 2>/dev/null' | tr -d '[:space:]') &&
+  [ "$_fake_comm" = "muse" ]; then
+  _have_fake_agents=1
+  # The probe runs as a non-agent-named child of the fake, mirroring a tool
+  # shell under the real agent process: the key must be the fake's pid. The
+  # trailing `; :` defeats `bash -c`'s single-command exec optimization,
+  # which would otherwise replace the fake instead of forking under it.
+  # shellcheck disable=SC2016 # Single quotes are intentional: expansion happens in the fake agent child, not here.
+  _ancestor_result=$(AGENTGUARD_PROCESS_DETECT=1 \
+    "$_fake_agent_dir/muse" -c '"$0" "$1"; :' "$_fake_probe" "$HELPERS" 2>/dev/null)
+  _assert_eq "ancestor key: muse resolves to parent pid" \
+    "${_ancestor_result%%:*}" "${_ancestor_result##*:}"
+  # shellcheck disable=SC2016 # Single quotes are intentional: expansion happens in the fake agent child, not here.
+  _ancestor_result=$(AGENTGUARD_PROCESS_DETECT=1 \
+    "$_fake_agent_dir/codex" -c '"$0" "$1"; :' "$_fake_probe" "$HELPERS" 2>/dev/null)
+  _assert_eq "ancestor key: codex resolves namespaced" \
+    "codex-${_ancestor_result%%:*}" "${_ancestor_result##*:}"
+  # shellcheck disable=SC2016 # Single quotes are intentional: expansion happens in the fake agent child, not here.
+  _ancestor_result=$(AGENTGUARD_PROCESS_DETECT=1 \
+    "$_fake_agent_dir/grok" -c '"$0" "$1"; :' "$_fake_probe" "$HELPERS" 2>/dev/null)
+  _assert_eq "ancestor key: grok resolves namespaced" \
+    "grok-${_ancestor_result%%:*}" "${_ancestor_result##*:}"
+  # shellcheck disable=SC2016 # Single quotes are intentional: expansion happens in the fake agent child, not here.
+  _ancestor_result=$(AGENTGUARD_PROCESS_DETECT=1 \
+    "$_fake_agent_dir/gemini" -c '"$0" "$1"; :' "$_fake_probe" "$HELPERS" 2>/dev/null)
+  _assert_eq "ancestor key: gemini resolves namespaced" \
+    "gemini-${_ancestor_result%%:*}" "${_ancestor_result##*:}"
+  # Hooks never synthesize a claude-* key (Claude sessions always carry a
+  # session id), so the ancestor resolver must never emit one either — even
+  # when the suite itself runs under a real agent, in which case the result
+  # is that outer agent's key, never a claude-shaped one.
+  # shellcheck disable=SC2016 # Single quotes are intentional: expansion happens in the fake agent child, not here.
+  _ancestor_result=$(AGENTGUARD_PROCESS_DETECT=1 \
+    "$_fake_agent_dir/claude" -c '"$0" "$1"; :' "$_fake_probe" "$HELPERS" 2>/dev/null)
+  _assert_not_contains "ancestor key: never synthesizes claude key" \
+    "claude-" "${_ancestor_result##*:}"
+else
+  _have_fake_agents=0
+  _pass "ancestor key: skipped (cannot fake agent comm here)"
+  _pass "ancestor key: skipped codex variant"
+  _pass "ancestor key: skipped grok variant"
+  _pass "ancestor key: skipped gemini variant"
+  _pass "ancestor key: skipped claude variant"
+fi
+
+echo "=== churn-bypass: no session identity ==="
+
+out_file=$(mktemp "$TEST_TMPDIR/cli-out.XXXXXX")
+err_file=$(mktemp "$TEST_TMPDIR/cli-err.XXXXXX")
+CLI_EXIT=0
+env -u AGENTGUARD_SESSION_ID -u MUSE_SESSION_ID -u CODEX_THREAD_ID \
+  -u GROK_SESSION_ID -u CLAUDE_CODE_CURRENT_SESSION_ID -u CLAUDE_CODE_SESSION_ID \
+  AGENTGUARD_PROCESS_DETECT=0 TMPDIR="$TEST_TMPDIR" \
+  "$CLI" on >"$out_file" 2>"$err_file" || CLI_EXIT=$?
+CLI_STDERR=$(cat "$err_file")
+rm -f "$out_file" "$err_file"
+_assert_exit "no identity: exit 1" 1 "$CLI_EXIT"
+_assert_contains "no identity: actionable" "no agent session identity" "$CLI_STDERR"
+
+echo "=== churn-bypass: tool-shell env export stays documented ==="
+
+_run_cli "$TEST_SID" status
+_assert_not_contains "status clean: no env line without export" \
+  "effective only in hook/launcher env" "$CLI_STDOUT"
+
+out_file=$(mktemp "$TEST_TMPDIR/cli-out.XXXXXX")
+err_file=$(mktemp "$TEST_TMPDIR/cli-err.XXXXXX")
+CLI_EXIT=0
+AGENTGUARD_SESSION_ID="$TEST_SID" TMPDIR="$TEST_TMPDIR" \
+  AGENTGUARD_EDIT_CHURN_BYPASS=1 \
+  "$CLI" status >"$out_file" 2>"$err_file" || CLI_EXIT=$?
+CLI_STDOUT=$(cat "$out_file")
+rm -f "$out_file" "$err_file"
+_assert_exit "env status: exit 1 without marker" 1 "$CLI_EXIT"
+_assert_contains "env status: export caveat" \
+  "effective only in hook/launcher env" "$CLI_STDOUT"
+
+echo "=== churn-bypass: single primary session ==="
+
+OUTER_SID="agent-churn-bypass-outer-$$"
+INNER_SID="agent-churn-bypass-inner-$$"
+mkdir -p "$TEST_TMPDIR/agentguard/hook-state/$OUTER_SID"
+mkdir -p "$TEST_TMPDIR/agentguard/hook-state/$INNER_SID"
+
+# Nested shape: the inner tool shell inherits the outer Muse id while its own
+# explicit id takes precedence. Only the primary (inner) session is managed.
+_RUN_CLI_ENV=(MUSE_SESSION_ID="$OUTER_SID")
+_run_cli "$INNER_SID" on
+_assert_exit "nested on: exit 0" 0 "$CLI_EXIT"
+_assert_file_exists "nested on: inner marker" "$(_runtime_marker "$INNER_SID")"
+_assert_file_missing "nested on: outer untouched" "$(_runtime_marker "$OUTER_SID")"
+
+_run_cli "$INNER_SID" status
+_assert_exit "nested status: exit 0" 0 "$CLI_EXIT"
+_assert_contains "nested status: names inner" "$INNER_SID" "$CLI_STDOUT"
+_assert_not_contains "nested status: hides outer" "$OUTER_SID" "$CLI_STDOUT"
+
+# `off` removes only the primary marker; a planted outer marker survives.
+: >"$(_runtime_marker "$OUTER_SID")"
+_run_cli "$INNER_SID" off
+_assert_exit "nested off: exit 0" 0 "$CLI_EXIT"
+_assert_file_missing "nested off: inner gone" "$(_runtime_marker "$INNER_SID")"
+_assert_file_exists "nested off: outer survives" "$(_runtime_marker "$OUTER_SID")"
+rm -f "$(_runtime_marker "$OUTER_SID")"
+
+# First key WITH STATE wins over a stateless first candidate.
+STATELESS_SID="agent-churn-bypass-stateless-$$"
+_run_cli "$STATELESS_SID" on
+_assert_exit "stateless-first on: exit 0" 0 "$CLI_EXIT"
+_assert_file_exists "stateless-first on: outer marker" "$(_runtime_marker "$OUTER_SID")"
+_assert_file_missing "stateless-first on: no stateless plant" "$(_runtime_marker "$STATELESS_SID")"
+rm -f "$(_runtime_marker "$OUTER_SID")"
+_RUN_CLI_ENV=()
+
+echo "=== churn-bypass: unsafe session keys rejected ==="
+
+_run_cli "../evil-churn-bypass-$$" on
+_assert_exit "traversal on: exit 1" 1 "$CLI_EXIT"
+_assert_contains "traversal on: unsafe" "unsafe session identity" "$CLI_STDERR"
+_assert_file_missing "traversal on: no runtime-tier escape" \
+  "$TEST_TMPDIR/agentguard/evil-churn-bypass-$$"
+_assert_file_missing "traversal on: no tmp-tier escape" \
+  "$TEST_TMPDIR/evil-churn-bypass-$$"
+
+_run_cli ".." on
+_assert_exit "dotdot on: exit 1" 1 "$CLI_EXIT"
+_assert_contains "dotdot on: unsafe" "unsafe session identity" "$CLI_STDERR"
+
+# An unsafe first id is skipped, not fatal, when a safe id remains.
+SAFE_SID="agent-churn-bypass-safe-$$"
+mkdir -p "$TEST_TMPDIR/agentguard/hook-state/$SAFE_SID"
+_RUN_CLI_ENV=(MUSE_SESSION_ID="$SAFE_SID")
+_run_cli "../evil-churn-bypass-$$" on
+_assert_exit "unsafe-first on: exit 0 via safe id" 0 "$CLI_EXIT"
+_assert_file_exists "unsafe-first on: safe marker" "$(_runtime_marker "$SAFE_SID")"
+_assert_file_missing "unsafe-first on: no escape" \
+  "$TEST_TMPDIR/agentguard/evil-churn-bypass-$$"
+_RUN_CLI_ENV=()
+
+# Hook state refresh falls back to the hook pid instead of trusting a
+# traversal key.
+# shellcheck disable=SC2034 # env vars consumed by sourced helpers, not direct use
+(
+  unset _HOOK_INPUT _HOOK_SESSION_KEY _HOOK_STATE_DIR AGENTGUARD_NAME \
+    AGENTGUARD_SESSION_ID MUSE_SESSION_ID CODEX_THREAD_ID GROK_SESSION_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID GEMINI_PROJECT_DIR \
+    2>/dev/null
+  AGENTGUARD_SESSION_ID="../evil-churn-hook-$$"
+  AGENTGUARD_PROCESS_DETECT=0
+  XDG_RUNTIME_DIR="$TEST_TMPDIR"
+  source "$HELPERS"
+  [ "$_HOOK_SESSION_KEY" = "$$" ] && echo "PASS" || echo "FAIL: $_HOOK_SESSION_KEY"
+) | _stdin_contains PASS
+_assert_eq "hook refresh: traversal key falls back to pid" "0" "$?"
+
+# Newlines would split the newline-delimited key streams; rejected too.
+# shellcheck disable=SC2034 # env vars consumed by sourced helpers, not direct use
+(
+  unset _HOOK_INPUT _HOOK_SESSION_KEY _HOOK_STATE_DIR AGENTGUARD_NAME \
+    AGENTGUARD_SESSION_ID MUSE_SESSION_ID CODEX_THREAD_ID GROK_SESSION_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID GEMINI_PROJECT_DIR \
+    2>/dev/null
+  AGENTGUARD_SESSION_ID=$'evil\nkey'
+  AGENTGUARD_PROCESS_DETECT=0
+  XDG_RUNTIME_DIR="$TEST_TMPDIR"
+  source "$HELPERS"
+  [ "$_HOOK_SESSION_KEY" = "$$" ] && echo "PASS" || echo "FAIL: $_HOOK_SESSION_KEY"
+) | _stdin_contains PASS
+_assert_eq "hook refresh: newline key falls back to pid" "0" "$?"
+
+# A real hook with a traversal id writes under its fallback dir, never out
+# of the state tree.
+# shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+_RUN_HOOK_ENV=(
+  AGENTGUARD_SESSION_ID="../evil-churn-post-$$"
+  TMPDIR="$TEST_TMPDIR"
+  AGENTGUARD_NAME="agent"
+  CODEX_THREAD_ID=
+)
+_run_hook_env "$POST_EDIT" '{"tool_input":{"file_path":"/tmp/test/evil.py"}}'
+_assert_exit "hook post: traversal id does not crash" 0 "$HOOK_EXIT"
+_assert_file_missing "hook post: no traversal dir" \
+  "$TEST_TMPDIR/agentguard/evil-churn-post-$$"
+
+echo "=== churn-bypass: session start clears stale markers ==="
+
+SS_SID="agent-churn-bypass-ss-$$"
+SS_OTHER_SID="agent-churn-bypass-ss-other-$$"
+mkdir -p "$TEST_TMPDIR/agentguard/hook-state/$SS_SID" \
+  "$XDG_STATE_HOME/agentguard/hook-state/$SS_SID" \
+  "$TEST_TMPDIR/agentguard/hook-state/$SS_OTHER_SID"
+: >"$(_runtime_marker "$SS_SID")"
+: >"$(_state_home_marker "$SS_SID")"
+: >"$(_runtime_marker "$SS_OTHER_SID")"
+
+MOCK_SS_DIR=$(_tmpdir)
+_install_hook_fixture "$MOCK_SS_DIR" agent-hook-session-start
+# JSON-only identity exercises the post-input refresh ordering: the clear
+# must target the refreshed key, not the source-time fallback.
+# shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+_RUN_HOOK_ENV=(
+  -u AGENTGUARD_SESSION_ID
+  TMPDIR="$TEST_TMPDIR"
+  AGENTGUARD_NAME="agent"
+  CODEX_THREAD_ID=
+)
+_run_hook_env "$MOCK_SS_DIR/bin/agent-hook-session-start" '{"session_id":"'"$SS_SID"'"}'
+_assert_exit "session-start clear: exit 0" 0 "$HOOK_EXIT"
+_assert_file_missing "session-start clear: runtime marker gone" \
+  "$(_runtime_marker "$SS_SID")"
+_assert_file_missing "session-start clear: state-home marker gone" \
+  "$(_state_home_marker "$SS_SID")"
+_assert_file_exists "session-start clear: other session untouched" \
+  "$(_runtime_marker "$SS_OTHER_SID")"
+rm -f "$(_runtime_marker "$SS_OTHER_SID")"
+
+echo "=== churn-bypass: hook and CLI pid keys agree ==="
+
+if [ "${_have_fake_agents:-0}" = 1 ]; then
+  _fake_agree="$_fake_agent_dir/agree.sh"
+  # shellcheck disable=SC2016 # Single quotes are intentional: expansion happens in the generated probe, not here.
+  printf '%s\n' '#!/usr/bin/env bash' 'source "$1"' \
+    'printf "hook=%s cli=%s" "$_HOOK_SESSION_KEY" "$(_hook_agent_ancestor_key 2>/dev/null || printf NONE)"' \
+    >"$_fake_agree"
+  chmod +x "$_fake_agree"
+  # shellcheck disable=SC2016 # Single quotes are intentional: expansion happens in the fake agent child, not here.
+  _agree_result=$(env -u AGENTGUARD_SESSION_ID -u MUSE_SESSION_ID \
+    -u CODEX_THREAD_ID -u CODEX_INTERNAL_ORIGINATOR_OVERRIDE -u GROK_SESSION_ID \
+    -u CLAUDE_CODE_CURRENT_SESSION_ID -u CLAUDE_CODE_SESSION_ID \
+    -u GEMINI_PROJECT_DIR \
+    AGENTGUARD_NAME=grok AGENTGUARD_PROCESS_DETECT=1 TMPDIR="$TEST_TMPDIR" \
+    XDG_RUNTIME_DIR="$TEST_TMPDIR" \
+    "$_fake_agent_dir/grok" -c '"$0" "$1"; :' "$_fake_agree" "$HELPERS" 2>/dev/null)
+  _assert_contains "alignment: grok hook key is namespaced" "hook=grok-" "$_agree_result"
+  _agree_hook="${_agree_result%% cli=*}"
+  _agree_hook="${_agree_hook#hook=}"
+  _assert_eq "alignment: grok hook and CLI agree" "$_agree_hook" "${_agree_result##* cli=}"
+  # shellcheck disable=SC2016 # Single quotes are intentional: expansion happens in the fake agent child, not here.
+  _agree_result=$(env -u AGENTGUARD_SESSION_ID -u MUSE_SESSION_ID \
+    -u CODEX_THREAD_ID -u CODEX_INTERNAL_ORIGINATOR_OVERRIDE -u GROK_SESSION_ID \
+    -u CLAUDE_CODE_CURRENT_SESSION_ID -u CLAUDE_CODE_SESSION_ID \
+    -u GEMINI_PROJECT_DIR \
+    AGENTGUARD_NAME=muse AGENTGUARD_PROCESS_DETECT=1 TMPDIR="$TEST_TMPDIR" \
+    XDG_RUNTIME_DIR="$TEST_TMPDIR" \
+    "$_fake_agent_dir/muse" -c '"$0" "$1"; :' "$_fake_agree" "$HELPERS" 2>/dev/null)
+  _assert_eq "alignment: muse hook and CLI agree" \
+    "${_agree_result%% cli=*}" "hook=${_agree_result##* cli=}"
+  # shellcheck disable=SC2016 # Single quotes are intentional: expansion happens in the fake agent child, not here.
+  _agree_result=$(env -u AGENTGUARD_SESSION_ID -u MUSE_SESSION_ID \
+    -u CODEX_THREAD_ID -u CODEX_INTERNAL_ORIGINATOR_OVERRIDE -u GROK_SESSION_ID \
+    -u CLAUDE_CODE_CURRENT_SESSION_ID -u CLAUDE_CODE_SESSION_ID \
+    AGENTGUARD_PROCESS_DETECT=1 TMPDIR="$TEST_TMPDIR" \
+    XDG_RUNTIME_DIR="$TEST_TMPDIR" GEMINI_PROJECT_DIR="/tmp/ag-test" \
+    "$_fake_agent_dir/gemini" -c '"$0" "$1"; :' "$_fake_agree" "$HELPERS" 2>/dev/null)
+  _assert_contains "alignment: gemini hook key is namespaced" "hook=gemini-" "$_agree_result"
+  _agree_hook="${_agree_result%% cli=*}"
+  _agree_hook="${_agree_hook#hook=}"
+  _assert_eq "alignment: gemini hook and CLI agree" "$_agree_hook" "${_agree_result##* cli=}"
+else
+  _pass "alignment: skipped grok (cannot fake agent comm here)"
+  _pass "alignment: skipped grok agreement"
+  _pass "alignment: skipped muse agreement"
+  _pass "alignment: skipped gemini"
+  _pass "alignment: skipped gemini agreement"
+fi
+
+echo "=== churn-bypass: pid alignment through wrappers ==="
+
+# Canned `ps` snapshot: the caller sits under a wrapper below the agent, so
+# the hook's $PPID is the wrapper, not the agent. Both sides must resolve
+# the agent anyway.
+_mock_ps_dir=$(_tmpdir)
+cat >"$_mock_ps_dir/ps" <<'SCRIPT'
+#!/usr/bin/env bash
+# Snapshot only: refuse per-pid queries so no caller can walk the canned
+# table as live process data.
+for arg in "$@"; do
+  [ "$arg" = "-p" ] && exit 1
+done
+cat "$MOCK_PS_SNAPSHOT"
+SCRIPT
+chmod +x "$_mock_ps_dir/ps"
+
+# shellcheck disable=SC2016 # Single quotes are intentional: expansion happens in the mock-ps child, not here.
+_wrap_result=$(env -u AGENTGUARD_SESSION_ID -u MUSE_SESSION_ID \
+  -u CODEX_THREAD_ID -u CODEX_INTERNAL_ORIGINATOR_OVERRIDE -u GROK_SESSION_ID \
+  -u CLAUDE_CODE_CURRENT_SESSION_ID -u CLAUDE_CODE_SESSION_ID \
+  -u GEMINI_PROJECT_DIR \
+  AGENTGUARD_NAME=grok AGENTGUARD_PROCESS_DETECT=1 TMPDIR="$TEST_TMPDIR" \
+  XDG_RUNTIME_DIR="$TEST_TMPDIR" \
+  bash -c '
+    printf "%s 4243 bash\n4243 4242 sh\n4242 1 grok\n1 0 init\n" "$$" >"$1/snap-grok"
+    export MOCK_PS_SNAPSHOT="$1/snap-grok" PATH="$1:$PATH"
+    source "$2"
+    printf "hook=%s cli=%s" "$_HOOK_SESSION_KEY" "$(_hook_agent_ancestor_key)"
+  ' _ "$_mock_ps_dir" "$HELPERS" 2>/dev/null)
+_assert_eq "wrapper: grok hook uses agent pid, not wrapper" \
+  "hook=grok-4242 cli=grok-4242" "$_wrap_result"
+
+# shellcheck disable=SC2016 # Single quotes are intentional: expansion happens in the mock-ps child, not here.
+_wrap_result=$(env -u AGENTGUARD_SESSION_ID -u MUSE_SESSION_ID \
+  -u CODEX_THREAD_ID -u CODEX_INTERNAL_ORIGINATOR_OVERRIDE -u GROK_SESSION_ID \
+  -u CLAUDE_CODE_CURRENT_SESSION_ID -u CLAUDE_CODE_SESSION_ID \
+  -u GEMINI_PROJECT_DIR \
+  AGENTGUARD_NAME=muse AGENTGUARD_PROCESS_DETECT=1 TMPDIR="$TEST_TMPDIR" \
+  XDG_RUNTIME_DIR="$TEST_TMPDIR" \
+  bash -c '
+    printf "%s 4243 bash\n4243 4242 sh\n4242 1 muse\n1 0 init\n" "$$" >"$1/snap-muse"
+    export MOCK_PS_SNAPSHOT="$1/snap-muse" PATH="$1:$PATH"
+    source "$2"
+    printf "hook=%s cli=%s" "$_HOOK_SESSION_KEY" "$(_hook_agent_ancestor_key)"
+  ' _ "$_mock_ps_dir" "$HELPERS" 2>/dev/null)
+_assert_eq "wrapper: muse hook uses agent pid, not hook pid" \
+  "hook=4242 cli=4242" "$_wrap_result"
+
+_test_summary
