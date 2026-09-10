@@ -771,9 +771,15 @@ case "$-" in
           # crawl into large repos. Use rg instead.
           grep | */grep)
             if [ "$_GUARD_GREP_RECURSIVE" -eq 0 ]; then
-              read -r -a words <<<"$frag"
+              # Tokenize quote-aware like the sibling guards: naive
+              # word-splitting flags `grep "foo -r" file` (the `"foo` / `-r"`
+              # fragments trip the recursive test) while the shell passes
+              # `foo -r` as one inert operand. Tokens arrive de-quoted, so a
+              # bare `grep "-r"` still matches (the shell strips those quotes
+              # too, and grep really receives `-r`).
+              words=()
+              while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$frag")
               for word in "${words[@]}"; do
-                word=$(_shell_word_token "$word")
                 [ "$word" = "--" ] && break
                 [[ "$word" == -* ]] || continue
                 if [[ "$word" == --* ]]; then
