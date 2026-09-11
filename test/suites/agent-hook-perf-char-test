@@ -16,16 +16,6 @@ unset AGENTGUARD_SESSION_ID AGENTGUARD_NAME
 
 DETECT="$AGENTGUARD_ROOT/lib/agentguard/detect.sh"
 
-# Scrubbed identity env shared by the in-process fixtures below. The harness
-# already scrubs most runtime ids; AGENT and the AGENTGUARD_* pair are scrubbed
-# here so each case opts into exactly one identity signal.
-_scrubbed_env() {
-  unset AGENTGUARD_NAME AGENTGUARD_SESSION_ID AGENT CODEX_THREAD_ID
-  unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR GROK_SESSION_ID
-  unset CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID MUSE_SESSION_ID
-  export AGENTGUARD_PROCESS_DETECT=0
-}
-
 echo "=== perf-char: _agent_name precedence ==="
 
 name=$(bash -c '_scrub() { unset AGENTGUARD_NAME AGENTGUARD_SESSION_ID AGENT CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR GROK_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID MUSE_SESSION_ID; export AGENTGUARD_PROCESS_DETECT=0; }; _scrub; source "$1"; _agent_name' _ "$DETECT")
@@ -140,6 +130,20 @@ _assert_eq "parse: line1 excludes heredoc body" "trimmed=<cat <<EOF
 sudo rm -rf /
 EOF> line1=<cat <<EOF>" "$out"
 
+out=$(_parse_command_with '{"tool_input":{"command":"  echo hi\n    echo indented\n\t echo tab"}}')
+_assert_eq "parse: every line lstripped like sed" "trimmed=<echo hi
+echo indented
+echo tab> line1=<echo hi>" "$out"
+
+out=$(_parse_command_with '{"tool_input":{"command":123}}')
+_assert_eq "parse: numeric command stringifies" "trimmed=<123> line1=<123>" "$out"
+
+out=$(_parse_command_with '{"tool_input":{"cmd":"from-cmd"}}')
+_assert_eq "parse: cmd alias extracted" "trimmed=<from-cmd> line1=<from-cmd>" "$out"
+
+out=$(_parse_command_with '{"toolInput":{"command":"from-camel"}}')
+_assert_eq "parse: camelCase toolInput extracted" "trimmed=<from-camel> line1=<from-camel>" "$out"
+
 _parse_exit_with() {
   local input="$1"
   env -u AGENTGUARD_NAME -u AGENTGUARD_SESSION_ID -u AGENT \
@@ -151,6 +155,11 @@ _parse_exit_with() {
 
 rc=$(_parse_exit_with '{"tool_input":{}}')
 _assert_eq "parse: valid json without command exits 0" "0" "$rc"
+
+for _non_object in '[]' '"just a string"' '123' 'true' 'null' '{"tool_input":"str"}' '{"tool_input":123}'; do
+  rc=$(_parse_exit_with "$_non_object")
+  _assert_eq "parse: non-object $_non_object exits 0" "0" "$rc"
+done
 
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"    sudo ls"}}'
 _assert_exit "parse: leading whitespace does not dodge the sudo block" 2 "$HOOK_EXIT"

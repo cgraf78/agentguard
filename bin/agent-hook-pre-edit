@@ -37,7 +37,7 @@ _hook_parse_edit_files
 
 _pre_edit_code_file() {
   local fp="$1" base
-  base="$(basename "$fp")"
+  base="${fp##*/}"
   case "$base" in
     AGENTS.md | CLAUDE.md | GEMINI.md | \
       Makefile | Dockerfile | Containerfile | Rakefile | Gemfile | Brewfile | justfile | Justfile)
@@ -94,9 +94,9 @@ if ! _hook_edit_churn_bypassed; then
     if [ -f "$_churn_file" ]; then
       _count=$(_hook_counter_read "$_churn_file")
       if [ "${_count:-0}" -ge "${AGENTGUARD_EDIT_CHURN_BLOCK:-10}" ]; then
-        _hook_block "'$(basename "$_fp")' has been edited $_count times this session. Step back and rethink the approach, or run \`agentguard-churn-bypass on\` for a deliberate edit pass."
+        _hook_block "'${_fp##*/}' has been edited $_count times this session. Step back and rethink the approach, or run \`agentguard-churn-bypass on\` for a deliberate edit pass."
       elif [ "${_count:-0}" -ge "${AGENTGUARD_EDIT_CHURN_WARN:-5}" ]; then
-        _hook_warn "'$(basename "$_fp")' has been edited $_count times this session. Consider whether you're making progress; run \`agentguard-churn-bypass on\` for a deliberate edit pass."
+        _hook_warn "'${_fp##*/}' has been edited $_count times this session. Consider whether you're making progress; run \`agentguard-churn-bypass on\` for a deliberate edit pass."
       fi
     fi
   done <<<"$AGENTGUARD_EDIT_FILES"
@@ -106,7 +106,7 @@ fi
 # modified by an agent without explicit human review.
 _secrets_file_pattern() {
   local fp="$1" base
-  base="$(basename "$fp")"
+  base="${fp##*/}"
   # Match on filename alone
   case "$base" in
     .env | .env.* | *.env | \
