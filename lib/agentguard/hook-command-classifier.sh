@@ -3051,6 +3051,11 @@ _GIT_SUBCOMMAND_MEMO_WORD=''
 _GIT_SUBCOMMAND_MEMO_INDEX=''
 _GIT_SUBCOMMAND_MEMO_STATUS=1
 _GIT_SUBCOMMAND_MEMO_SET=''
+# Resolve-result globals are read while publishing the memo even on the
+# failure path, so they must exist before the first call (callers run with
+# `set -u`, where an unset global is fatal, not empty).
+_GIT_SUBCOMMAND_WORD=''
+_GIT_SUBCOMMAND_INDEX=''
 
 _git_subcommand_resolve_uncached() {
   local fragment="$1" word

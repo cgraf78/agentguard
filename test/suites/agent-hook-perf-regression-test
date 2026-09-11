@@ -260,6 +260,17 @@ _assert_eq "memo: non-git fragment memoizes failure" \
   "memo_frag=<echo hello> memo_word=<> memo_index=<> memo_status=<1> first=<1> second=<1> tok_frag_match=<yes>" \
   "$state"
 
+# Resolve-result globals must exist before the first call: hooks run with
+# `set -u`, where reading an unset global on the failure path is fatal.
+set_u_status=$(AGENTGUARD_PROCESS_DETECT=0 bash -c '
+  set -u
+  source "$1"
+  source "$2"
+  _git_subcommand_is "echo hello" "clean" >/dev/null 2>&1
+  printf "%s" "$?"
+' _ "$HELPERS" "$CLASSIFIER")
+_assert_eq "memo: failure path survives set -u" "1" "$set_u_status"
+
 # Cache replay fidelity: primed output must equal freshly computed output on
 # adversarial quoting (quotes, backslashes, ANSI-$'..', embedded newlines).
 _fidelity_pair() {
