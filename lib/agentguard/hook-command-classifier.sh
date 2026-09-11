@@ -1284,7 +1284,13 @@ _fragment_prime_token_cache() {
   fi
   # Fetch before publishing: the fetch itself consults the cache, and the
   # old fragment key must still be in place so the fetch misses and computes.
-  lines="$(_fragment_tokens "$fragment")"
+  # The `x` sentinel preserves trailing newlines through the `$()` capture
+  # (which strips them): without it an all-empty token stream replays as
+  # empty instead of emitting its newline.
+  lines="$(
+    _fragment_tokens "$fragment"
+    printf x
+  )"
   _FRAGMENT_TOKENS_CACHE_FRAG="$fragment"
   _FRAGMENT_TOKENS_CACHE_LINES="$lines"
   _FRAGMENT_TOKENS_CACHE_SET=1
@@ -1295,7 +1301,7 @@ _fragment_tokens() {
   local i
 
   if [ -n "$_FRAGMENT_TOKENS_CACHE_SET" ] && [ "$_FRAGMENT_TOKENS_CACHE_FRAG" = "$fragment" ]; then
-    [ -n "$_FRAGMENT_TOKENS_CACHE_LINES" ] && printf '%s\n' "$_FRAGMENT_TOKENS_CACHE_LINES"
+    printf '%s' "${_FRAGMENT_TOKENS_CACHE_LINES%x}"
     return 0
   fi
 

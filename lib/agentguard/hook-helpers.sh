@@ -226,6 +226,11 @@ _hook_refresh_state_dir() {
     ' 2>/dev/null)
   fi
 
+  # Precedence note: these launcher ids are mutually exclusive in practice
+  # (each launcher exports only its own), so their relative order only
+  # matters for synthetic co-occurrence. MUSE ranks below GROK here while
+  # `_hook_agent_shell_session_keys` ranks it second; both orders agree
+  # whenever at most one launcher id is set, which is the only real case.
   if [ "${AGENTGUARD_NAME:-}" = "codex" ] && [ -n "$input_session" ]; then
     session_key="$input_session"
   elif [ -n "${AGENTGUARD_SESSION_ID:-}" ]; then
@@ -250,7 +255,8 @@ _hook_refresh_state_dir() {
   # the codex key, the ancestor key, and every later _agent_name probe in
   # this hook process. The condition matches exactly the processes that will
   # probe: an empty key means no id vars, and disabled detection probes
-  # nothing anywhere downstream.
+  # nothing anywhere downstream except the explicit codex-name path
+  # (`_hook_codex_process_key` still probes under AGENTGUARD_NAME=codex).
   if [ -z "$session_key" ] && [ "${AGENTGUARD_PROCESS_DETECT:-1}" != "0" ]; then
     _agent_process_snapshot || true
   fi
@@ -325,12 +331,12 @@ _hook_refresh_state_dir() {
 # `prompt_id`/`promptId`)? The refresh extracts those three fields and nothing
 # else from hook JSON, so a payload mentioning none of them re-resolves the
 # exact key the source-time refresh already computed. False positives (a
-# command containing the word "session") just take the slow path; only
-# JSON-escaped key spellings could false-negative, and no known runner emits
-# those.
+# command containing the word "session") just take the slow path. Any
+# `\uXXXX` escape also takes the slow path, so JSON-escaped key spellings
+# (e.g. `ses\u0073ion_id`) cannot false-negative.
 _hook_input_has_session_fields() {
   case "${1:-}" in
-    *session* | *subagent* | *prompt*) return 0 ;;
+    *session* | *subagent* | *prompt* | *\\u*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -1239,8 +1245,8 @@ _hook_timeout_prefix() {
 
   # Backend probing shells out (`timeout --help`); the answer depends only on
   # PATH, so cache it per process and re-probe only when PATH changes.
-  if [ "${_HOOK_TIMEOUT_BACKEND_PATH:-}" != "$PATH" ]; then
-    _HOOK_TIMEOUT_BACKEND_PATH="$PATH"
+  if [ "${_HOOK_TIMEOUT_BACKEND_PATH:-}" != "${PATH:-}" ]; then
+    _HOOK_TIMEOUT_BACKEND_PATH="${PATH:-}"
     if command -v timeout >/dev/null 2>&1; then
       timeout_help=$(timeout --help 2>&1 || true)
       if [[ "$timeout_help" == *BusyBox* ]]; then

@@ -42,6 +42,12 @@ _hook_parse_edit_files
 # entry fails the batch call, and only then do the files fall back to
 # one-by-one `format-file` (current sley always exits the batch 0, formatter
 # failures included, so the fallback costs nothing on supported installs).
+# Assumption: no install overrides `sley_hook_format_file` alone. Sley's own
+# `ready.sh`/`sley.sh` batch paths refuse to batch in that case because the
+# batch entry bypasses a format-file-only override; this hook cannot see
+# those flags, so a format-file-only override would be silently skipped
+# here. All known extensions override both entry points consistently, but
+# a future lone override needs a matching carve-out here.
 _post_edit_format_dir() {
   local dir="$1" files="$2" caller="$3" fp
   (

@@ -84,6 +84,16 @@ _run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/src/main.py"}}'
 _assert_eq "blocked code reminder: later allowed edit exits 0" "0" "$HOOK_EXIT"
 _assert_contains "blocked code reminder: later allowed edit still reminds" "Code edit:" "$HOOK_STDERR"
 
+_reset_state
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/secrets.yaml/"}}'
+_assert_eq "trailing-slash secrets: exits blocked" "2" "$HOOK_EXIT"
+_assert_contains "trailing-slash secrets: guard blocks" "BLOCKED" "$HOOK_STDERR"
+
+_reset_state
+_run_hook "$PRE_EDIT" '{"tool_input":{"file_path":"/home/user/project/.env/"}}'
+_assert_eq "trailing-slash env: exits blocked" "2" "$HOOK_EXIT"
+_assert_contains "trailing-slash env: guard blocks" "BLOCKED" "$HOOK_STDERR"
+
 local_block_home=$(_tmpdir)
 _install_hook_fixture "$local_block_home" agent-hook-pre-edit
 cat >"$local_block_home/bin/agent-hook-pre-edit-work" <<'MOCK'

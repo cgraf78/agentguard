@@ -278,11 +278,13 @@ _fidelity_pair() {
   AGENTGUARD_PROCESS_DETECT=0 bash -c '
     source "$1"
     source "$2"
-    fresh="$(_fragment_tokens "$3")"
+    # Sentinel-kept captures: a bare $() strips trailing newlines on both
+    # sides, masking replay gaps for all-empty token streams.
+    fresh="$(_fragment_tokens "$3"; printf x)"
     _fragment_prime_token_cache "$3"
-    primed="$(_fragment_tokens "$3")"
+    primed="$(_fragment_tokens "$3"; printf x)"
     _FRAGMENT_TOKENS_CACHE_SET=""
-    reprimed="$(_fragment_tokens "$3")"
+    reprimed="$(_fragment_tokens "$3"; printf x)"
     if [ "$fresh" = "$primed" ] && [ "$fresh" = "$reprimed" ]; then
       echo IDENTICAL
     else
@@ -291,7 +293,7 @@ _fidelity_pair() {
   ' _ "$HELPERS" "$CLASSIFIER" "$fragment"
 }
 
-for _tricky in 'git commit -m "hello world"' "printf '%s\\n' x" 'echo a\\b "c  d"' "git -c a=b log --oneline" 'git commit -m it'"'"'s done' "x indispensable-ok"; do
+for _tricky in 'git commit -m "hello world"' "printf '%s\\n' x" 'echo a\\b "c  d"' "git -c a=b log --oneline" 'git commit -m it'"'"'s done' "x indispensable-ok" '""' "''"; do
   _assert_eq "tokens: replay fidelity for [$_tricky]" "IDENTICAL" "$(_fidelity_pair "$_tricky")"
 done
 _newline_frag=$(printf 'echo "a\nb" c')

@@ -183,6 +183,7 @@ _is_agent_session() {
     [ -n "${CLAUDE_CODE_CURRENT_SESSION_ID:-}" ] ||
     [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] ||
     [ -n "${GEMINI_PROJECT_DIR:-}" ] ||
+    _agent_name_from_generic_env >/dev/null 2>&1 ||
     [ -n "$(_agent_name_from_process_tree)" ]
 }
 
@@ -191,6 +192,11 @@ _is_agent_session() {
 # which previously forced full process-tree detection on every hook. Only
 # exact known-runtime names match (ASCII case-insensitive); anything else
 # returns 1 silently so detection falls through unchanged.
+# NOTE: resolving here also activates the runtime's hook extensions in
+# unmanaged environments (e.g. `agent-hook-pre-search-muse` blocks
+# symlink-blind file search under $AGENT=muse, exactly as in managed
+# hooks). That verdict convergence is intended: unmanaged now enforces
+# the same policy the managed contract already applies.
 _agent_name_from_generic_env() {
   case "${AGENT:-}" in
     [Cc][Ll][Aa][Uu][Dd][Ee]) echo "claude" ;;
