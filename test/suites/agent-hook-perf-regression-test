@@ -166,15 +166,19 @@ chmod +x "$_probe_jq_dir/timeout"
 # probe dir itself.
 ln -s "$(command -v wc)" "$_probe_jq_dir/wc"
 ln -s "$(command -v tr)" "$_probe_jq_dir/tr"
+# Resolve the harness shell absolutely: a `PATH=<restricted> bash -c`
+# prefix makes the shell look up `bash` itself in the restricted PATH,
+# which has no bash on systems without /usr/bin/bash (Termux).
+_probe_bash=$(command -v bash)
 
 probe_count=$(MOCK_TIMEOUT_CALLS="$_probe_calls" \
   PATH="$_probe_jq_dir:/usr/bin:/bin" AGENTGUARD_PROCESS_DETECT=0 \
-  bash -c 'source "$1"; : >"$MOCK_TIMEOUT_CALLS"; _hook_timeout_prefix 2; _hook_timeout_prefix 5; _hook_timeout_prefix 2; wc -l <"$MOCK_TIMEOUT_CALLS" | tr -d " "' _ "$HELPERS")
+  "$_probe_bash" -c 'source "$1"; : >"$MOCK_TIMEOUT_CALLS"; _hook_timeout_prefix 2; _hook_timeout_prefix 5; _hook_timeout_prefix 2; wc -l <"$MOCK_TIMEOUT_CALLS" | tr -d " "' _ "$HELPERS")
 _assert_eq "timeout: three calls probe once" "1" "$probe_count"
 
 reprobe_count=$(MOCK_TIMEOUT_CALLS="$_probe_calls" \
   PATH="/usr/bin:/bin" AGENTGUARD_PROCESS_DETECT=0 \
-  bash -c 'source "$1"; : >"$MOCK_TIMEOUT_CALLS"; _hook_timeout_prefix 2; PATH="$2:$PATH"; _hook_timeout_prefix 2; wc -l <"$MOCK_TIMEOUT_CALLS" | tr -d " "' _ "$HELPERS" "$_probe_jq_dir")
+  "$_probe_bash" -c 'source "$1"; : >"$MOCK_TIMEOUT_CALLS"; _hook_timeout_prefix 2; PATH="$2:$PATH"; _hook_timeout_prefix 2; wc -l <"$MOCK_TIMEOUT_CALLS" | tr -d " "' _ "$HELPERS" "$_probe_jq_dir")
 _assert_eq "timeout: PATH change re-probes exactly once more" "1" "$reprobe_count"
 
 echo "=== perf-regression: post-edit batch shape ==="
