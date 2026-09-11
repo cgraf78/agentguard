@@ -1,0 +1,417 @@
+#!/usr/bin/env bash
+# agent-hook-perf-char-test — behavior characterization for hot-path work.
+#
+# These tests pin the OBSERVABLE behavior of every helper the latency
+# optimizations touch, so a behavior-identical speedup keeps them green
+# without edits. Two intentional contract changes ship with the work and are
+# marked PERF-DELTA below: the suite asserts the NEW contract there, and the
+# optimization report calls out each delta explicitly.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+# shellcheck disable=SC2016 # child snippets expand in the child shell.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+unset AGENTGUARD_SESSION_ID AGENTGUARD_NAME
+
+DETECT="$AGENTGUARD_ROOT/lib/agentguard/detect.sh"
+
+# Scrubbed identity env shared by the in-process fixtures below. The harness
+# already scrubs most runtime ids; AGENT and the AGENTGUARD_* pair are scrubbed
+# here so each case opts into exactly one identity signal.
+_scrubbed_env() {
+  unset AGENTGUARD_NAME AGENTGUARD_SESSION_ID AGENT CODEX_THREAD_ID
+  unset CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR GROK_SESSION_ID
+  unset CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID MUSE_SESSION_ID
+  export AGENTGUARD_PROCESS_DETECT=0
+}
+
+echo "=== perf-char: _agent_name precedence ==="
+
+name=$(bash -c '_scrub() { unset AGENTGUARD_NAME AGENTGUARD_SESSION_ID AGENT CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR GROK_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID MUSE_SESSION_ID; export AGENTGUARD_PROCESS_DETECT=0; }; _scrub; source "$1"; _agent_name' _ "$DETECT")
+_assert_eq "agent_name: scrubbed env with detection off is unknown" "unknown" "$name"
+
+name=$(bash -c '_scrub() { unset AGENTGUARD_NAME AGENTGUARD_SESSION_ID AGENT CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR GROK_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID MUSE_SESSION_ID; export AGENTGUARD_PROCESS_DETECT=0; }; _scrub; AGENT=bogus-tool source "$1" >/dev/null; source "$1"; AGENT=bogus-tool _agent_name' _ "$DETECT")
+_assert_eq "agent_name: unrecognized AGENT value is ignored" "unknown" "$name"
+
+name=$(bash -c '_scrub() { unset AGENTGUARD_NAME AGENTGUARD_SESSION_ID AGENT CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR GROK_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID MUSE_SESSION_ID; export AGENTGUARD_PROCESS_DETECT=0; }; _scrub; source "$1"; CODEX_THREAD_ID=t _agent_name' _ "$DETECT")
+_assert_eq "agent_name: codex thread id wins over generic AGENT" "codex" "$name"
+
+# PERF-DELTA (optimization 2): $AGENT is now honored for known runtimes. The
+# previous contract ignored it and fell through to process-tree probing.
+name=$(bash -c '_scrub() { unset AGENTGUARD_NAME AGENTGUARD_SESSION_ID AGENT CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR GROK_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID MUSE_SESSION_ID; export AGENTGUARD_PROCESS_DETECT=0; }; _scrub; source "$1"; AGENT=muse _agent_name' _ "$DETECT")
+_assert_eq "agent_name: AGENT=muse resolves without process probing" "muse" "$name"
+
+name=$(bash -c '_scrub() { unset AGENTGUARD_NAME AGENTGUARD_SESSION_ID AGENT CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR GROK_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID MUSE_SESSION_ID; export AGENTGUARD_PROCESS_DETECT=0; }; _scrub; source "$1"; AGENTGUARD_NAME=codex AGENT=muse _agent_name' _ "$DETECT")
+_assert_eq "agent_name: explicit AGENTGUARD_NAME still wins over AGENT" "codex" "$name"
+
+name=$(bash -c '_scrub() { unset AGENTGUARD_NAME AGENTGUARD_SESSION_ID AGENT CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR GROK_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID MUSE_SESSION_ID; export AGENTGUARD_PROCESS_DETECT=0; }; _scrub; source "$1"; AGENTGUARD_SESSION_ID=s AGENT=muse _agent_name' _ "$DETECT")
+_assert_eq "agent_name: AGENT names the session before the generic fallback" "muse" "$name"
+
+echo "=== perf-char: session-key resolution ==="
+
+_session_key_with() {
+  # $1: env assignments; $2: optional preset _HOOK_INPUT. Prints the key.
+  local assignments="$1" preset="${2-__UNSET__}"
+  # shellcheck disable=SC2086 # assignments intentionally word-split.
+  env -u AGENTGUARD_NAME -u AGENTGUARD_SESSION_ID -u AGENT \
+    -u CODEX_THREAD_ID -u CODEX_INTERNAL_ORIGINATOR_OVERRIDE \
+    -u GEMINI_PROJECT_DIR -u GROK_SESSION_ID \
+    -u CLAUDE_CODE_CURRENT_SESSION_ID -u CLAUDE_CODE_SESSION_ID \
+    -u MUSE_SESSION_ID \
+    $assignments AGENTGUARD_PROCESS_DETECT=0 bash -c '
+    source "$1"
+    if [ "$2" != "__UNSET__" ]; then
+      _HOOK_INPUT="$2"
+      _hook_read_input >/dev/null 2>&1
+    fi
+    printf "%s" "$_HOOK_SESSION_KEY"
+  ' _ "$HELPERS" "$preset"
+}
+
+key=$(_session_key_with "AGENTGUARD_SESSION_ID=s1")
+_assert_eq "session key: explicit AGENTGUARD_SESSION_ID wins" "s1" "$key"
+
+key=$(_session_key_with "CODEX_THREAD_ID=t1")
+_assert_eq "session key: codex thread id is honored" "t1" "$key"
+
+key=$(_session_key_with "CODEX_THREAD_ID=t1 MUSE_SESSION_ID=m1")
+_assert_eq "session key: codex thread keeps precedence over muse id" "t1" "$key"
+
+key=$(_session_key_with "CLAUDE_CODE_CURRENT_SESSION_ID=cur CLAUDE_CODE_SESSION_ID=c1")
+_assert_eq "session key: current session id wins over plain session id" "cur" "$key"
+
+key=$(_session_key_with "AGENTGUARD_SESSION_ID=a/b")
+case "$key" in
+  *[!0-9]*) _fail "session key: unsafe key should fall back to pid, got $key" ;;
+  *) _pass "session key: unsafe key falls back to pid" ;;
+esac
+
+key=$(_session_key_with "" '{"session_id":"json-sid","tool_input":{"command":"ls"}}')
+_assert_eq "session key: json session_id is honored without env" "json-sid" "$key"
+
+key=$(_session_key_with "" '{"tool_input":{"command":"ls"}}')
+case "$key" in
+  *[!0-9]*) _fail "session key: id-less json keeps pid fallback, got $key" ;;
+  *) _pass "session key: id-less json keeps pid fallback" ;;
+esac
+
+key=$(_session_key_with "AGENTGUARD_NAME=grok GROK_SESSION_ID=g1" '{"sessionId":"child-sid","subagentType":"Explore"}')
+_assert_eq "session key: distinct grok child session wins" "child-sid" "$key"
+
+key=$(_session_key_with "AGENTGUARD_NAME=grok GROK_SESSION_ID=g1" '{"sessionId":"g1","subagentType":"Explore","promptId":"p9"}')
+_assert_eq "session key: grok child without own id is namespaced" "g1:Explore:p9" "$key"
+
+# PERF-DELTA (optimization 3): _hook_refresh_state_dir now consults
+# CLAUDE_CODE_SESSION_ID and MUSE_SESSION_ID, matching the long-standing
+# tool-shell precedence in _hook_agent_shell_session_keys. Hooks and tool
+# shells previously disagreed on these sessions' state dirs.
+key=$(_session_key_with "CLAUDE_CODE_SESSION_ID=c1")
+_assert_eq "session key: plain claude session id is honored" "c1" "$key"
+
+key=$(_session_key_with "MUSE_SESSION_ID=m1")
+_assert_eq "session key: muse session id is honored" "m1" "$key"
+
+echo "=== perf-char: command parsing ==="
+
+_parse_command_with() {
+  local input="$1"
+  env -u AGENTGUARD_NAME -u AGENTGUARD_SESSION_ID -u AGENT \
+    AGENTGUARD_PROCESS_DETECT=0 _HOOK_SELF=/x/bin/agent-hook-pre-bash \
+    bash -c '
+    source "$1"
+    _HOOK_INPUT="$2"
+    _hook_parse_command
+    printf "trimmed=<%s> line1=<%s>" "$AGENTGUARD_CMD_TRIMMED" "$AGENTGUARD_CMD_LINE1"
+  ' _ "$HELPERS" "$input"
+}
+
+out=$(_parse_command_with '{"tool_input":{"command":"   ls -la"}}')
+_assert_eq "parse: leading spaces trimmed" "trimmed=<ls -la> line1=<ls -la>" "$out"
+
+# sed trims the first line only: a leading newline survives into TRIMMED and
+# empties LINE1. The builtin replacement must reproduce this exactly.
+out=$(_parse_command_with '{"tool_input":{"command":"\t\n  git status"}}')
+_assert_eq "parse: sed-style first-line trim keeps leading newline" "trimmed=<
+git status> line1=<>" "$out"
+
+out=$(_parse_command_with '{"tool_input":{"command":"cat <<EOF\nsudo rm -rf /\nEOF"}}')
+_assert_eq "parse: line1 excludes heredoc body" "trimmed=<cat <<EOF
+sudo rm -rf /
+EOF> line1=<cat <<EOF>" "$out"
+
+_parse_exit_with() {
+  local input="$1"
+  env -u AGENTGUARD_NAME -u AGENTGUARD_SESSION_ID -u AGENT \
+    AGENTGUARD_PROCESS_DETECT=0 _HOOK_SELF=/x/bin/agent-hook-pre-bash \
+    bash -c 'source "$1"; _HOOK_INPUT="$2"; _hook_parse_command' _ "$HELPERS" "$input" \
+    >/dev/null 2>&1
+  printf '%s' "$?"
+}
+
+rc=$(_parse_exit_with '{"tool_input":{}}')
+_assert_eq "parse: valid json without command exits 0" "0" "$rc"
+
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"    sudo ls"}}'
+_assert_exit "parse: leading whitespace does not dodge the sudo block" 2 "$HOOK_EXIT"
+_assert_contains "parse: sudo block message intact" "sudo is not allowed" "$HOOK_STDERR"
+
+echo "=== perf-char: event names ==="
+
+_event_name_with() {
+  local self="$1"
+  env -u AGENTGUARD_NAME -u AGENTGUARD_SESSION_ID -u AGENT \
+    AGENTGUARD_PROCESS_DETECT=0 _HOOK_SELF="$self" \
+    bash -c 'source "$1"; _hook_event_name' _ "$HELPERS"
+}
+
+_assert_eq "event: pre-bash" "PreToolUse" "$(_event_name_with /x/bin/agent-hook-pre-bash)"
+_assert_eq "event: pre-bash-work" "PreToolUse" "$(_event_name_with /x/bin/agent-hook-pre-bash-work)"
+_assert_eq "event: post-edit" "PostToolUse" "$(_event_name_with /x/bin/agent-hook-post-edit)"
+_assert_eq "event: session-start" "SessionStart" "$(_event_name_with /x/bin/agent-hook-session-start)"
+_assert_eq "event: prompt-submit" "UserPromptSubmit" "$(_event_name_with /x/bin/agent-hook-prompt-submit)"
+_assert_eq "event: stop" "Stop" "$(_event_name_with /x/bin/agent-hook-stop)"
+_assert_eq "event: notification" "PermissionRequest" "$(_event_name_with /x/bin/agent-hook-notification)"
+_assert_eq "event: unknown hook" "UserPromptSubmit" "$(_event_name_with /x/bin/some-other-tool)"
+_assert_eq "event: bare argv0" "PreToolUse" "$(_event_name_with agent-hook-pre-mcp)"
+
+echo "=== perf-char: timeout prefix ==="
+
+_timeout_prefix_with() {
+  # $1: seconds; remaining args form the PATH for the fixture.
+  local seconds="$1" fixture_path="$2"
+  env -u AGENTGUARD_NAME -u AGENTGUARD_SESSION_ID -u AGENT \
+    AGENTGUARD_PROCESS_DETECT=0 PATH="$fixture_path" \
+    bash -c 'source "$1"; _hook_timeout_prefix "$2"; printf "<%s>" "${_HOOK_TIMEOUT_PREFIX[@]}"' _ "$HELPERS" "$seconds"
+}
+
+gnu_prefix=$(_timeout_prefix_with 2 "$PATH")
+case "$gnu_prefix" in
+  "<timeout><2>") _pass "timeout: gnu backend selected when timeout exists" ;;
+  *) _fail "timeout: unexpected gnu prefix $gnu_prefix" ;;
+esac
+
+repeat_prefix=$(_timeout_prefix_with 2 "$PATH")
+_assert_eq "timeout: repeated calls select the same backend" "$gnu_prefix" "$repeat_prefix"
+
+invalid_prefix=$(_timeout_prefix_with "abc" "$PATH")
+_assert_eq "timeout: invalid duration degrades to exit-125" "<bash><-c><exit 125><_>" "$invalid_prefix"
+
+_zero_prefix() {
+  env -u AGENTGUARD_NAME -u AGENTGUARD_SESSION_ID -u AGENT \
+    AGENTGUARD_PROCESS_DETECT=0 \
+    bash -c 'source "$1"; _hook_timeout_prefix "$2"; printf "<%s>" "${_HOOK_TIMEOUT_PREFIX[@]}"' _ "$HELPERS" "$1"
+}
+zero_prefix=$(_zero_prefix 0)
+_assert_eq "timeout: zero duration keeps the gnu form" "<timeout><0>" "$zero_prefix"
+
+_busybox_bin=$(_tmpdir)
+printf '#!/usr/bin/env bash\nif [ "${1:-}" = "--help" ]; then echo "BusyBox v1.36 timeout"; else exec /usr/bin/timeout "$@"; fi\n' >"$_busybox_bin/timeout"
+chmod +x "$_busybox_bin/timeout"
+busy_prefix=$(_timeout_prefix_with 2 "$_busybox_bin:$PATH")
+case "$busy_prefix" in
+  "<bash><-c>"*) _pass "timeout: busybox probe selects the portable backend" ;;
+  *) _fail "timeout: busybox should select portable, got $busy_prefix" ;;
+esac
+
+_no_timeout_bin=$(_tmpdir)
+_no_gnu_timeout() {
+  # PATH with the real timeout hidden but everything else intact.
+  local dir="$1" d
+  saved_ifs=$IFS
+  IFS=:
+  for d in $PATH; do
+    IFS=$saved_ifs
+    [ -d "$d" ] || continue
+    for exe in "$d"/*; do
+      name=${exe##*/}
+      [ "$name" = timeout ] && continue
+      [ -x "$exe" ] || continue
+      [ -e "$dir/$name" ] || ln -s "$exe" "$dir/$name" 2>/dev/null || true
+    done
+  done
+  IFS=$saved_ifs
+}
+_no_gnu_timeout "$_no_timeout_bin"
+if command -v gtimeout >/dev/null 2>&1; then
+  gtimeout_prefix=$(_timeout_prefix_with 2 "$_no_timeout_bin")
+  _assert_eq "timeout: gtimeout backend without gnu timeout" "<gtimeout><2>" "$gtimeout_prefix"
+else
+  portable_prefix=$(_timeout_prefix_with 2 "$_no_timeout_bin")
+  case "$portable_prefix" in
+    "<bash><-c>"*) _pass "timeout: portable backend without any timeout" ;;
+    *) _fail "timeout: expected portable without timeout, got $portable_prefix" ;;
+  esac
+fi
+
+_redetect_with() {
+  # Backend must follow PATH when it changes mid-process.
+  env -u AGENTGUARD_NAME -u AGENTGUARD_SESSION_ID -u AGENT \
+    AGENTGUARD_PROCESS_DETECT=0 PATH="$PATH" \
+    bash -c 'source "$1"; _hook_timeout_prefix 2; first="${_HOOK_TIMEOUT_PREFIX[*]}"; PATH="$2"; _hook_timeout_prefix 2; printf "%s || %s" "$first" "${_HOOK_TIMEOUT_PREFIX[*]}"' _ "$HELPERS" "$_busybox_bin:$PATH"
+}
+redetect=$(_redetect_with)
+case "$redetect" in
+  "timeout 2 || bash -c "*"_ 2") _pass "timeout: backend follows mid-process PATH changes" ;;
+  *) _fail "timeout: backend should follow PATH, got $redetect" ;;
+esac
+
+echo "=== perf-char: post-edit formatting ==="
+
+# Stub sley records each invocation (argv, cwd, caller) and marks every file
+# it is asked to format, emulating both the single-file and batch entries.
+_sley_stub_bin=$(_tmpdir)
+export SLEY_STUB_LOG="$_sley_stub_bin/calls.log"
+: >"$SLEY_STUB_LOG"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'echo "CALL: $* | CWD=$PWD | CALLER=${SLEY_CALLER:-}" >> "$SLEY_STUB_LOG"' \
+  'if [ "${1:-}" = "hook" ] && [ "${2:-}" = "format-file" ]; then' \
+  '  printf "formatted\n" >> "$3"' \
+  'elif [ "${1:-}" = "hook" ] && [ "${2:-}" = "format" ] && [ "${3:-}" = "--stdin" ]; then' \
+  '  while IFS= read -r f; do [ -n "$f" ] && printf "formatted\n" >> "$f"; done' \
+  'fi' \
+  'exit 0' >"$_sley_stub_bin/sley"
+chmod +x "$_sley_stub_bin/sley"
+
+_run_hook_stub_sley() {
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    "PATH=$_sley_stub_bin:$PATH"
+    "SLEY_STUB_LOG=$SLEY_STUB_LOG"
+    AGENTGUARD_SESSION_ID="$TEST_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="agent"
+    CODEX_THREAD_ID=
+  )
+  _run_hook_env "$@"
+}
+
+_edit_files_input() {
+  local f json='{"tool_input":{"patch":"*** Begin Patch\n'
+  for f in "$@"; do
+    json+="$(printf '*** Update File: %s\\n' "$f")"
+  done
+  printf '%s' "$json*** End Patch\"}}"
+}
+
+_fmt_dir=$(_tmpdir)
+printf 'x=1\n' >"$_fmt_dir/a.py"
+printf 'y=2\n' >"$_fmt_dir/b.py"
+printf 'z=3\n' >"$_fmt_dir/c.py"
+_run_hook_stub_sley "$POST_EDIT" "$(_edit_files_input "$_fmt_dir/a.py" "$_fmt_dir/b.py" "$_fmt_dir/c.py")"
+_assert_exit "post-edit: multi-file edit exits 0" 0 "$HOOK_EXIT"
+_assert_eq "post-edit: multi-file edit emits empty json" "{}" "$HOOK_STDOUT"
+for _f in a.py b.py c.py; do
+  _assert_contains "post-edit: $_f formatted" "formatted" "$(cat "$_fmt_dir/$_f")"
+done
+
+_other_dir=$(_tmpdir)
+printf 'w=4\n' >"$_other_dir/d.py"
+_run_hook_stub_sley "$POST_EDIT" "$(_edit_files_input "$_fmt_dir/a.py" "$_other_dir/d.py")"
+_assert_exit "post-edit: cross-dir edit exits 0" 0 "$HOOK_EXIT"
+_assert_contains "post-edit: same-dir file formatted" "formatted" "$(cat "$_fmt_dir/a.py")"
+_assert_contains "post-edit: other-dir file formatted" "formatted" "$(cat "$_other_dir/d.py")"
+
+_run_hook_stub_sley "$POST_EDIT" "$(_edit_files_input "$_fmt_dir/a.py" "$_fmt_dir/missing.py")"
+_assert_exit "post-edit: missing file skipped without failure" 0 "$HOOK_EXIT"
+
+_no_sley_bin=$(_tmpdir)
+_no_sley_home=$(_tmpdir)
+_run_hook_no_sley() {
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  # HOME points at a bare temp dir: hook-helpers prepends ~/.local/bin to
+  # PATH when it exists, which would otherwise resurrect the real sley.
+  local _RUN_HOOK_ENV=(
+    "PATH=$_no_sley_bin:/usr/bin:/bin"
+    "HOME=$_no_sley_home"
+    AGENTGUARD_SESSION_ID="$TEST_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="agent"
+    CODEX_THREAD_ID=
+  )
+  _run_hook_env "$@"
+}
+_run_hook_no_sley "$POST_EDIT" "$(_edit_files_input "$_fmt_dir/a.py")"
+_assert_exit "post-edit: missing sley with files blocks" 2 "$HOOK_EXIT"
+_assert_contains "post-edit: missing sley message" "sley command missing" "$HOOK_STDERR"
+
+_run_hook_no_sley "$POST_EDIT" ''
+_assert_exit "post-edit: missing sley without files stays quiet" 0 "$HOOK_EXIT"
+
+echo "=== perf-char: git guard verdicts ==="
+
+_bash_case() {
+  # $1: command, $2: expected exit, $3: expected stderr fragment (or empty).
+  local cmd="$1" expected_exit="$2" expected_err="$3" input
+  input=$(jq -cn --arg command "$cmd" '{tool_input:{command:$command}}')
+  _run_hook "$PRE_BASH" "$input"
+  _assert_exit "bash guard: [$cmd] exits $expected_exit" "$expected_exit" "$HOOK_EXIT"
+  if [ -n "$expected_err" ]; then
+    _assert_contains "bash guard: [$cmd] message" "$expected_err" "$HOOK_STDERR"
+  fi
+}
+
+_bash_case "git absorb" 2 "absorb-and-rebase"
+_bash_case "git reset --hard" 2 "git reset --hard discards"
+_bash_case "git reset --soft HEAD~1" 0 ""
+_bash_case "git clean -fd" 2 "git clean -f deletes"
+_bash_case "git clean -n" 0 ""
+_bash_case "git clean --dry-run -d" 0 ""
+_bash_case "git push --force" 2 "rewrites remote history without a lease"
+_bash_case "git push -f" 2 "rewrites remote history without a lease"
+_bash_case "git push --force-with-lease" 0 ""
+_bash_case "git push --mirror" 2 "force-overwrites and prunes"
+_bash_case "git push --prune" 2 "deletes remote refs"
+_bash_case "git push origin main" 0 ""
+_bash_case "git -C /tmp status --short" 0 ""
+_bash_case "git -c core.hooksPath=/dev/null reset --hard" 2 "git reset --hard discards"
+_bash_case "ls -la" 0 ""
+_bash_case "git status --short" 0 ""
+
+echo "=== perf-char: process-snapshot determinism ==="
+
+_snapshot_keys_twice() {
+  env -u AGENTGUARD_NAME -u AGENTGUARD_SESSION_ID -u AGENT \
+    -u CODEX_THREAD_ID -u CODEX_INTERNAL_ORIGINATOR_OVERRIDE \
+    -u GEMINI_PROJECT_DIR -u GROK_SESSION_ID \
+    -u CLAUDE_CODE_CURRENT_SESSION_ID -u CLAUDE_CODE_SESSION_ID \
+    -u MUSE_SESSION_ID AGENTGUARD_PROCESS_DETECT=1 \
+    bash -c '
+    source "$1"
+    first=$(_hook_agent_ancestor_key 2>/dev/null || echo "none")
+    second=$(_hook_agent_ancestor_key 2>/dev/null || echo "none")
+    printf "%s || %s" "$first" "$second"
+  ' _ "$HELPERS"
+}
+ancestor_pair=$(_snapshot_keys_twice)
+case "$ancestor_pair" in
+  *" || "*) ;;
+  *) _fail "snapshot: ancestor key helper produced no pair" ;;
+esac
+if [ "${ancestor_pair%% || *}" = "${ancestor_pair##* || }" ]; then
+  _pass "snapshot: repeated ancestor resolution is stable"
+else
+  _fail "snapshot: ancestor key changed between calls ($ancestor_pair)"
+fi
+
+_tree_name_twice() {
+  env -u AGENTGUARD_NAME -u AGENTGUARD_SESSION_ID -u AGENT \
+    -u CODEX_THREAD_ID -u CODEX_INTERNAL_ORIGINATOR_OVERRIDE \
+    -u GEMINI_PROJECT_DIR -u GROK_SESSION_ID \
+    -u CLAUDE_CODE_CURRENT_SESSION_ID -u CLAUDE_CODE_SESSION_ID \
+    -u MUSE_SESSION_ID AGENTGUARD_PROCESS_DETECT=1 \
+    bash -c '
+    source "$1"
+    first=$(_agent_name_from_process_tree 2>/dev/null || echo "none")
+    second=$(_agent_name_from_process_tree 2>/dev/null || echo "none")
+    printf "%s || %s" "$first" "$second"
+  ' _ "$DETECT"
+}
+tree_pair=$(_tree_name_twice)
+if [ "${tree_pair%% || *}" = "${tree_pair##* || }" ]; then
+  _pass "snapshot: repeated process-tree detection is stable"
+else
+  _fail "snapshot: process-tree detection changed between calls ($tree_pair)"
+fi
+
+_test_summary
