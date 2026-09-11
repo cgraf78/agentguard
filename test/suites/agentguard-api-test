@@ -29,6 +29,7 @@ _session_probe() {
     -u CLAUDE_CODE_SESSION_ID \
     -u GEMINI_PROJECT_DIR \
     -u GROK_SESSION_ID \
+    -u AGENT \
     -u AGENTGUARD_TEST_SESSION_NAMESPACE \
     AGENTGUARD_PROCESS_DETECT=0 \
     "$@" \

@@ -56,6 +56,8 @@ program	test/suites/agent-hook-helpers-test
 program	test/suites/agent-hook-helpers.sh
 program	test/suites/agent-hook-mcp-test
 program	test/suites/agent-hook-muse-test
+program	test/suites/agent-hook-perf-char-test
+program	test/suites/agent-hook-perf-regression-test
 program	test/suites/agent-hook-performance-test
 program	test/suites/agent-hook-session-test
 program	test/suites/agent-hook-search-test

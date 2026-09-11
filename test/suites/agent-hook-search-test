@@ -38,6 +38,41 @@ _run_hook_muse "$PRE_SEARCH" '{"toolName":"Search","toolInput":{"pattern":"x"}}'
 _assert_eq "camelCase flag missing: exit 2" "2" "$HOOK_EXIT"
 
 # ---------------------------------------------------------------------------
+# Tests: $AGENT-only (unmanaged) muse resolves the muse extension
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-search (AGENT=muse only): enforcement ==="
+
+_run_hook_agent_env_muse() {
+  # Unmanaged Muse: no session ids, no AGENTGUARD_NAME — identity comes
+  # solely from $AGENT. Must enforce exactly like managed muse.
+  # shellcheck disable=SC2034 # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    AGENT="muse"
+    AGENTGUARD_SESSION_ID=
+    AGENTGUARD_NAME=
+    MUSE_SESSION_ID=
+    CODEX_THREAD_ID=
+    GROK_SESSION_ID=
+    CLAUDE_CODE_CURRENT_SESSION_ID=
+    CLAUDE_CODE_SESSION_ID=
+    TMPDIR="$TEST_TMPDIR"
+  )
+  _run_hook_env "$@"
+}
+
+_reset_state
+
+_run_hook_agent_env_muse "$PRE_SEARCH" '{"tool_name":"Search","tool_input":{"pattern":"x","follow_symlinks":true}}'
+_assert_eq "AGENT-only flag true: exit 0" "0" "$HOOK_EXIT"
+_assert_eq "AGENT-only flag true: no stderr" "" "$HOOK_STDERR"
+
+_run_hook_agent_env_muse "$PRE_SEARCH" '{"tool_name":"Search","tool_input":{"pattern":"x"}}'
+_assert_eq "AGENT-only flag missing: exit 2" "2" "$HOOK_EXIT"
+_assert_contains "AGENT-only flag missing: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+
+# ---------------------------------------------------------------------------
 # Tests: agent-hook-pre-search under muse — passthrough and fail-open
 # ---------------------------------------------------------------------------
 

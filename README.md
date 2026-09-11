@@ -178,7 +178,9 @@ filter, compare its output, and prove a second reconciliation is unchanged.
   process session. Python runs in isolated mode from a neutral directory;
   direct process-group cleanup remains the fallback.
 - `cgraf78/sley` is a hard runtime dependency for hooks that format files.
-  `agent-hook-post-edit` invokes the PATH-visible `sley hook format-file` CLI.
+  `agent-hook-post-edit` invokes the PATH-visible `sley hook format --stdin`
+  batch CLI (falling back to `sley hook format-file` per file on older
+  sley installs without the batch entry).
   Commit readiness belongs in native VCS hooks so human and agent workflows
   share one path.
 
@@ -321,8 +323,9 @@ To add a new managed agent runtime:
   `AGENTGUARD_EDIT_CHURN_BYPASS` in the hook environment), and leaves
   room for environment-specific generated-file or readonly-file guards.
 - `agent-hook-post-edit` formats changed files through
-  `sley hook format-file`. Broader lint and verification policy stays in the
-  native commit hooks.
+  `sley hook format --stdin`, one batch per directory so repo detection
+  matches the old per-file path. Broader lint and verification policy stays
+  in the native commit hooks.
 - `agent-hook-pre-mcp` guards MCP calls: it blocks a server after repeated
   failures, warns on exact `search_files` leaf-tool calls without a path
   filter, and warns once on exact `knowledge_load` leaf-tool calls because

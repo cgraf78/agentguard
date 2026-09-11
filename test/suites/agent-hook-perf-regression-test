@@ -1,0 +1,366 @@
+#!/usr/bin/env bash
+# agent-hook-perf-regression-test — hot-path latency guards that never flake.
+#
+# Every assertion uses a robust signal: exact subprocess counts via mocks,
+# cache-state inspection, or wall ceilings with 10-30x headroom over typical
+# (they catch 10x regressions, not noise). Nothing here asserts a tight
+# millisecond threshold. Each test must pass repeatedly, including loaded
+# runs, or it does not belong in this file.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+# shellcheck disable=SC2016 # child snippets expand in the child shell.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+unset AGENTGUARD_SESSION_ID AGENTGUARD_NAME
+
+CLASSIFIER="$AGENTGUARD_ROOT/lib/agentguard/hook-command-classifier.sh"
+
+# Run a hook with no identity env and process detection on (the unmanaged
+# production shape). Extra env operands may be appended by the caller via
+# _UNMANAGED_EXTRA.
+_run_hook_unmanaged() {
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    -u AGENTGUARD_NAME
+    -u AGENTGUARD_SESSION_ID
+    -u AGENT
+    -u CODEX_THREAD_ID
+    -u CODEX_INTERNAL_ORIGINATOR_OVERRIDE
+    -u GEMINI_PROJECT_DIR
+    -u GROK_SESSION_ID
+    -u CLAUDE_CODE_CURRENT_SESSION_ID
+    -u CLAUDE_CODE_SESSION_ID
+    -u MUSE_SESSION_ID
+    AGENTGUARD_PROCESS_DETECT=1
+    TMPDIR="$TEST_TMPDIR"
+  )
+  if [ -n "${_UNMANAGED_EXTRA+x}" ]; then
+    # shellcheck disable=SC2034
+    _RUN_HOOK_ENV+=("${_UNMANAGED_EXTRA[@]}")
+  fi
+  _run_hook_env "$@"
+}
+
+echo "=== perf-regression: one ps snapshot per hook ==="
+
+# Mock ps serves a fixed table (this shell under a codex ancestor) and logs
+# every snapshot call. The Init/awk pipeline sees $$, so resolutions succeed.
+_mock_ps_dir=$(_tmpdir)
+_mock_ps_calls="$_mock_ps_dir/calls"
+cat >"$_mock_ps_dir/ps" <<'SCRIPT'
+#!/usr/bin/env bash
+if [[ "$*" = "-axo pid=,ppid=,comm=" ]]; then
+  printf 'call\n' >>"$MOCK_PS_CALLS"
+  printf '%s %s %s\n' "$MOCK_CHILD_PID" 4242 bash
+  printf '%s %s %s\n' 4242 1 /usr/local/bin/codex
+  printf '%s %s %s\n' 1 0 init
+  exit 0
+fi
+exit 1
+SCRIPT
+chmod +x "$_mock_ps_dir/ps"
+
+_ps_snapshots_for_hook() {
+  # $1: hook, $2: stdin payload. Prints the snapshot-call count.
+  local hook="$1" input="$2"
+  : >"$_mock_ps_calls"
+  # NOTE: the mock table does not contain the hook's own pid, so resolutions
+  # fall back without matching; the count signal is exact regardless and
+  # load-independent.
+  # shellcheck disable=SC2034  # read by _run_hook_unmanaged via dynamic scope.
+  local _UNMANAGED_EXTRA=(
+    "PATH=$_mock_ps_dir:$PATH"
+    "MOCK_PS_CALLS=$_mock_ps_calls"
+    "MOCK_CHILD_PID=4243"
+  )
+  _run_hook_unmanaged "$hook" "$input"
+  wc -l <"$_mock_ps_calls" | tr -d ' '
+}
+pre_edit_input='{"tool_input":{"file_path":"/tmp/perf-regression/a.py"}}'
+count=$(_ps_snapshots_for_hook "$PRE_EDIT" "$pre_edit_input")
+_assert_eq "ps: unmanaged pre-edit takes exactly one snapshot" "1" "$count"
+
+pre_bash_input='{"tool_input":{"command":"ls -la"}}'
+count=$(_ps_snapshots_for_hook "$PRE_BASH" "$pre_bash_input")
+_assert_eq "ps: unmanaged pre-bash takes exactly one snapshot" "1" "$count"
+
+echo "=== perf-regression: single jq parse pass ==="
+
+# Mock jq logs each invocation and delegates to the real binary.
+_mock_jq_dir=$(_tmpdir)
+_mock_jq_calls="$_mock_jq_dir/calls"
+_real_jq=$(command -v jq)
+cat >"$_mock_jq_dir/jq" <<SCRIPT
+#!/usr/bin/env bash
+printf 'call\\n' >>"$_mock_jq_calls"
+exec "$_real_jq" "\$@"
+SCRIPT
+chmod +x "$_mock_jq_dir/jq"
+
+_parse_jq_calls() {
+  # $1: payload. Prints jq invocations for one in-process parse.
+  local input="$1"
+  : >"$_mock_jq_calls"
+  MOCK_JQ_CALLS="$_mock_jq_calls" PATH="$_mock_jq_dir:$PATH" \
+    AGENTGUARD_PROCESS_DETECT=0 _HOOK_SELF=/x/bin/agent-hook-pre-bash \
+    bash -c 'source "$1"; _HOOK_INPUT="$2"; _hook_parse_command' _ \
+    "$HELPERS" "$input" >/dev/null 2>&1
+  wc -l <"$_mock_jq_calls" | tr -d ' '
+}
+
+count=$(_parse_jq_calls '{"tool_input":{"command":"ls"}}')
+_assert_eq "jq: command parse costs exactly one jq" "1" "$count"
+
+count=$(_parse_jq_calls 'not json at all')
+_assert_eq "jq: invalid payload still costs exactly one jq" "1" "$count"
+
+echo "=== perf-regression: refresh skipped without session fields ==="
+
+_refresh_jq_calls() {
+  # $1: payload. Prints jq invocations for source + one input read.
+  local input="$1"
+  : >"$_mock_jq_calls"
+  MOCK_JQ_CALLS="$_mock_jq_calls" PATH="$_mock_jq_dir:$PATH" \
+    AGENTGUARD_PROCESS_DETECT=0 \
+    bash -c 'source "$1"; _HOOK_INPUT="$2"; _hook_read_input >/dev/null 2>&1' _ \
+    "$HELPERS" "$input" >/dev/null 2>&1
+  wc -l <"$_mock_jq_calls" | tr -d ' '
+}
+
+count=$(_refresh_jq_calls '{"tool_input":{"command":"ls"}}')
+_assert_eq "refresh: id-less input runs zero jq" "0" "$count"
+
+count=$(_refresh_jq_calls '{"session_id":"s1","tool_input":{"command":"ls"}}')
+_assert_eq "refresh: session input runs exactly one jq" "1" "$count"
+
+key_pair=$(AGENTGUARD_PROCESS_DETECT=0 bash -c '
+  source "$1"
+  before="$_HOOK_SESSION_KEY"
+  _HOOK_INPUT="$2"
+  _hook_read_input >/dev/null 2>&1
+  printf "%s || %s || %s" "$before" "$_HOOK_SESSION_KEY" "$_HOOK_INPUT_STATE_REFRESHED"
+' _ "$HELPERS" '{"tool_input":{"command":"ls"}}')
+case "$key_pair" in
+  *" || "*" || 1")
+    if [ "${key_pair%% || *}" = "$(printf '%s' "$key_pair" | sed 's/ || 1$//; s/^.* || //')" ]; then
+      _pass "refresh: id-less input keeps the source-time key and marks refreshed"
+    else
+      _fail "refresh: key changed on id-less input ($key_pair)"
+    fi
+    ;;
+  *) _fail "refresh: id-less input not marked refreshed ($key_pair)" ;;
+esac
+
+echo "=== perf-regression: timeout backend probed once per PATH ==="
+
+_probe_jq_dir=$(_tmpdir)
+_probe_calls="$_probe_jq_dir/calls"
+cat >"$_probe_jq_dir/timeout" <<'SCRIPT'
+#!/usr/bin/env bash
+printf 'probe\n' >>"$MOCK_TIMEOUT_CALLS"
+echo "usage: timeout"
+SCRIPT
+chmod +x "$_probe_jq_dir/timeout"
+# Termux has no /usr/bin:/bin; the counting pipeline needs wc/tr from the
+# probe dir itself.
+ln -s "$(command -v wc)" "$_probe_jq_dir/wc"
+ln -s "$(command -v tr)" "$_probe_jq_dir/tr"
+# Resolve the harness shell absolutely: a `PATH=<restricted> bash -c`
+# prefix makes the shell look up `bash` itself in the restricted PATH,
+# which has no bash on systems without /usr/bin/bash (Termux).
+_probe_bash=$(command -v bash)
+
+probe_count=$(MOCK_TIMEOUT_CALLS="$_probe_calls" \
+  PATH="$_probe_jq_dir:/usr/bin:/bin" AGENTGUARD_PROCESS_DETECT=0 \
+  "$_probe_bash" -c 'source "$1"; : >"$MOCK_TIMEOUT_CALLS"; _hook_timeout_prefix 2; _hook_timeout_prefix 5; _hook_timeout_prefix 2; wc -l <"$MOCK_TIMEOUT_CALLS" | tr -d " "' _ "$HELPERS")
+_assert_eq "timeout: three calls probe once" "1" "$probe_count"
+
+reprobe_count=$(MOCK_TIMEOUT_CALLS="$_probe_calls" \
+  PATH="/usr/bin:/bin" AGENTGUARD_PROCESS_DETECT=0 \
+  "$_probe_bash" -c 'source "$1"; : >"$MOCK_TIMEOUT_CALLS"; _hook_timeout_prefix 2; PATH="$2:$PATH"; _hook_timeout_prefix 2; wc -l <"$MOCK_TIMEOUT_CALLS" | tr -d " "' _ "$HELPERS" "$_probe_jq_dir")
+_assert_eq "timeout: PATH change re-probes exactly once more" "1" "$reprobe_count"
+
+echo "=== perf-regression: post-edit batch shape ==="
+
+_count_sley_dir=$(_tmpdir)
+_count_sley_log="$_count_sley_dir/calls.log"
+: >"$_count_sley_log"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'echo "CALL: $2 $3 | CWD=$PWD" >> "$COUNT_SLEY_LOG"' \
+  'if [ "${2:-}" = "format" ]; then while IFS= read -r f; do :; done; fi' \
+  'exit 0' >"$_count_sley_dir/sley"
+chmod +x "$_count_sley_dir/sley"
+
+_run_hook_count_sley() {
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    "PATH=$_count_sley_dir:$PATH"
+    "COUNT_SLEY_LOG=$_count_sley_log"
+    AGENTGUARD_SESSION_ID="$TEST_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="agent"
+    CODEX_THREAD_ID=
+  )
+  _run_hook_env "$@"
+}
+
+_batch_input() {
+  local f json='{"tool_input":{"patch":"*** Begin Patch\n'
+  for f in "$@"; do
+    json+="$(printf '*** Update File: %s\\n' "$f")"
+  done
+  printf '%s' "$json*** End Patch\"}}"
+}
+
+_batch_dir_a=$(_tmpdir)
+_batch_dir_b=$(_tmpdir)
+printf 'x=1\n' >"$_batch_dir_a/a.py"
+printf 'y=2\n' >"$_batch_dir_a/b.py"
+printf 'z=3\n' >"$_batch_dir_a/c.py"
+printf 'w=4\n' >"$_batch_dir_b/d.py"
+
+: >"$_count_sley_log"
+_run_hook_count_sley "$POST_EDIT" "$(_batch_input "$_batch_dir_a/a.py" "$_batch_dir_a/b.py" "$_batch_dir_a/c.py")"
+batch_calls=$(grep -c "CALL: format --stdin" "$_count_sley_log")
+single_calls=$(grep -c "CALL: format-file" "$_count_sley_log" || true)
+_assert_eq "post-edit: same-dir trio costs one batch" "1" "$batch_calls"
+_assert_eq "post-edit: no per-file fallback on supported sley" "0" "$single_calls"
+
+: >"$_count_sley_log"
+_run_hook_count_sley "$POST_EDIT" "$(_batch_input "$_batch_dir_a/a.py" "$_batch_dir_b/d.py")"
+batch_calls=$(grep -c "CALL: format --stdin" "$_count_sley_log")
+_assert_eq "post-edit: two dirs cost two batches" "2" "$batch_calls"
+grep -q "CWD=$_batch_dir_a" "$_count_sley_log" && grep -q "CWD=$_batch_dir_b" "$_count_sley_log"
+_assert_exit "post-edit: each batch runs from its own dir" 0 "$?"
+
+echo "=== perf-regression: tokenizer and subcommand memos ==="
+
+_memo_state_for() {
+  # $1: fragment. Prints memo globals after resolving two targets.
+  local fragment="$1"
+  AGENTGUARD_PROCESS_DETECT=0 bash -c '
+    source "$1"
+    source "$2"
+    _git_subcommand_is "$3" "clean" >/dev/null 2>&1
+    first_status=$?
+    _git_subcommand_is "$3" "push" >/dev/null 2>&1
+    second_status=$?
+    printf "memo_frag=<%s> memo_word=<%s> memo_index=<%s> memo_status=<%s> first=<%s> second=<%s> tok_frag_match=<%s>" \
+      "$_GIT_SUBCOMMAND_MEMO_FRAG" "$_GIT_SUBCOMMAND_MEMO_WORD" "$_GIT_SUBCOMMAND_MEMO_INDEX" \
+      "$_GIT_SUBCOMMAND_MEMO_STATUS" "$first_status" "$second_status" \
+      "$([ "$_FRAGMENT_TOKENS_CACHE_FRAG" = "$3" ] && echo yes || echo no)"
+  ' _ "$HELPERS" "$CLASSIFIER" "$fragment"
+}
+
+state=$(_memo_state_for "git clean -fd")
+_assert_eq "memo: clean resolves and publishes" \
+  "memo_frag=<git clean -fd> memo_word=<clean> memo_index=<1> memo_status=<0> first=<0> second=<1> tok_frag_match=<yes>" \
+  "$state"
+
+state=$(_memo_state_for "git -c core.hooksPath=/dev/null reset --hard")
+_assert_eq "memo: wrapped reset resolves past global options" \
+  "memo_frag=<git -c core.hooksPath=/dev/null reset --hard> memo_word=<reset> memo_index=<3> memo_status=<0> first=<1> second=<1> tok_frag_match=<yes>" \
+  "$state"
+
+state=$(_memo_state_for "echo hello")
+_assert_eq "memo: non-git fragment memoizes failure" \
+  "memo_frag=<echo hello> memo_word=<> memo_index=<> memo_status=<1> first=<1> second=<1> tok_frag_match=<yes>" \
+  "$state"
+
+# Resolve-result globals must exist before the first call: hooks run with
+# `set -u`, where reading an unset global on the failure path is fatal.
+set_u_status=$(AGENTGUARD_PROCESS_DETECT=0 bash -c '
+  set -u
+  source "$1"
+  source "$2"
+  _git_subcommand_is "echo hello" "clean" >/dev/null 2>&1
+  printf "%s" "$?"
+' _ "$HELPERS" "$CLASSIFIER")
+_assert_eq "memo: failure path survives set -u" "1" "$set_u_status"
+
+# Cache replay fidelity: primed output must equal freshly computed output on
+# adversarial quoting (quotes, backslashes, ANSI-$'..', embedded newlines).
+_fidelity_pair() {
+  local fragment="$1"
+  AGENTGUARD_PROCESS_DETECT=0 bash -c '
+    source "$1"
+    source "$2"
+    # Sentinel-kept captures: a bare $() strips trailing newlines on both
+    # sides, masking replay gaps for all-empty token streams.
+    fresh="$(_fragment_tokens "$3"; printf x)"
+    _fragment_prime_token_cache "$3"
+    primed="$(_fragment_tokens "$3"; printf x)"
+    _FRAGMENT_TOKENS_CACHE_SET=""
+    reprimed="$(_fragment_tokens "$3"; printf x)"
+    if [ "$fresh" = "$primed" ] && [ "$fresh" = "$reprimed" ]; then
+      echo IDENTICAL
+    else
+      echo DIFFERENT
+    fi
+  ' _ "$HELPERS" "$CLASSIFIER" "$fragment"
+}
+
+for _tricky in 'git commit -m "hello world"' "printf '%s\\n' x" 'echo a\\b "c  d"' "git -c a=b log --oneline" 'git commit -m it'"'"'s done' "x indispensable-ok" '""' "''" 'echo ""' 'git commit -m ""'; do
+  _assert_eq "tokens: replay fidelity for [$_tricky]" "IDENTICAL" "$(_fidelity_pair "$_tricky")"
+done
+_newline_frag=$(printf 'echo "a\nb" c')
+_assert_eq "tokens: replay fidelity for embedded newline" "IDENTICAL" "$(_fidelity_pair "$_newline_frag")"
+
+echo "=== perf-regression: generous end-to-end ceilings ==="
+
+_assert_hook_median_under() {
+  # $1: desc, $2: hook, $3: stdin payload, $4: ceiling ms (very generous),
+  # $5: unmanaged (1) or managed (0) identity env.
+  local desc="$1" hook="$2" input="$3" ceiling="$4" unmanaged="$5"
+  local median
+  median=$(
+    python3 - "$hook" "$input" "$unmanaged" "$TEST_TMPDIR" "$TEST_SID" <<'PY'
+import os
+import statistics
+import subprocess
+import sys
+import time
+
+hook, hook_input, unmanaged, tmpdir, sid = sys.argv[1:]
+env = os.environ.copy()
+scrub = ["AGENTGUARD_NAME", "AGENTGUARD_SESSION_ID", "CODEX_THREAD_ID",
+         "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "GROK_SESSION_ID",
+         "CLAUDE_CODE_CURRENT_SESSION_ID", "CLAUDE_CODE_SESSION_ID",
+         "GEMINI_PROJECT_DIR", "MUSE_SESSION_ID", "AGENT"]
+for key in scrub:
+    env.pop(key, None)
+env.update({"TMPDIR": tmpdir, "NO_COLOR": "1",
+            "AGENTGUARD_HIVE_MEMORY_HOOKS": "0"})
+if unmanaged == "1":
+    env["AGENTGUARD_PROCESS_DETECT"] = "1"
+else:
+    env.update({"AGENTGUARD_NAME": "agent",
+                "AGENTGUARD_SESSION_ID": sid,
+                "AGENTGUARD_PROCESS_DETECT": "0"})
+payload = hook_input.encode()
+samples = []
+for _ in range(3):
+    started = time.perf_counter()
+    subprocess.run([hook], input=payload, env=env,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   timeout=30, check=False)
+    samples.append((time.perf_counter() - started) * 1000)
+print(f"{statistics.median(samples):.0f}")
+PY
+  )
+  if [ "$median" -le "$ceiling" ]; then
+    _pass "$desc: median ${median}ms <= ${ceiling}ms"
+  else
+    _fail "$desc: median ${median}ms exceeds ${ceiling}ms"
+  fi
+}
+
+_git_diff_input=$(jq -cn --arg command "git --no-pager diff --stat" '{tool_input:{command:$command}}')
+_assert_hook_median_under "ceiling: managed git pre-bash" "$PRE_BASH" "$_git_diff_input" 5000 0
+_ls_input=$(jq -cn --arg command "ls -la" '{tool_input:{command:$command}}')
+_assert_hook_median_under "ceiling: unmanaged ls pre-bash" "$PRE_BASH" "$_ls_input" 10000 1
+_edit_input=$(jq -cn '{tool_input:{file_path:"/tmp/perf-regression/a.py"}}')
+_assert_hook_median_under "ceiling: unmanaged pre-edit" "$PRE_EDIT" "$_edit_input" 10000 1
+
+_test_summary

@@ -7,7 +7,10 @@ agent-hook-post-edit \- format edited files through Sley
 .B agent-hook-post-edit
 reads an agent edit hook JSON payload from standard input and delegates changed
 files to
-.BR "sley hook format-file" .
+.BR "sley hook format --stdin" ,
+one batch per directory (with a per-file
+.BR "sley hook format-file"
+fallback for older Sley installs).
 Broader lint and verification remain native commit-hook responsibilities so
 human and agent commit workflows share the same readiness path.
 .SH EXIT STATUS

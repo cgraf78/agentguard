@@ -63,12 +63,27 @@ _agent_match_process_snapshot() {
   '
 }
 
+# One process-table snapshot per process, shared by every detector in this
+# file and by the hook ancestor resolver. A hook's parent chain is fixed once
+# the hook is spawned, so ancestors cannot change mid-hook: re-running
+# `ps -axo` per resolution only re-reads the same table at ~95 ms a snapshot
+# on a loaded host. Callers must invoke this in the current shell (never in
+# $(), whose assignment would die with the subshell) and then read
+# $_AGENT_PROCESS_SNAPSHOT. A failed fetch caches as empty, and every caller
+# already treats an empty snapshot as "unresolved" with its usual fallback.
+_agent_process_snapshot() {
+  if [ -z "${_AGENT_PROCESS_SNAPSHOT_FETCHED:-}" ]; then
+    _AGENT_PROCESS_SNAPSHOT_FETCHED=1
+    _AGENT_PROCESS_SNAPSHOT=$(ps -axo pid=,ppid=,comm= 2>/dev/null) || _AGENT_PROCESS_SNAPSHOT=''
+  fi
+  [ -n "$_AGENT_PROCESS_SNAPSHOT" ]
+}
+
 _agent_process_tree_snapshot_pid() {
   local target="$1"
-  local snapshot
 
-  snapshot=$(ps -axo pid=,ppid=,comm= 2>/dev/null) || return 2
-  _agent_match_process_snapshot "$target" "$snapshot"
+  _agent_process_snapshot || return 2
+  _agent_match_process_snapshot "$target" "$_AGENT_PROCESS_SNAPSHOT"
 }
 
 _agent_process_tree_walk_pid() {
@@ -129,7 +144,10 @@ _agent_name_from_process_tree() {
   # One process snapshot, then Codex before Grok on that same table. A second
   # `ps` per runtime would make every human `hm` invocation pay for Grok even
   # when the tree is already a complete non-match.
-  snapshot=$(ps -axo pid=,ppid=,comm= 2>/dev/null) || snapshot=""
+  snapshot=''
+  if _agent_process_snapshot; then
+    snapshot="$_AGENT_PROCESS_SNAPSHOT"
+  fi
   if [ -n "$snapshot" ]; then
     for target in codex grok; do
       _agent_match_process_snapshot "$target" "$snapshot" >/dev/null
@@ -165,7 +183,29 @@ _is_agent_session() {
     [ -n "${CLAUDE_CODE_CURRENT_SESSION_ID:-}" ] ||
     [ -n "${CLAUDE_CODE_SESSION_ID:-}" ] ||
     [ -n "${GEMINI_PROJECT_DIR:-}" ] ||
+    _agent_name_from_generic_env >/dev/null 2>&1 ||
     [ -n "$(_agent_name_from_process_tree)" ]
+}
+
+# Resolve a generic $AGENT export to a known runtime name. Some launchers
+# identify the runtime only through $AGENT (no runtime-specific session id),
+# which previously forced full process-tree detection on every hook. Only
+# exact known-runtime names match (ASCII case-insensitive); anything else
+# returns 1 silently so detection falls through unchanged.
+# NOTE: resolving here also activates the runtime's hook extensions in
+# unmanaged environments (e.g. `agent-hook-pre-search-muse` blocks
+# symlink-blind file search under $AGENT=muse, exactly as in managed
+# hooks). That verdict convergence is intended: unmanaged now enforces
+# the same policy the managed contract already applies.
+_agent_name_from_generic_env() {
+  case "${AGENT:-}" in
+    [Cc][Ll][Aa][Uu][Dd][Ee]) echo "claude" ;;
+    [Cc][Oo][Dd][Ee][Xx]) echo "codex" ;;
+    [Gg][Ee][Mm][Ii][Nn][Ii]) echo "gemini" ;;
+    [Gg][Rr][Oo][Kk]) echo "grok" ;;
+    [Mm][Uu][Ss][Ee]) echo "muse" ;;
+    *) return 1 ;;
+  esac
 }
 
 # Prints the name of the detected agent, or "unknown" when detection
@@ -186,6 +226,9 @@ _agent_name() {
     echo "grok"
   elif [ -n "${CLAUDE_CODE_CURRENT_SESSION_ID:-}" ] || [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
     echo "claude"
+  elif _agent_name_from_generic_env; then
+    # The helper already printed the resolved name; nothing left to do.
+    :
   elif [ -n "${AGENTGUARD_SESSION_ID:-}" ]; then
     echo "agent"
   elif process_name=$(_agent_name_from_process_tree); then

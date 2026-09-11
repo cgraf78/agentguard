@@ -156,8 +156,10 @@ _hook_session_key_safe() {
 # state no hook reads.
 _hook_agent_ancestor_key() {
   [ "${AGENTGUARD_PROCESS_DETECT:-1}" != "0" ] || return 1
-  local snapshot
-  snapshot=$(ps -axo pid=,ppid=,comm= 2>/dev/null) || return 1
+  # Share the one per-process snapshot from detect.sh: this resolver runs on
+  # every state refresh, and a second `ps` would re-read the same table.
+  _agent_process_snapshot || return 1
+  local snapshot="$_AGENT_PROCESS_SNAPSHOT"
   [ -n "$snapshot" ] || return 1
   printf '%s\n' "$snapshot" | awk -v start="$$" '
     {
@@ -224,6 +226,11 @@ _hook_refresh_state_dir() {
     ' 2>/dev/null)
   fi
 
+  # Precedence note: these launcher ids are mutually exclusive in practice
+  # (each launcher exports only its own), so their relative order only
+  # matters for synthetic co-occurrence. MUSE ranks below GROK here while
+  # `_hook_agent_shell_session_keys` ranks it second; both orders agree
+  # whenever at most one launcher id is set, which is the only real case.
   if [ "${AGENTGUARD_NAME:-}" = "codex" ] && [ -n "$input_session" ]; then
     session_key="$input_session"
   elif [ -n "${AGENTGUARD_SESSION_ID:-}" ]; then
@@ -232,10 +239,26 @@ _hook_refresh_state_dir() {
     session_key="$CODEX_THREAD_ID"
   elif [ -n "${GROK_SESSION_ID:-}" ]; then
     session_key="$GROK_SESSION_ID"
+  elif [ -n "${MUSE_SESSION_ID:-}" ]; then
+    session_key="$MUSE_SESSION_ID"
   elif [ "${AGENTGUARD_NAME:-}" != "codex" ] && [ -n "${CLAUDE_CODE_CURRENT_SESSION_ID:-}" ]; then
     session_key="$CLAUDE_CODE_CURRENT_SESSION_ID"
+  elif [ "${AGENTGUARD_NAME:-}" != "codex" ] && [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+    session_key="$CLAUDE_CODE_SESSION_ID"
   elif [ -n "$input_session" ]; then
     session_key="$input_session"
+  fi
+
+  # Prime the shared process snapshot in this shell before the subshell
+  # resolutions below. They cannot persist the cache themselves ($() state
+  # dies with the subshell), but they inherit it — so one fetch here serves
+  # the codex key, the ancestor key, and every later _agent_name probe in
+  # this hook process. The condition matches exactly the processes that will
+  # probe: an empty key means no id vars, and disabled detection probes
+  # nothing anywhere downstream except the explicit codex-name path
+  # (`_hook_codex_process_key` still probes under AGENTGUARD_NAME=codex).
+  if [ -z "$session_key" ] && [ "${AGENTGUARD_PROCESS_DETECT:-1}" != "0" ]; then
+    _agent_process_snapshot || true
   fi
 
   if [ -z "$session_key" ] && codex_key=$(_hook_codex_process_key); then
@@ -300,6 +323,33 @@ _hook_refresh_state_dir() {
     _HOOK_INPUT_STATE_REFRESHED=1
   else
     _HOOK_INPUT_STATE_REFRESHED=''
+  fi
+}
+
+# String prefilter: does this payload mention any session field the state
+# refresh reads (`session_id`/`sessionId`, `subagent_type`/`subagentType`,
+# `prompt_id`/`promptId`)? The refresh extracts those three fields and nothing
+# else from hook JSON, so a payload mentioning none of them re-resolves the
+# exact key the source-time refresh already computed. False positives (a
+# command containing the word "session") just take the slow path. Any
+# `\uXXXX` escape also takes the slow path, so JSON-escaped key spellings
+# (e.g. `ses\u0073ion_id`) cannot false-negative.
+_hook_input_has_session_fields() {
+  case "${1:-}" in
+    *session* | *subagent* | *prompt* | *\\u*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Post-input refresh that skips payloads without session fields. Call only
+# once hook JSON is available: without session fields the key is provably the
+# source-time key, so this marks the input refreshed instead of re-running
+# jq plus process probing for the same answer.
+_hook_refresh_state_dir_for_input() {
+  if _hook_input_has_session_fields "${_HOOK_INPUT:-}"; then
+    _hook_refresh_state_dir
+  else
+    _HOOK_INPUT_STATE_REFRESHED=1
   fi
 }
 
@@ -628,7 +678,7 @@ $1"
 
 _hook_read_input() {
   if [ -n "${_HOOK_INPUT+x}" ]; then
-    [ "$_HOOK_INPUT_STATE_REFRESHED" = 1 ] || _hook_refresh_state_dir
+    [ "$_HOOK_INPUT_STATE_REFRESHED" = 1 ] || _hook_refresh_state_dir_for_input
     return 0
   fi
   [ ! -t 0 ] || return 1
@@ -693,8 +743,9 @@ _hook_read_input() {
   _HOOK_INPUT="$input"
   # Some hook runners provide the durable session id only in JSON stdin. Refresh
   # after reading that payload so per-session state is keyed by the actual
-  # session instead of falling back to this one hook process id.
-  _hook_refresh_state_dir
+  # session instead of falling back to this one hook process id. The
+  # session-field prefilter keeps id-less payloads on the source-time key.
+  _hook_refresh_state_dir_for_input
 }
 
 # Parses the shell command from hook JSON input. Caches the full JSON in
@@ -725,21 +776,43 @@ _hook_parse_command() {
     fi
     exit 0
   fi
-  if ! printf '%s' "$_HOOK_INPUT" | jq empty >/dev/null 2>&1; then
+  # One jq pass serves as both the validity check and the extraction: jq
+  # exits nonzero on unparsable input and prints nothing for valid JSON
+  # without a command field, which are exactly the two old branches below.
+  # The `?` operators suppress type errors only (indexing a string, array,
+  # or number as an object): the old extractor ignored those errors and
+  # treated the payload as command-less, so suppressing them preserves the
+  # exit-0 contract for valid-but-non-object JSON while still failing
+  # closed on unparsable input. (Declare cmd first: `local` would mask the
+  # substitution's exit status.)
+  local cmd _line
+  if ! cmd=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_input?.command? // .tool_input?.cmd? // .toolInput?.command? // .toolInput?.cmd? // empty' 2>/dev/null); then
     if [ "$_can_block" = 1 ]; then
       _hook_block 'cannot inspect the command: the tool payload is not valid JSON. Refusing to run it unguarded.'
       _hook_finish
     fi
     exit 0
   fi
-  local cmd
-  cmd=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_input.command // .tool_input.cmd // .toolInput.command // .toolInput.cmd // empty' 2>/dev/null)
   # Valid JSON but no command field: there is nothing to run, so nothing to guard.
   [ -z "$cmd" ] && exit 0
-  AGENTGUARD_CMD_TRIMMED=$(printf '%s' "$cmd" | sed 's/^[[:space:]]*//')
+  # Strip leading whitespace exactly like the historical
+  # `sed 's/^[[:space:]]*//'` (every line: sed is line-oriented, so a leading
+  # newline survives into TRIMMED and empties the first line below).
+  AGENTGUARD_CMD_TRIMMED=''
+  while [ -n "$cmd" ]; do
+    _line="${cmd%%$'\n'*}"
+    _line="${_line#"${_line%%[![:space:]]*}"}"
+    AGENTGUARD_CMD_TRIMMED+="${_line}"
+    if [[ "$cmd" == *$'\n'* ]]; then
+      cmd="${cmd#*$'\n'}"
+      AGENTGUARD_CMD_TRIMMED+=$'\n'
+    else
+      cmd=''
+    fi
+  done
   # First line only — heredoc bodies (commit messages, etc.) start on
   # line 2 and must not trigger command-detection guards.
-  AGENTGUARD_CMD_LINE1=$(printf '%s' "$AGENTGUARD_CMD_TRIMMED" | head -1)
+  AGENTGUARD_CMD_LINE1="${AGENTGUARD_CMD_TRIMMED%%$'\n'*}"
   export AGENTGUARD_CMD_TRIMMED AGENTGUARD_CMD_LINE1
 }
 
@@ -793,7 +866,7 @@ _hook_parse_edit_files() {
         sub("^\\*\\*\\* Move to: "; ""))
     ] | map(select(. != "")) | first_seen[]
   ' 2>/dev/null)
-  AGENTGUARD_EDIT_FILE=$(printf '%s\n' "$AGENTGUARD_EDIT_FILES" | sed -n '1p')
+  AGENTGUARD_EDIT_FILE="${AGENTGUARD_EDIT_FILES%%$'\n'*}"
   export AGENTGUARD_EDIT_FILES AGENTGUARD_EDIT_FILE
 }
 
@@ -1170,18 +1243,29 @@ _hook_timeout_prefix() {
     return 0
   fi
 
-  if command -v timeout >/dev/null 2>&1; then
-    timeout_help=$(timeout --help 2>&1 || true)
-    if [[ "$timeout_help" == *BusyBox* ]]; then
-      _HOOK_TIMEOUT_PREFIX=(bash -c "$_HOOK_PORTABLE_TIMEOUT_SCRIPT" _ "$seconds")
+  # Backend probing shells out (`timeout --help`); the answer depends only on
+  # PATH, so cache it per process and re-probe only when PATH changes.
+  if [ "${_HOOK_TIMEOUT_BACKEND_PATH:-}" != "${PATH:-}" ]; then
+    _HOOK_TIMEOUT_BACKEND_PATH="${PATH:-}"
+    if command -v timeout >/dev/null 2>&1; then
+      timeout_help=$(timeout --help 2>&1 || true)
+      if [[ "$timeout_help" == *BusyBox* ]]; then
+        _HOOK_TIMEOUT_BACKEND=portable
+      else
+        _HOOK_TIMEOUT_BACKEND=gnu
+      fi
+    elif command -v gtimeout >/dev/null 2>&1; then
+      _HOOK_TIMEOUT_BACKEND=gtimeout
     else
-      _HOOK_TIMEOUT_PREFIX=(timeout "$seconds")
+      _HOOK_TIMEOUT_BACKEND=portable
     fi
-  elif command -v gtimeout >/dev/null 2>&1; then
-    _HOOK_TIMEOUT_PREFIX=(gtimeout "$seconds")
-  else
-    _HOOK_TIMEOUT_PREFIX=(bash -c "$_HOOK_PORTABLE_TIMEOUT_SCRIPT" _ "$seconds")
   fi
+
+  case "$_HOOK_TIMEOUT_BACKEND" in
+    gnu) _HOOK_TIMEOUT_PREFIX=(timeout "$seconds") ;;
+    gtimeout) _HOOK_TIMEOUT_PREFIX=(gtimeout "$seconds") ;;
+    *) _HOOK_TIMEOUT_PREFIX=(bash -c "$_HOOK_PORTABLE_TIMEOUT_SCRIPT" _ "$seconds") ;;
+  esac
 }
 
 _hook_hm_event() {
@@ -1360,8 +1444,10 @@ _hook_source_extensions() {
 }
 
 _hook_event_name() {
-  local hook_name
-  hook_name=$(basename "${_HOOK_SELF:-$0}")
+  # Basename without the fork: hook paths never carry a trailing slash, which
+  # is the only input where ${var##*/} and basename(1) disagree.
+  local hook_name="${_HOOK_SELF:-$0}"
+  hook_name="${hook_name##*/}"
   case "$hook_name" in
     agent-hook-session-start*) echo "SessionStart" ;;
     agent-hook-prompt-submit*) echo "UserPromptSubmit" ;;

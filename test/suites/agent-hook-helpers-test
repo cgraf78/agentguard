@@ -2046,7 +2046,9 @@ _assert_eq "agent_name: codex process fallback" "0" "$?"
 
 # The markerless fallback runs on every human `hm` command, so it must inspect
 # the process tree from one snapshot instead of spawning two `ps` commands per
-# ancestor. The mock supports only the snapshot form and records every call.
+# ancestor. The source-time state refresh and later agent-name probes share
+# that single per-process snapshot. The mock supports only the snapshot form
+# and records every call.
 MOCK_PS_SNAPSHOT_DIR=$(_tmpdir)
 MOCK_PS_SNAPSHOT_CALLS="$MOCK_PS_SNAPSHOT_DIR/calls"
 cat >"$MOCK_PS_SNAPSHOT_DIR/ps" <<'SCRIPT'
@@ -2073,13 +2075,13 @@ snapshot_agent=$(
   bash -c '
     export MOCK_CHILD_PID="$$"
     PATH="$1:$PATH"
-    source "$2"
     : >"$MOCK_PS_SNAPSHOT_CALLS"
+    source "$2"
     _hook_agent_name
   ' _ "$MOCK_PS_SNAPSHOT_DIR" "$HELPERS"
 )
 _assert_eq "agent_name: one process snapshot detects codex" "codex" "$snapshot_agent"
-_assert_eq "agent_name: process fallback invokes ps once" "1" \
+_assert_eq "agent_name: source plus agent-name share one ps snapshot" "1" \
   "$(wc -l <"$MOCK_PS_SNAPSHOT_CALLS" | tr -d ' ')"
 
 : >"$MOCK_PS_SNAPSHOT_CALLS"
@@ -2093,13 +2095,13 @@ snapshot_agent=$(
   bash -c '
     export MOCK_CHILD_PID="$$"
     PATH="$1:$PATH"
-    source "$2"
     : >"$MOCK_PS_SNAPSHOT_CALLS"
+    source "$2"
     _hook_agent_name
   ' _ "$MOCK_PS_SNAPSHOT_DIR" "$HELPERS"
 )
 _assert_eq "agent_name: unrelated codex process is ignored" "agent" "$snapshot_agent"
-_assert_eq "agent_name: unrelated process scan invokes ps once" "1" \
+_assert_eq "agent_name: unrelated scan shares the one ps snapshot" "1" \
   "$(wc -l <"$MOCK_PS_SNAPSHOT_CALLS" | tr -d ' ')"
 
 # A successful snapshot can still be incomplete. Fall back to the per-process

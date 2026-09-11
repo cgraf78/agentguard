@@ -817,6 +817,10 @@ case "$-" in
           # option parsing (clean -f, push --force); absorb, reset, and commit
           # use the classifier's existing subcommand matchers directly.
           git | */git)
+            # One tokenization serves every verdict below (absorb, reset,
+            # clean, push): the subcommand helpers share this fragment's
+            # primed token cache instead of re-tokenizing per check.
+            _fragment_prime_token_cache "$frag"
             # `git absorb` leaves fixup commits behind unless the caller runs
             # the matching autosquash rebase; use absorb-and-rebase instead.
             [ "$_GUARD_GIT_ABSORB" -eq 0 ] &&

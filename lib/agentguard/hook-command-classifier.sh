@@ -1266,9 +1266,44 @@ agentguard_classify_command_record_json() {
 # Tokenize one command fragment into shell words, preserving quoted whitespace
 # as part of the word. This is still a shallow lexer: it strips quotes and
 # backslash escapes, but it does not evaluate expansions or substitutions.
+# Single-entry token cache. Tokenizing is a pure function of the fragment,
+# and guard bursts resolve several verdicts per fragment (git subcommand,
+# options, bare-git untracked checks), each re-tokenizing today.
+# `_fragment_prime_token_cache` must run in the current shell to persist;
+# `_fragment_tokens` only READS the cache, so hits work even from subshells
+# (whose own primes die with them but still collapse their internal
+# re-tokenizations to one).
+_FRAGMENT_TOKENS_CACHE_FRAG=''
+_FRAGMENT_TOKENS_CACHE_LINES=''
+_FRAGMENT_TOKENS_CACHE_SET=''
+
+_fragment_prime_token_cache() {
+  local fragment="$1" lines
+  if [ -n "$_FRAGMENT_TOKENS_CACHE_SET" ] && [ "$_FRAGMENT_TOKENS_CACHE_FRAG" = "$fragment" ]; then
+    return 0
+  fi
+  # Fetch before publishing: the fetch itself consults the cache, and the
+  # old fragment key must still be in place so the fetch misses and computes.
+  # The `x` sentinel preserves trailing newlines through the `$()` capture
+  # (which strips them): without it an all-empty token stream replays as
+  # empty instead of emitting its newline.
+  lines="$(
+    _fragment_tokens "$fragment"
+    printf x
+  )"
+  _FRAGMENT_TOKENS_CACHE_FRAG="$fragment"
+  _FRAGMENT_TOKENS_CACHE_LINES="$lines"
+  _FRAGMENT_TOKENS_CACHE_SET=1
+}
+
 _fragment_tokens() {
   local fragment="$1" ch quote="" word="" escaped=0 started=0
   local i
+
+  if [ -n "$_FRAGMENT_TOKENS_CACHE_SET" ] && [ "$_FRAGMENT_TOKENS_CACHE_FRAG" = "$fragment" ]; then
+    printf '%s' "${_FRAGMENT_TOKENS_CACHE_LINES%x}"
+    return 0
+  fi
 
   for ((i = 0; i < ${#fragment}; i++)); do
     ch="${fragment:i:1}"
@@ -2513,6 +2548,7 @@ _fragment_command_index_from_words() {
 _fragment_command_index() {
   local fragment="$1" word
   local -a words=()
+  _fragment_prime_token_cache "$fragment"
 
   while IFS= read -r word; do
     words+=("$word")
@@ -2540,6 +2576,7 @@ _word_matches_command() {
 _fragment_command_word() {
   local fragment="$1" i word
   local -a words=()
+  _fragment_prime_token_cache "$fragment"
 
   while IFS= read -r word; do
     words+=("$word")
@@ -2555,6 +2592,7 @@ _fragment_command_word() {
 _fragment_first_arg() {
   local fragment="$1" i word
   local -a words=()
+  _fragment_prime_token_cache "$fragment"
 
   while IFS= read -r word; do
     words+=("$word")
@@ -2573,6 +2611,7 @@ _fragment_initial_cd_target() {
   local fragment="$1" word
   local i=0
   local -a words=()
+  _fragment_prime_token_cache "$fragment"
 
   while IFS= read -r word; do
     words+=("$word")
@@ -3006,10 +3045,29 @@ _fragment_runs_nested_shell() {
 # Return the index of the actual Git subcommand after wrappers and global Git
 # options so path names like `status` or grep patterns like `ls-files` don't
 # trigger policies by accident.
-_git_subcommand_index() {
-  local fragment="$1" target="${2:-}" word
+#
+# Single-entry subcommand memo. Guard bursts ask absorb/reset/clean/push and
+# the bare-git untracked checks about the same fragment in sequence; the walk
+# below forks per word (nested `_clean_command_word` subshells), so it runs
+# once per fragment and every verdict compares against the memoized
+# subcommand. Like the token cache, the memo is read-only from subshells:
+# hits skip the walk everywhere, misses cost exactly one walk as before.
+_GIT_SUBCOMMAND_MEMO_FRAG=''
+_GIT_SUBCOMMAND_MEMO_WORD=''
+_GIT_SUBCOMMAND_MEMO_INDEX=''
+_GIT_SUBCOMMAND_MEMO_STATUS=1
+_GIT_SUBCOMMAND_MEMO_SET=''
+# Resolve-result globals are read while publishing the memo even on the
+# failure path, so they must exist before the first call (callers run with
+# `set -u`, where an unset global is fatal, not empty).
+_GIT_SUBCOMMAND_WORD=''
+_GIT_SUBCOMMAND_INDEX=''
+
+_git_subcommand_resolve_uncached() {
+  local fragment="$1" word
   local i
   local -a words=()
+  _fragment_prime_token_cache "$fragment"
 
   while IFS= read -r word; do
     words+=("$word")
@@ -3044,14 +3102,45 @@ _git_subcommand_index() {
         ((i++))
         ;;
       *)
-        [ -z "$target" ] || [ "$word" = "$target" ] || return 1
-        printf '%s' "$i"
+        _GIT_SUBCOMMAND_WORD="$word"
+        _GIT_SUBCOMMAND_INDEX="$i"
         return 0
         ;;
     esac
   done
 
   return 1
+}
+
+# Resolve the git subcommand of a fragment, memoized. Sets
+# _GIT_SUBCOMMAND_WORD/_GIT_SUBCOMMAND_INDEX on success; returns 1 when the
+# fragment is not a git invocation with a subcommand.
+_git_subcommand_resolve() {
+  local fragment="$1" status
+  if [ -n "$_GIT_SUBCOMMAND_MEMO_SET" ] && [ "$_GIT_SUBCOMMAND_MEMO_FRAG" = "$fragment" ]; then
+    [ "$_GIT_SUBCOMMAND_MEMO_STATUS" -eq 0 ] || return 1
+    _GIT_SUBCOMMAND_WORD="$_GIT_SUBCOMMAND_MEMO_WORD"
+    _GIT_SUBCOMMAND_INDEX="$_GIT_SUBCOMMAND_MEMO_INDEX"
+    return 0
+  fi
+  if _git_subcommand_resolve_uncached "$fragment"; then
+    status=0
+  else
+    status=1
+  fi
+  _GIT_SUBCOMMAND_MEMO_FRAG="$fragment"
+  _GIT_SUBCOMMAND_MEMO_WORD="$_GIT_SUBCOMMAND_WORD"
+  _GIT_SUBCOMMAND_MEMO_INDEX="$_GIT_SUBCOMMAND_INDEX"
+  _GIT_SUBCOMMAND_MEMO_STATUS="$status"
+  _GIT_SUBCOMMAND_MEMO_SET=1
+  return "$status"
+}
+
+_git_subcommand_index() {
+  local fragment="$1" target="${2:-}"
+  _git_subcommand_resolve "$fragment" || return 1
+  [ -z "$target" ] || [ "$_GIT_SUBCOMMAND_WORD" = "$target" ] || return 1
+  printf '%s' "$_GIT_SUBCOMMAND_INDEX"
 }
 
 # Identify the actual Git subcommand after wrappers and global Git options.
@@ -3063,6 +3152,7 @@ _git_subcommand_effective_dir() {
   local fragment="$1" target="$2" word value effective_dir="$PWD"
   local i
   local -a words=()
+  _fragment_prime_token_cache "$fragment"
 
   while IFS= read -r word; do
     words+=("$word")
@@ -3118,6 +3208,7 @@ _command_subcommand_effective_dir() {
   local fragment="$1" command="$2" target="$3" word value effective_dir="$PWD"
   local i
   local -a words=()
+  _fragment_prime_token_cache "$fragment"
 
   while IFS= read -r word; do
     words+=("$word")
@@ -3182,6 +3273,7 @@ _command_subcommand_effective_dir() {
 _git_subcommand_has_option() {
   local fragment="$1" target="$2" option="$3" word index
   local -a words=()
+  _fragment_prime_token_cache "$fragment"
 
   while IFS= read -r word; do
     words+=("$word")
@@ -3217,6 +3309,7 @@ _git_absorb_command() {
 _command_subcommand_index() {
   local fragment="$1" command="$2" target="${3:-}" word i
   local -a words=()
+  _fragment_prime_token_cache "$fragment"
 
   while IFS= read -r word; do
     words+=("$word")
@@ -3273,6 +3366,7 @@ _command_subcommand_is() {
 _command_subcommand_has_option() {
   local fragment="$1" command="$2" subcommand="$3" option="$4" word i
   local -a words=()
+  _fragment_prime_token_cache "$fragment"
 
   while IFS= read -r word; do
     words+=("$word")
@@ -3772,6 +3866,7 @@ _git_ls_files_has_scoped_pathspecs() {
 _git_status_lists_untracked() {
   local fragment="$1" word option_state untracked_state=0 ignored_state=0
   local -a words=()
+  _fragment_prime_token_cache "$fragment"
   _git_subcommand_is "$fragment" "status" || return 1
 
   if option_state="$(_git_config_env_untracked_status_state "$fragment")"; then
@@ -3797,6 +3892,7 @@ _git_status_lists_untracked() {
 _git_ls_files_lists_untracked() {
   local fragment="$1" word lists_others=0
   local -a words=()
+  _fragment_prime_token_cache "$fragment"
   _git_subcommand_is "$fragment" "ls-files" || return 1
 
   read -r -a words <<<"$fragment"
@@ -3815,6 +3911,7 @@ _git_ls_files_lists_untracked() {
 _git_clean_lists_untracked() {
   local fragment="$1" word
   local -a words=()
+  _fragment_prime_token_cache "$fragment"
   _git_subcommand_is "$fragment" "clean" || return 1
 
   read -r -a words <<<"$fragment"
@@ -3862,6 +3959,7 @@ _git_add_stages_everything() {
   local fragment="$1" word index
   local all_flag=0 specific_pathspec=0 broad_pathspec=0 saw_separator=0
   local -a words=()
+  _fragment_prime_token_cache "$fragment"
   index="$(_git_subcommand_index "$fragment" "add")" || return 1
 
   while IFS= read -r word; do

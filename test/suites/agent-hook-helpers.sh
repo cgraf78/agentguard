@@ -16,7 +16,7 @@ export AGENTGUARD_PROCESS_DETECT=0
 # it explicitly in their own subshell.
 unset CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID \
   CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR \
-  GROK_SESSION_ID GROK_HOOK_EVENT GROK_WORKSPACE_ROOT GROK_HOOK_NAME
+  GROK_SESSION_ID GROK_HOOK_EVENT GROK_WORKSPACE_ROOT GROK_HOOK_NAME AGENT
 # The hook state root resolves from XDG_RUNTIME_DIR/XDG_STATE_HOME, and the
 # protected-bare classifier cache resolves from XDG_CACHE_HOME. Scrub the ambient
 # values (devservers set XDG_RUNTIME_DIR=/run/user/<uid>) so nothing leaks into
