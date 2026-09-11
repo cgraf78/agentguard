@@ -392,14 +392,21 @@ _assert_contains "post-edit: other-dir file formatted" "formatted" "$(cat "$_oth
 _run_hook_stub_sley "$POST_EDIT" "$(_edit_files_input "$_fmt_dir/a.py" "$_fmt_dir/missing.py")"
 _assert_exit "post-edit: missing file skipped without failure" 0 "$HOOK_EXIT"
 
+# Termux has no /usr/bin:/bin, so restricted-PATH fixtures get a symlink
+# farm of the real tools the hook needs (mirrors the edit suite) instead
+# of assuming FHS paths. The farm carries no sley by construction.
 _no_sley_bin=$(_tmpdir)
 _no_sley_home=$(_tmpdir)
+_no_sley_tools=$(_tmpdir)
+for _no_sley_tool in bash dirname jq readlink; do
+  ln -s "$(command -v "$_no_sley_tool")" "$_no_sley_tools/$_no_sley_tool"
+done
 _run_hook_no_sley() {
   # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
   # HOME points at a bare temp dir: hook-helpers prepends ~/.local/bin to
   # PATH when it exists, which would otherwise resurrect the real sley.
   local _RUN_HOOK_ENV=(
-    "PATH=$_no_sley_bin:/usr/bin:/bin"
+    "PATH=$_no_sley_bin:$_no_sley_tools"
     "HOME=$_no_sley_home"
     AGENTGUARD_SESSION_ID="$TEST_SID"
     TMPDIR="$TEST_TMPDIR"
@@ -429,7 +436,7 @@ chmod +x "$_old_sley_bin/sley"
 _run_hook_old_sley() {
   # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
   local _RUN_HOOK_ENV=(
-    "PATH=$_old_sley_bin:/usr/bin:/bin"
+    "PATH=$_old_sley_bin:$_no_sley_tools"
     "HOME=$_no_sley_home"
     AGENTGUARD_SESSION_ID="$TEST_SID"
     TMPDIR="$TEST_TMPDIR"

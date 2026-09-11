@@ -162,6 +162,10 @@ printf 'probe\n' >>"$MOCK_TIMEOUT_CALLS"
 echo "usage: timeout"
 SCRIPT
 chmod +x "$_probe_jq_dir/timeout"
+# Termux has no /usr/bin:/bin; the counting pipeline needs wc/tr from the
+# probe dir itself.
+ln -s "$(command -v wc)" "$_probe_jq_dir/wc"
+ln -s "$(command -v tr)" "$_probe_jq_dir/tr"
 
 probe_count=$(MOCK_TIMEOUT_CALLS="$_probe_calls" \
   PATH="$_probe_jq_dir:/usr/bin:/bin" AGENTGUARD_PROCESS_DETECT=0 \
