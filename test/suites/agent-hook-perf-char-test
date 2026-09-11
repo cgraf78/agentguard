@@ -256,13 +256,18 @@ _timeout_prefix_with() {
     bash -c 'source "$1"; _hook_timeout_prefix "$2"; printf "<%s>" "${_HOOK_TIMEOUT_PREFIX[@]}"' _ "$HELPERS" "$seconds"
 }
 
-gnu_prefix=$(_timeout_prefix_with 2 "$PATH")
+# Fixture GNU timeout: BusyBox/macOS hosts have no GNU timeout, so the
+# gnu-form assertions below must not depend on the ambient PATH.
+_gnu_bin=$(_tmpdir)
+printf '#!/usr/bin/env bash\nif [ "${1:-}" = "--help" ]; then echo "Usage: timeout DURATION COMMAND (GNU coreutils)"; else echo "fixture gnu timeout must not execute" >&2; exit 99; fi\n' >"$_gnu_bin/timeout"
+chmod +x "$_gnu_bin/timeout"
+gnu_prefix=$(_timeout_prefix_with 2 "$_gnu_bin:/usr/bin:/bin")
 case "$gnu_prefix" in
   "<timeout><2>") _pass "timeout: gnu backend selected when timeout exists" ;;
   *) _fail "timeout: unexpected gnu prefix $gnu_prefix" ;;
 esac
 
-repeat_prefix=$(_timeout_prefix_with 2 "$PATH")
+repeat_prefix=$(_timeout_prefix_with 2 "$_gnu_bin:/usr/bin:/bin")
 _assert_eq "timeout: repeated calls select the same backend" "$gnu_prefix" "$repeat_prefix"
 
 invalid_prefix=$(_timeout_prefix_with "abc" "$PATH")
@@ -270,10 +275,10 @@ _assert_eq "timeout: invalid duration degrades to exit-125" "<bash><-c><exit 125
 
 _zero_prefix() {
   env -u AGENTGUARD_NAME -u AGENTGUARD_SESSION_ID -u AGENT \
-    AGENTGUARD_PROCESS_DETECT=0 \
+    AGENTGUARD_PROCESS_DETECT=0 PATH="$2" \
     bash -c 'source "$1"; _hook_timeout_prefix "$2"; printf "<%s>" "${_HOOK_TIMEOUT_PREFIX[@]}"' _ "$HELPERS" "$1"
 }
-zero_prefix=$(_zero_prefix 0)
+zero_prefix=$(_zero_prefix 0 "$_gnu_bin:/usr/bin:/bin")
 _assert_eq "timeout: zero duration keeps the gnu form" "<timeout><0>" "$zero_prefix"
 
 _busybox_bin=$(_tmpdir)
@@ -316,10 +321,11 @@ else
 fi
 
 _redetect_with() {
-  # Backend must follow PATH when it changes mid-process.
+  # Backend must follow PATH when it changes mid-process: start on the
+  # fixture GNU timeout, then switch to the BusyBox stub.
   env -u AGENTGUARD_NAME -u AGENTGUARD_SESSION_ID -u AGENT \
-    AGENTGUARD_PROCESS_DETECT=0 PATH="$PATH" \
-    bash -c 'source "$1"; _hook_timeout_prefix 2; first="${_HOOK_TIMEOUT_PREFIX[*]}"; PATH="$2"; _hook_timeout_prefix 2; printf "%s || %s" "$first" "${_HOOK_TIMEOUT_PREFIX[*]}"' _ "$HELPERS" "$_busybox_bin:$PATH"
+    AGENTGUARD_PROCESS_DETECT=0 PATH="$_gnu_bin:/usr/bin:/bin" \
+    bash -c 'source "$1"; _hook_timeout_prefix 2; first="${_HOOK_TIMEOUT_PREFIX[*]}"; PATH="$2"; _hook_timeout_prefix 2; printf "%s || %s" "$first" "${_HOOK_TIMEOUT_PREFIX[*]}"' _ "$HELPERS" "$_busybox_bin:/usr/bin:/bin"
 }
 redetect=$(_redetect_with)
 case "$redetect" in
