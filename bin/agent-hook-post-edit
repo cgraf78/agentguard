@@ -35,40 +35,83 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
 
 _hook_parse_edit_files
 
-_post_edit_sley_file() {
-  local fp="$1" abs_fp dir caller
-  [ -n "$fp" ] || return 0
-  [ -f "$fp" ] || return 0
+# Format one directory's files with a single `sley hook format --stdin`
+# batch. Sley detects the repo from the caller's cwd, so each directory gets
+# its own batch from that directory — exactly the repo context the old
+# per-file loop produced via its per-file `cd`. A sley too old for the batch
+# entry fails the batch call, and only then do the files fall back to
+# one-by-one `format-file` (current sley always exits the batch 0, formatter
+# failures included, so the fallback costs nothing on supported installs).
+_post_edit_format_dir() {
+  local dir="$1" files="$2" caller="$3" fp
+  (
+    # Detect the repo from the edited files' directory, not from the agent's
+    # process cwd. Agents often edit absolute paths while sitting elsewhere.
+    cd "$dir" || exit 0
+    export SLEY_CALLER="$caller"
+    if ! sley hook format --stdin <<<"$files" >/dev/null 2>&1; then
+      while IFS= read -r fp; do
+        [ -n "$fp" ] || continue
+        sley hook format-file "$fp" >/dev/null 2>&1 || true
+      done <<<"$files"
+    fi
+  )
+}
+
+_post_edit_format_all() {
+  local fp abs_fp dir idx i
+  local -a _dirs=() _lists=()
+
+  # Group existing files by directory (plain indexed arrays: this hook still
+  # runs under Bash 3.2 on stock macOS, which has no associative arrays).
+  while IFS= read -r fp; do
+    [ -n "$fp" ] || continue
+    [ -f "$fp" ] || continue
+    # Resolve to an absolute path BEFORE any `cd` below. Without this, a
+    # relative path like `src/main.js` would re-resolve against the new cwd
+    # and the formatter would look for `src/src/main.js`, silently no-op'ing
+    # on every relative-path edit.
+    case "$fp" in
+      /*) abs_fp="$fp" ;;
+      *) abs_fp="$PWD/$fp" ;;
+    esac
+    dir="${abs_fp%/*}"
+    [ -n "$dir" ] || dir=/
+    idx=-1
+    i=0
+    while [ "$i" -lt "${#_dirs[@]}" ]; do
+      if [ "${_dirs[i]}" = "$dir" ]; then
+        idx=$i
+        break
+      fi
+      i=$((i + 1))
+    done
+    if [ "$idx" -lt 0 ]; then
+      _dirs+=("$dir")
+      _lists+=("$abs_fp")
+    else
+      _lists[idx]="${_lists[idx]}
+$abs_fp"
+    fi
+  done <<<"$AGENTGUARD_EDIT_FILES"
+
+  [ "${#_dirs[@]}" -gt 0 ] || return 0
 
   # Post-edit policy has one owner: Sley. If the command is missing, the
   # install is incomplete and the hook should fail loudly instead of silently
   # skipping save-time formatting.
   _hook_require_sley || return $?
 
-  # Resolve `$fp` to an absolute path BEFORE the `cd` below. Without this, a
-  # relative path like `src/main.js` would re-resolve against the new cwd
-  # after `cd "$dir"` and the formatter would look for `src/src/main.js`,
-  # silently no-op'ing on every relative-path edit.
-  case "$fp" in
-    /*) abs_fp="$fp" ;;
-    *) abs_fp="$PWD/$fp" ;;
-  esac
-
-  dir=$(dirname "$abs_fp")
+  local caller
   caller=$(_hook_agent_name)
-  (
-    # Detect the repo from the edited file's directory, not from the agent's
-    # process cwd. Agents often edit absolute paths while sitting elsewhere.
-    cd "$dir" || exit 0
-    export SLEY_CALLER="$caller"
-    sley hook format-file "$abs_fp" >/dev/null 2>&1 || true
-  )
+  i=0
+  while [ "$i" -lt "${#_dirs[@]}" ]; do
+    _post_edit_format_dir "${_dirs[i]}" "${_lists[i]}" "$caller"
+    i=$((i + 1))
+  done
 }
 
-while IFS= read -r _fp; do
-  [ -n "$_fp" ] || continue
-  _post_edit_sley_file "$_fp" || exit $?
-done <<<"$AGENTGUARD_EDIT_FILES"
+_post_edit_format_all || exit $?
 
 # Track edit churn per file
 if [ -n "$AGENTGUARD_EDIT_FILES" ]; then

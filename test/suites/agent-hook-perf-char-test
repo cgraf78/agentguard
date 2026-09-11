@@ -347,6 +347,37 @@ _assert_contains "post-edit: missing sley message" "sley command missing" "$HOOK
 _run_hook_no_sley "$POST_EDIT" ''
 _assert_exit "post-edit: missing sley without files stays quiet" 0 "$HOOK_EXIT"
 
+# A sley too old for `hook format --stdin` fails the batch; the hook must
+# fall back to per-file `format-file` instead of skipping the format.
+_old_sley_bin=$(_tmpdir)
+printf '%s\n' '#!/usr/bin/env bash' \
+  'if [ "${1:-}" = "hook" ] && [ "${2:-}" = "format-file" ]; then' \
+  '  printf "formatted\n" >> "$3"' \
+  '  exit 0' \
+  'fi' \
+  'echo "unknown hook command: $2" >&2' \
+  'exit 2' >"$_old_sley_bin/sley"
+chmod +x "$_old_sley_bin/sley"
+_run_hook_old_sley() {
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    "PATH=$_old_sley_bin:/usr/bin:/bin"
+    "HOME=$_no_sley_home"
+    AGENTGUARD_SESSION_ID="$TEST_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="agent"
+    CODEX_THREAD_ID=
+  )
+  _run_hook_env "$@"
+}
+_old_dir=$(_tmpdir)
+printf 'x=1\n' >"$_old_dir/a.py"
+printf 'y=2\n' >"$_old_dir/b.py"
+_run_hook_old_sley "$POST_EDIT" "$(_edit_files_input "$_old_dir/a.py" "$_old_dir/b.py")"
+_assert_exit "post-edit: old sley falls back without failing" 0 "$HOOK_EXIT"
+_assert_contains "post-edit: old sley formats first file" "formatted" "$(cat "$_old_dir/a.py")"
+_assert_contains "post-edit: old sley formats second file" "formatted" "$(cat "$_old_dir/b.py")"
+
 echo "=== perf-char: git guard verdicts ==="
 
 _bash_case() {
