@@ -32,6 +32,12 @@ _assert_eq "agent_name: codex thread id wins over generic AGENT" "codex" "$name"
 name=$(bash -c '_scrub() { unset AGENTGUARD_NAME AGENTGUARD_SESSION_ID AGENT CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR GROK_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID MUSE_SESSION_ID; export AGENTGUARD_PROCESS_DETECT=0; }; _scrub; source "$1"; AGENT=muse _agent_name' _ "$DETECT")
 _assert_eq "agent_name: AGENT=muse resolves without process probing" "muse" "$name"
 
+name=$(bash -c '_scrub() { unset AGENTGUARD_NAME AGENTGUARD_SESSION_ID AGENT CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR GROK_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID MUSE_SESSION_ID; export AGENTGUARD_PROCESS_DETECT=0; }; _scrub; source "$1"; AGENT=MUSE _agent_name' _ "$DETECT")
+_assert_eq "agent_name: AGENT matching is ASCII case-insensitive" "muse" "$name"
+
+name=$(bash -c '_scrub() { unset AGENTGUARD_NAME AGENTGUARD_SESSION_ID AGENT CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR GROK_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID MUSE_SESSION_ID; export AGENTGUARD_PROCESS_DETECT=0; }; _scrub; source "$1"; AGENT=Claude _agent_name' _ "$DETECT")
+_assert_eq "agent_name: AGENT=Claude resolves to claude" "claude" "$name"
+
 name=$(bash -c '_scrub() { unset AGENTGUARD_NAME AGENTGUARD_SESSION_ID AGENT CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE GEMINI_PROJECT_DIR GROK_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID MUSE_SESSION_ID; export AGENTGUARD_PROCESS_DETECT=0; }; _scrub; source "$1"; AGENTGUARD_NAME=codex AGENT=muse _agent_name' _ "$DETECT")
 _assert_eq "agent_name: explicit AGENTGUARD_NAME still wins over AGENT" "codex" "$name"
 
@@ -101,6 +107,62 @@ _assert_eq "session key: plain claude session id is honored" "c1" "$key"
 
 key=$(_session_key_with "MUSE_SESSION_ID=m1")
 _assert_eq "session key: muse session id is honored" "m1" "$key"
+
+# Both-set precedence corners (mixed-runtime envs are implausible in
+# practice; these pin the outcomes either way). Note the hook order
+# (CODEX, GROK, MUSE, ...) differs from `_hook_agent_shell_session_keys`
+# (MUSE, CODEX, GROK, ...) — "matching" means consulting the same ids.
+key=$(_session_key_with "GROK_SESSION_ID=g1 MUSE_SESSION_ID=m1")
+_assert_eq "session key: grok keeps precedence over muse id" "g1" "$key"
+
+key=$(_session_key_with "MUSE_SESSION_ID=m1 CLAUDE_CODE_CURRENT_SESSION_ID=cur")
+_assert_eq "session key: muse id wins over claude current id" "m1" "$key"
+
+key=$(_session_key_with "CLAUDE_CODE_SESSION_ID=c1" '{"session_id":"json-sid","tool_input":{"command":"ls"}}')
+_assert_eq "session key: env claude id wins over json session id" "c1" "$key"
+
+echo "=== perf-char: process-snapshot failure caching ==="
+_ps_fail_bin=$(_tmpdir)
+_ps_count="$_ps_fail_bin/count"
+printf '%s\n' '#!/usr/bin/env bash' 'echo x >> "$PS_COUNT_LOG"' 'exit 1' >"$_ps_fail_bin/ps"
+chmod +x "$_ps_fail_bin/ps"
+: >"$_ps_count"
+# Detection enabled, no ids, `ps` entirely absent: the ancestor lookup
+# fails, the key falls back to the pid, and the failure is cached — a
+# second resolution (agent name + reread key) must not re-exec `ps`.
+_ps_out=$(env -u AGENTGUARD_NAME -u AGENTGUARD_SESSION_ID -u AGENT \
+  -u CODEX_THREAD_ID -u CODEX_INTERNAL_ORIGINATOR_OVERRIDE \
+  -u GEMINI_PROJECT_DIR -u GROK_SESSION_ID \
+  -u CLAUDE_CODE_CURRENT_SESSION_ID -u CLAUDE_CODE_SESSION_ID \
+  -u MUSE_SESSION_ID \
+  AGENTGUARD_PROCESS_DETECT=1 \
+  PATH="$_ps_fail_bin:$PATH" PS_COUNT_LOG="$_ps_count" bash -c '
+  source "$1"
+  source "$2"
+  _HOOK_INPUT="$3"
+  _hook_read_input >/dev/null 2>&1
+  _first_key="$_HOOK_SESSION_KEY"
+  _agent_name >/dev/null 2>&1
+  printf "%s %s" "$_first_key" "$_HOOK_SESSION_KEY"
+' _ "$DETECT" "$HELPERS" '{"tool_input":{"command":"ls"}}')
+read -r _ps_key1 _ps_key2 <<<"$_ps_out"
+case "$_ps_key1" in
+  '' | *[!0-9]*) _fail "session key: ps failure should fall back to pid, got $_ps_key1" ;;
+  *) _pass "session key: ps failure falls back to pid" ;;
+esac
+_assert_eq "session key: key stable across a second resolution" "$_ps_key1" "$_ps_key2"
+# The snapshot fetch itself caches the failure: two back-to-back fetches
+# cost one `ps`. (End-to-end the count is higher — each detector falls
+# back to the pre-existing per-pid walk, which fails fast on its first
+# `ps` — so the unit pin below covers the cache, not the walk total.)
+: >"$_ps_count"
+env PATH="$_ps_fail_bin:$PATH" PS_COUNT_LOG="$_ps_count" bash -c '
+  source "$1"
+  _agent_process_snapshot || true
+  _agent_process_snapshot || true
+' _ "$DETECT"
+_ps_calls=$(grep -c . "$_ps_count")
+_assert_eq "snapshot: failed fetch is cached across calls" "1" "$_ps_calls"
 
 echo "=== perf-char: command parsing ==="
 
@@ -377,6 +439,18 @@ _run_hook_old_sley "$POST_EDIT" "$(_edit_files_input "$_old_dir/a.py" "$_old_dir
 _assert_exit "post-edit: old sley falls back without failing" 0 "$HOOK_EXIT"
 _assert_contains "post-edit: old sley formats first file" "formatted" "$(cat "$_old_dir/a.py")"
 _assert_contains "post-edit: old sley formats second file" "formatted" "$(cat "$_old_dir/b.py")"
+
+_rel_dir=$(_tmpdir)
+printf 'r=1\n' >"$_rel_dir/rel.py"
+_old_pwd=$PWD
+cd "$_rel_dir" || _fail "post-edit: cannot enter relative-path fixture"
+_run_hook_stub_sley "$POST_EDIT" "$(_edit_files_input "rel.py")"
+_rel_exit=$HOOK_EXIT
+_rel_out=$HOOK_STDOUT
+cd "$_old_pwd" || _fail "post-edit: cannot restore working directory"
+_assert_exit "post-edit: relative-path edit exits 0" 0 "$_rel_exit"
+_assert_eq "post-edit: relative-path edit emits empty json" "{}" "$_rel_out"
+_assert_contains "post-edit: relative-path file formatted" "formatted" "$(cat "$_rel_dir/rel.py")"
 
 echo "=== perf-char: git guard verdicts ==="
 

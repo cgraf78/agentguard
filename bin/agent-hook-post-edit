@@ -48,6 +48,10 @@ _hook_parse_edit_files
 # those flags, so a format-file-only override would be silently skipped
 # here. All known extensions override both entry points consistently, but
 # a future lone override needs a matching carve-out here.
+# Telemetry note: on `arc` hosts the batch attempt reports
+# `hook=${caller}_pre_commit` where the old per-file loop reported
+# `hook=${caller}_auto_format` (the label lives in sley's extension, not
+# here). File bytes are unaffected.
 _post_edit_format_dir() {
   local dir="$1" files="$2" caller="$3" fp
   (

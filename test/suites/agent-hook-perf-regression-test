@@ -293,7 +293,7 @@ _fidelity_pair() {
   ' _ "$HELPERS" "$CLASSIFIER" "$fragment"
 }
 
-for _tricky in 'git commit -m "hello world"' "printf '%s\\n' x" 'echo a\\b "c  d"' "git -c a=b log --oneline" 'git commit -m it'"'"'s done' "x indispensable-ok" '""' "''"; do
+for _tricky in 'git commit -m "hello world"' "printf '%s\\n' x" 'echo a\\b "c  d"' "git -c a=b log --oneline" 'git commit -m it'"'"'s done' "x indispensable-ok" '""' "''" 'echo ""' 'git commit -m ""'; do
   _assert_eq "tokens: replay fidelity for [$_tricky]" "IDENTICAL" "$(_fidelity_pair "$_tricky")"
 done
 _newline_frag=$(printf 'echo "a\nb" c')
