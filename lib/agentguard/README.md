@@ -3,8 +3,8 @@
 `agentguard` owns shared helper code for `agent-hook-*` scripts. `shdeps`
 installs the executable files in `bin/` as PATH-visible symlinks.
 The hooks are agent-agnostic and work with Claude Code, Codex, Gemini CLI,
-Grok, Muse, or another tool that follows the same hook protocol. Muse validates
-hook output strictly, so it receives the Codex-style
+Grok, Muse, OpenCode, or another tool that follows the same hook protocol.
+Muse validates hook output strictly, so it receives the Codex-style
 `hookSpecificOutput.additionalContext` shape with no legacy `context` field
 and no `suppressOutput` (see `_hook_strict_output_agent`).
 
@@ -41,8 +41,12 @@ and no `suppressOutput` (see `_hook_strict_output_agent`).
   `AGENTGUARD_PROTECTED_BARE_GIT_ALIASES` (space-separated shell variable names
   that should resolve to the protected Git dir),
   `AGENTGUARD_PROTECTED_BARE_GIT_LAUNCHER` (the PATH-visible `git` wrapper to
-  model), and the `AGENTGUARD_PROTECTED_BARE_GIT_{STATUS,LS_FILES,CLEAN}_MESSAGE`
-  remediation strings.
+  model), and the
+  `AGENTGUARD_PROTECTED_BARE_GIT_{STATUS,LS_FILES,CLEAN,ADD}_MESSAGE`
+  remediation strings. The guard covers unscoped `status`, `ls-files`, `clean`,
+  and whole-tree `git add` (`-A`, `.`, `:/`, globs); `git add` accepts explicit
+  paths without a `--` separator, and `git add -u` is allowed because it
+  restages tracked files only.
 
 Use shdeps to locate sourceable files instead of reconstructing install paths:
 
@@ -70,9 +74,10 @@ their JSON payload, so their richer session-state precedence remains in
 
 ## Dependencies
 
-- Bash 4 or newer for hook scripts that use the command classifier. On macOS,
-  `agent-hook-pre-bash` and `agentguard-classify-command` validate and re-exec
-  `/opt/homebrew/bin/bash`, `/usr/local/bin/bash`, `/bin/bash`, or
+- Bash 4 or newer for hook scripts that use the command classifier. On every
+  platform, `agent-hook-pre-bash` and `agentguard-classify-command` validate
+  and re-exec `/opt/homebrew/bin/bash`, `/usr/local/bin/bash`,
+  `/data/data/com.termux/files/usr/bin/bash` (Termux), `/bin/bash`, or
   `/usr/bin/bash`, in that order, from a fixed privileged `/bin/bash -p`
   bootstrap. `HOME` and `PATH` never select the interpreter. Direct executable
   invocation through the privileged shebang is the supported security boundary,
@@ -90,7 +95,7 @@ their JSON payload, so their richer session-state precedence remains in
   candidate discovery, the fixed platform awk (`/usr/bin/awk`, or Termux's
   `/data/data/com.termux/files/usr/bin/awk`) must return an exact
   clean or dirty environment sentinel. Raw exported-function entries trigger a
-  clean `/bin/bash` environment rebuild: valid ordinary exported names and
+  clean fixed-Bash environment rebuild: valid ordinary exported names and
   values travel as NUL-delimited records over the clean process's initial stdin,
   never as command-line operands, while `BASH_ENV`, `ENV`, recursion, POSIX and
   compatibility controls, shell-internal state, legacy re-entry markers, and
@@ -107,14 +112,17 @@ their JSON payload, so their richer session-state precedence remains in
   scrub tool fails.
 - `jq` for hook payload parsing and JSON responses.
 - `cgraf78/sley` is a hard runtime dependency for hooks that format files.
-  `agent-hook-post-edit` invokes the PATH-visible `sley hook format-file` CLI.
+  `agent-hook-post-edit` invokes the PATH-visible `sley hook format --stdin`
+  batch CLI (falling back to `sley hook format-file` per file on older
+  sley installs without the batch entry).
   Commit readiness belongs in native VCS hooks so human and agent workflows
   share one path.
 
 Optional integrations are detected at runtime: `hm` enables Hive Memory hook
 context when its config is available through `HIVE_MEMORY_CONFIG`, an absolute
 `XDG_CONFIG_HOME`, or `~/.config`; `sl`, `git`, and `jj` enable repository
-status context, and
+status context; `term-notify-sound` plays the `agent-hook-stop` and
+`agent-hook-notification` terminal notifications; and
 `claude-templates` enables a Claude-specific maintenance hook when that
 command is installed.
 
@@ -158,8 +166,9 @@ while `_HOOK_BIN_DIR` resolves through that symlink to load dependency libraries
 
 Extension scripts are sourced, not executed:
 
-- `-claude`, `-codex`, `-gemini`, `-muse`, and `-grok` files are selected from
-  agent-specific environment variables.
+- `-<agent>` files (for example `-claude`, `-codex`, `-gemini`, `-grok`,
+  `-muse`, or `-opencode`) are selected by appending the detected agent name to
+  the hook's filename, so any runtime identity can have its own extension.
 - `-work` files are environment-specific overlays.
 
 Each hook emits one JSON response through `_hook_finish`.
@@ -172,7 +181,7 @@ Each hook emits one JSON response through `_hook_finish`.
   (`_hook_warn` and `_hook_remind` also add model-visible hook context; use
   `_hook_context` directly for context that should not appear as a warning or
   reminder in stderr)
-- parsers: `_hook_parse_command`, `_hook_parse_mcp`
+- parsers: `_hook_parse_command`, `_hook_parse_edit_files`, `_hook_parse_mcp`
 - tool payload adapters: `_hook_tool_stdout`
 - Hive Memory adapters: `_hook_hm_session_start`, `_hook_hm_prompt_submit`,
   `_hook_hm_tool_complete`, `_hook_hm_stop`
@@ -189,9 +198,13 @@ after hook JSON is read. A neutral `AGENTGUARD_SESSION_ID` wins when a launcher
 supplies one. Managed Codex hooks prefer JSON `session_id` after stdin is
 available, because nested Codex launches can inherit an outer
 `CODEX_THREAD_ID`. Without JSON, Codex uses `CODEX_THREAD_ID` or its parent
-process key, Grok uses `GROK_SESSION_ID` or `grok-$PPID`, Claude uses
-`CLAUDE_CODE_CURRENT_SESSION_ID`, Gemini uses `gemini-$PPID`, and unknown
-agents fall back to `$$`.
+process key; Grok uses `GROK_SESSION_ID`, then its nearest `grok` ancestor
+key, then `grok-$PPID`; Muse uses `MUSE_SESSION_ID`; Claude uses
+`CLAUDE_CODE_CURRENT_SESSION_ID` or `CLAUDE_CODE_SESSION_ID`; and Gemini uses
+its nearest `gemini` ancestor key or `gemini-$PPID`. Any remaining hook uses
+the pid of its nearest `muse` ancestor when that is the closest agent
+process (covering id-less Muse), and otherwise falls back to `$$` (for
+example id-less Claude or OpenCode).
 
 The state root itself is per-user, never a shared, predictable `/tmp`
 directory: an absolute `$XDG_RUNTIME_DIR/agentguard/hook-state` when available

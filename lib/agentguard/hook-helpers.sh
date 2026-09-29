@@ -1411,9 +1411,9 @@ _hook_agent_name() {
 
 # --- Delegation ---
 
-# Sources the agent-specific extension (-claude, -codex, -gemini, -muse, -grok)
-# based on which agent is running. Auto-discovers by appending the
-# agent name to the hook's own filename (e.g., hook-pre-bash-gemini).
+# Sources the `<hook>-<agent>` extension for the detected agent name.
+# Auto-discovers by appending the agent name to the hook's own filename
+# (e.g., agent-hook-pre-bash-gemini), so any agent identity can have one.
 _hook_source_agent() {
   local agent_file
   agent_file="${_HOOK_SELF:-$0}-$(_hook_agent_name)"

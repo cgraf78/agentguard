@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-PRE-BASH 1 "2026-07-24" "agentguard" "User Commands"
+.TH AGENT-HOOK-PRE-BASH 1 "2026-09-29" "agentguard" "User Commands"
 .SH NAME
 agent-hook-pre-bash \- guard agent shell commands before execution
 .SH SYNOPSIS
@@ -47,6 +47,8 @@ cannot protect before Bash loads. When Bash 4 or newer is required,
 the launcher considers only
 .BR /opt/homebrew/bin/bash ,
 .BR /usr/local/bin/bash ,
+.B /data/data/com.termux/files/usr/bin/bash
+(Termux),
 .BR /bin/bash ,
 and
 .BR /usr/bin/bash ,
@@ -55,12 +57,14 @@ in that order. Caller-controlled
 and
 .B PATH
 cannot add interpreter candidates. These fixed interpreter paths, together
-with the platform
+with the fixed platform Bash, awk, and env paths, form the launcher filesystem
+trust boundary. Termux uses its corresponding fixed paths below
+.BR /data/data/com.termux/files/usr/bin ;
+other platforms use
 .BR /bin/bash ,
 .BR /usr/bin/awk ,
 and
-.BR /usr/bin/env ,
-form the launcher filesystem trust boundary.
+.BR /usr/bin/env .
 .SH EXTENSIONS
 After base policy runs, AgentGuard sources matching extension files through
 its hook helper API. Extensions can add warnings, blocks, or context while the
