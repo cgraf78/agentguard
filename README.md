@@ -9,7 +9,7 @@
 `agent-hook-*` scripts. `shdeps` installs the executable files in `bin/` as
 PATH-visible symlinks.
 The hooks are agent-agnostic and work with Claude Code, Codex, Gemini CLI,
-Grok, Muse, or another tool that follows the same hook protocol.
+Grok, Muse, OpenCode, or another tool that follows the same hook protocol.
 
 ## Install
 
@@ -138,9 +138,10 @@ filter, compare its output, and prove a second reconciliation is unchanged.
 
 ## Dependencies
 
-- Bash 4 or newer for hook scripts that use the command classifier. On macOS,
-  `agent-hook-pre-bash` and `agentguard-classify-command` validate and re-exec
-  `/opt/homebrew/bin/bash`, `/usr/local/bin/bash`, `/bin/bash`, or
+- Bash 4 or newer for hook scripts that use the command classifier. On every
+  platform, `agent-hook-pre-bash` and `agentguard-classify-command` validate
+  and re-exec `/opt/homebrew/bin/bash`, `/usr/local/bin/bash`,
+  `/data/data/com.termux/files/usr/bin/bash` (Termux), `/bin/bash`, or
   `/usr/bin/bash`, in that order, from a fixed privileged `/bin/bash -p`
   bootstrap. `HOME` and `PATH` never select the interpreter. Direct executable
   invocation through the privileged shebang is the supported security boundary,
@@ -155,9 +156,10 @@ filter, compare its output, and prove a second reconciliation is unchanged.
   before the script's first instruction, and no shell script can undo or reliably
   detect those earlier effects. Rejection of an otherwise ordinary, detectable
   explicit invocation is best-effort only, not a security guarantee. Before
-  candidate discovery, `/usr/bin/awk` must return an exact
+  candidate discovery, the fixed platform awk (`/usr/bin/awk`, or Termux's
+  `/data/data/com.termux/files/usr/bin/awk`) must return an exact
   clean or dirty environment sentinel. Raw exported-function entries trigger a
-  clean `/bin/bash` environment rebuild: valid ordinary exported names and
+  clean fixed-Bash environment rebuild: valid ordinary exported names and
   values travel as NUL-delimited records over the clean process's initial stdin,
   never as command-line operands, while `BASH_ENV`, `ENV`, recursion, POSIX and
   compatibility controls, shell-internal state, legacy re-entry markers, and
@@ -187,14 +189,17 @@ filter, compare its output, and prove a second reconciliation is unchanged.
 Optional integrations are detected at runtime: `hm` enables Hive Memory hook
 context when its config is available through `HIVE_MEMORY_CONFIG`, an absolute
 `XDG_CONFIG_HOME`, or `~/.config`; `sl`, `git`, and `jj` enable repository
-status context, and
+status context; `term-notify-sound` plays the `agent-hook-stop` and
+`agent-hook-notification` terminal notifications; and
 `claude-templates` enables a Claude-specific maintenance hook when that
 command is installed.
 
-The launcher trust boundary includes the platform `/bin/bash -p`,
-`/usr/bin/awk`, `/usr/bin/env`, and the absolute Bash candidate files above.
-The fixed `/bin/bash` interpreter is the bootstrap trust anchor and must be a
-working Bash. Candidate entry programs reject accidental non-Bash executables
+The launcher trust boundary includes the fixed platform Bash, awk, and env
+paths and the absolute Bash candidate files above. Termux uses its
+corresponding fixed paths below `/data/data/com.termux/files/usr/bin`; other
+platforms use `/bin/bash -p`, `/usr/bin/awk`, and `/usr/bin/env`. The selected
+fixed Bash interpreter is the bootstrap trust anchor and must be a working
+Bash. Candidate entry programs reject accidental non-Bash executables
 and avoid a validate-then-reopen race, but they cannot authenticate a
 deliberately malicious file already installed at a trusted path. The `HOME`
 and `PATH` variables cannot add candidate paths. After bootstrap,
@@ -242,8 +247,9 @@ while `_HOOK_BIN_DIR` resolves through that symlink to load dependency libraries
 
 Extension scripts are sourced, not executed:
 
-- `-claude`, `-codex`, `-gemini`, `-muse`, and `-grok` files are selected from
-  agent-specific environment variables.
+- `-<agent>` files (for example `-claude`, `-codex`, `-gemini`, `-grok`,
+  `-muse`, or `-opencode`) are selected by appending the detected agent name to
+  the hook's filename, so any runtime identity can have its own extension.
 - `-work` files are environment-specific overlays.
 
 Each hook emits one JSON response through `_hook_finish`.
@@ -256,7 +262,7 @@ Each hook emits one JSON response through `_hook_finish`.
   (`_hook_warn` and `_hook_remind` also add model-visible hook context; use
   `_hook_context` directly for context that should not appear as a warning or
   reminder in stderr)
-- parsers: `_hook_parse_command`, `_hook_parse_mcp`
+- parsers: `_hook_parse_command`, `_hook_parse_edit_files`, `_hook_parse_mcp`
 - tool payload adapters: `_hook_tool_stdout`
 - Hive Memory adapters: `_hook_hm_session_start`, `_hook_hm_prompt_submit`,
   `_hook_hm_tool_complete`, `_hook_hm_stop`
@@ -273,9 +279,13 @@ after hook JSON is read. A neutral `AGENTGUARD_SESSION_ID` wins when a launcher
 supplies one. Managed Codex hooks prefer JSON `session_id` after stdin is
 available, because nested Codex launches can inherit an outer
 `CODEX_THREAD_ID`. Without JSON, Codex uses `CODEX_THREAD_ID` or its parent
-process key, Grok uses `GROK_SESSION_ID` or `grok-$PPID`, Claude uses
-`CLAUDE_CODE_CURRENT_SESSION_ID`, Gemini uses `gemini-$PPID`, and unknown
-agents fall back to `$$`.
+process key; Grok uses `GROK_SESSION_ID`, then its nearest `grok` ancestor
+key, then `grok-$PPID`; Muse uses `MUSE_SESSION_ID`; Claude uses
+`CLAUDE_CODE_CURRENT_SESSION_ID` or `CLAUDE_CODE_SESSION_ID`; and Gemini uses
+its nearest `gemini` ancestor key or `gemini-$PPID`. Any remaining hook uses
+the pid of its nearest `muse` ancestor when that is the closest agent
+process (covering id-less Muse), and otherwise falls back to `$$` (for
+example id-less Claude or OpenCode).
 
 The state root itself is per-user, never a shared, predictable `/tmp`
 directory: an absolute `$XDG_RUNTIME_DIR/agentguard/hook-state` when available
@@ -309,14 +319,32 @@ To add a new managed agent runtime:
 
 ## Base Hook Policy
 
-- `agent-hook-pre-bash` blocks destructive `rm -rf` targets, warns on other
-  `rm -rf` usage, and reminds agents to run a review/simplify pass and inspect
-  the final diff before commit-class commands. Metadata-only changes skip the
-  commit reminder.
+- `agent-hook-pre-bash` blocks destructive `rm -rf` targets such as `/`,
+  `~`, `$HOME`, `$HOME`'s parent, `.`, `..`, and their `/*` globs, and warns on
+  other `rm -rf` usage. It also blocks `grep -r`/`-R`/`--recursive` (use
+  `rg`), tree-walking `find` (use `fd`), raw `git absorb` (use
+  `git absorb-and-rebase`), `sudo`/`doas`, `git reset --hard`,
+  `git clean -f`, `git push --force`/`-f`/`+refspec` (`--force-with-lease`
+  stays allowed), `git push --mirror`, `git push --prune`,
+  interactive TTY commands (editors, `man`/`info`, `top`-style monitors,
+  debuggers, `watch`; only `vim`/`vi`/`view`/`nvim` are exempt with a batch
+  flag such as `-es` or `--headless`), `kill` targeting PID `1`, `0`, or `-1`,
+  `chmod 777`, Git or Sapling commit-authoring commands inside command
+  substitutions, and the protected bare-Git scans described above. It warns on
+  `kill -9`/SIGKILL, `killall`, `pkill`, and world-writable `chmod` modes. It
+  reminds agents to run a review/simplify pass and inspect the final diff
+  before commit-class commands (metadata-only changes skip that reminder), and
+  adds commit-message format and public-repo leak reminders for `git commit`.
+- `agent-hook-pre-search` dispatches file-search tool calls to agent-specific
+  extensions and enforces nothing itself. `agent-hook-pre-search-muse` blocks
+  Muse file searches that do not follow symlinks; uninspectable payloads fail
+  open.
 - `agent-hook-post-bash` scans command stdout for high-confidence credential
   patterns. Stdout extraction is centralized so agent-specific payload names do
   not leak into the base hook.
-- `agent-hook-pre-edit` parses edited paths, reminds once per user prompt on
+- `agent-hook-pre-edit` parses edited paths, blocks edits to secret and
+  credential files (such as `.env`, SSH keys, `*.pem`, `credentials`, and
+  `.netrc`), reminds once per user prompt on
   code/config edits to apply AGENTS.md design/workflow/code-style guidance plus
   any loaded language-specific rule fragments, warns or blocks repeated edits to
   the same file unless bypassed (`agentguard-churn-bypass on`, or
@@ -346,7 +374,8 @@ To add a new managed agent runtime:
   shared AgentGuard state. Codex Stop continuations are currently suppressed
   because affected Codex releases persist their synthetic messages with
   replay-invalid item IDs; prompt-submit still surfaces memory reminders before
-  Stop.
+  Stop. Grok Stop always emits empty JSON because Grok treats Stop context as
+  keep-working feedback; an extension block still exits with status 2.
   `agent-hook-notification` plays notifications for host attention events such
   as permission requests.
 

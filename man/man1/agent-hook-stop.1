@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-STOP 1 "2026-06-30" "agentguard" "User Commands"
+.TH AGENT-HOOK-STOP 1 "2026-09-29" "agentguard" "User Commands"
 .SH NAME
 agent-hook-stop \- run end-of-turn agent checks and notifications
 .SH SYNOPSIS
@@ -8,10 +8,13 @@ agent-hook-stop \- run end-of-turn agent checks and notifications
 reads a stop hook JSON payload from standard input, asks Hive Memory for any
 pending-memory reminder, and plays a terminal notification for the first
 non-reentrant Stop callback after a valid prompt. Repeated callbacks stay silent
-until another valid prompt re-arms the shared AgentGuard state. On Codex, only
-the notification runs: Stop continuations are suppressed because affected
-Codex releases persist their synthetic messages with replay-invalid item IDs.
-Prompt-submit still surfaces memory reminders before Stop.
+until another valid prompt re-arms the shared AgentGuard state. On Codex, the
+Hive Memory check and notification still run, but the response is replaced
+with empty JSON and the hook exits 0: Stop continuations are suppressed because
+affected Codex releases persist their synthetic messages with replay-invalid
+item IDs. Prompt-submit still surfaces memory reminders before Stop. On Grok,
+the response is always empty JSON because Grok treats Stop context as
+keep-working feedback; an extension block still exits with status 2.
 .SH EXIT STATUS
 .TP
 .B 0
