@@ -1772,7 +1772,8 @@ await check("V2 respects the session's directory and subpath", async () => {
   const callbacks = new Map();
   const host = await v2({ session: { hook: async (name, callback) => { callbacks.set(`session.${name}`, callback); return { dispose: async () => {} }; }, get: async () => ({ agent: "build", location: { directory: root }, subpath: "nested-project" }) } });
   await host.registered.get("tool.execute.before")({ tool: "shell", sessionID: "nested", id: "nested", input: { command: "pwd" } });
-  assert.equal(logs().find((item) => item.hook === "agent-hook-pre-bash").cwd, directory);
+  // macOS exposes temporary roots as /var while child cwd resolves /private/var.
+  assert.equal(fs.realpathSync(logs().find((item) => item.hook === "agent-hook-pre-bash").cwd), fs.realpathSync(directory));
   await host.dispose();
 });
 
