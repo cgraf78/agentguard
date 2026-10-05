@@ -39,9 +39,12 @@ const input = await new Promise((resolve) => {
 });
 const payload = input.trim() ? JSON.parse(input) : {};
 const behaviorPath = path.join(process.env.AGENTGUARD_TEST_HOOK_BEHAVIOR_DIR, `${hook}.json`);
-const behavior = fs.existsSync(behaviorPath)
+const selectedBehavior = fs.existsSync(behaviorPath)
   ? JSON.parse(fs.readFileSync(behaviorPath, "utf8"))
   : {};
+const behavior = selectedBehavior.onlyTool && selectedBehavior.onlyTool !== payload.tool_name
+  ? {}
+  : selectedBehavior;
 
 fs.appendFileSync(
   process.env.AGENTGUARD_TEST_HOOK_LOG,
@@ -1873,6 +1876,74 @@ await check("V2 model context awaits error-post guidance before the next request
   assert.match(context.system[0].text, /error guidance/);
   clearBehavior("agent-hook-post-mcp");
   await host.dispose();
+});
+
+await check("V2 namespaced resource reads receive canonical MCP guards", async () => {
+  clearLog();
+  const host = await v2();
+  const input = { server: "dynamic", uri: "fixture://resource" };
+  const identity = { tool: "opencode_read_mcp_resource", sessionID: "native-read", id: "read", input };
+  await host.registered.get("tool.execute.before")(identity);
+  await host.registered.get("tool.execute.after")({ ...identity, status: "completed", result: { output: { contents: [] } } });
+  const pre = logs().find((item) => item.hook === "agent-hook-pre-mcp");
+  assert.equal(pre.payload.tool_name, "mcp__dynamic__read_resource");
+  assert.deepEqual(pre.payload.tool_input, input);
+  assert.ok(logs().some((item) => item.hook === "agent-hook-post-mcp"));
+  await host.dispose();
+});
+
+await check("V2 namespaced combined resource lists guard resources and templates", async () => {
+  clearLog();
+  const host = await v2();
+  await host.registered.get("tool.execute.before")({ tool: "opencode_list_mcp_resources", sessionID: "native-list", id: "list", input: {} });
+  assert.deepEqual(logs().filter((item) => item.hook === "agent-hook-pre-mcp").map((item) => item.payload.tool_name), ["mcp__dynamic__list_resources", "mcp__dynamic__list_resource_templates"]);
+  await host.dispose();
+});
+
+await check("V2 combined resource lists fail closed on a template guard denial", async () => {
+  behavior("agent-hook-pre-mcp", { exit: 2, stderr: "resource denial", onlyTool: "mcp__dynamic__list_resource_templates" });
+  const host = await v2();
+  try {
+    await assert.rejects(host.registered.get("tool.execute.before")({ tool: "opencode_list_mcp_resources", sessionID: "denied-list", id: "list", input: {} }), /resource denial/);
+  } finally { clearBehavior("agent-hook-pre-mcp"); await host.dispose(); }
+});
+
+await check("V2 unscoped resource lists refuse incomplete warm MCP inventory", async () => {
+  let offline = false;
+  const host = await v2({ mcp: { list: async () => {
+    if (offline) throw new Error("inventory offline");
+    return { data: [{ name: "dynamic", status: { status: "connected" } }] };
+  } } });
+  await host.registered.get("tool.execute.before")({ tool: "dynamic_query", sessionID: "warm-list", id: "warm", input: {} });
+  offline = true;
+  const now = Date.now;
+  Date.now = () => now() + 60_000;
+  try {
+    await assert.rejects(host.registered.get("tool.execute.before")({ tool: "opencode_list_mcp_resources", sessionID: "warm-list", id: "list", input: {} }), /inventory unavailable/);
+  } finally { Date.now = now; await host.dispose(); }
+});
+
+await check("V2 explicit resource server stays guarded with unavailable inventory", async () => {
+  clearLog();
+  const host = await v2({ mcp: { list: async () => { throw new Error("inventory offline"); } } });
+  await host.registered.get("tool.execute.before")({ tool: "opencode_read_mcp_resource", sessionID: "scoped-read", id: "read", input: { server: "explicit", uri: "fixture://resource" } });
+  assert.equal(logs().find((item) => item.hook === "agent-hook-pre-mcp").payload.tool_name, "mcp__explicit__read_resource");
+  await host.dispose();
+});
+
+await check("V2 malformed resource server cannot bypass an incomplete inventory", async () => {
+  let offline = false;
+  const host = await v2({ mcp: { list: async () => {
+    if (offline) throw new Error("inventory offline");
+    return { data: [{ name: "dynamic", status: { status: "connected" } }] };
+  } } });
+  await host.registered.get("tool.execute.before")({ tool: "dynamic_query", sessionID: "malformed-list", id: "warm", input: {} });
+  offline = true;
+  const now = Date.now;
+  Date.now = () => now() + 60_000;
+  try {
+    await assert.rejects(host.registered.get("tool.execute.before")({ tool: "opencode_list_mcp_resources", sessionID: "malformed-list", id: "list", input: { server: 7 } }), /inventory unavailable/);
+  } finally { Date.now = now; await host.dispose(); }
 });
 
 console.log(`Results: ${passed} passed, ${failed} failed`);

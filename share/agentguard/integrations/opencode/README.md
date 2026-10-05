@@ -89,7 +89,11 @@ into an unguarded call merely because it was absent from startup configuration.
 
 V2 hooks are registered on the tool, shell, session, and permission domains.
 The adapter translates native `shell` and edit/write `path` inputs, structured
-shell results, and MCP inventory returned by `mcp.list`. Denial still rejects
+shell results, and MCP inventory returned by `mcp.list`. Namespaced resource
+helpers retain their canonical MCP identities; the combined V2 resource list
+guards both resource and template operations for each contacted server. Unscoped
+lists refuse incomplete inventories rather than guarding only a cached subset.
+Denial still rejects
 execution before the tool runs. MCP errors are delivered by the native
 `execute.after` failure variant. Interrupted calls and failures retaining a
 structured permission-denial cause skip execution post-hooks. OpenCode can wrap

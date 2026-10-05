@@ -19,11 +19,17 @@ const INTERNAL_AGENTS = new Set(["title", "summary", "compaction"]);
 // tools it synthesizes. Keep that vocabulary in one table so pre/post mapping
 // cannot silently drift between resource operations.
 const RESOURCE_TOOLS = new Map([
-  ["read_mcp_resource", "read_resource"],
-  ["list_mcp_resources", "list_resources"],
-  ["list_mcp_resource_templates", "list_resource_templates"],
+  ["read_mcp_resource", { operations: ["read_resource"], list: false }],
+  ["list_mcp_resources", { operations: ["list_resources"], list: true }],
+  ["list_mcp_resource_templates", { operations: ["list_resource_templates"], list: true }],
+  ["opencode_read_mcp_resource", { operations: ["read_resource"], list: false }],
+  // The V2 helper returns both catalogs. Guard both identities so a policy
+  // specifically protecting templates cannot be bypassed through this helper.
+  [
+    "opencode_list_mcp_resources",
+    { operations: ["list_resources", "list_resource_templates"], list: true },
+  ],
 ]);
-const LIST_RESOURCE_TOOLS = new Set(["list_mcp_resources", "list_mcp_resource_templates"]);
 const TIMEOUTS = new Map([
   ["agent-hook-pre-bash", 600_000],
   ["agent-hook-post-bash", 120_000],
@@ -263,22 +269,22 @@ function matchingMcpTargets(tool, args, servers, prefixFor) {
     }));
 }
 
+function resourceServer(args) {
+  return typeof args.server === "string" && args.server ? args.server : undefined;
+}
+
 function mcpTargets(tool, args, servers) {
-  const resourceName = RESOURCE_TOOLS.get(tool);
-  if (resourceName) {
-    if (typeof args.server === "string" && args.server) {
-      return [{ kind: "mcp", name: `mcp__${args.server}__${resourceName}`, input: args }];
-    }
-    if (LIST_RESOURCE_TOOLS.has(tool)) {
-      // An unscoped list may contact every active server. Fan out before the
-      // operation so one server-specific denial blocks the aggregate request.
-      return servers.map((server) => ({
+  const resource = RESOURCE_TOOLS.get(tool);
+  if (resource) {
+    const scoped = resourceServer(args);
+    const targets = scoped ? [scoped] : resource.list ? servers : [];
+    return targets.flatMap((server) =>
+      resource.operations.map((operation) => ({
         kind: "mcp",
-        name: `mcp__${server}__${resourceName}`,
-        input: { ...args, server },
-      }));
-    }
-    return [];
+        name: `mcp__${server}__${operation}`,
+        input: scoped ? args : { ...args, server },
+      })),
+    );
   }
 
   // Canonical aliases remain executable in compatible runtimes even when the
@@ -926,6 +932,17 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
         const inventory = directTarget(input.tool, output.args)
           ? { servers: [], complete: true }
           : await activeMcpServers();
+        if (
+          !inventory.complete &&
+          RESOURCE_TOOLS.get(input.tool)?.list &&
+          !resourceServer(output.args)
+        ) {
+          // An unscoped helper contacts every server. Guarding only the cached
+          // subset would leave runtime-added servers unprotected during outages.
+          throw new Error(
+            `MCP inventory unavailable; refusing unscoped resource list ${input.tool}`,
+          );
+        }
         targets = targetsFor(input.tool, output.args, inventory.servers).map((target) => ({
           ...target,
           cwd: targetCwd(target, directory),
