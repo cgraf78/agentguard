@@ -150,7 +150,7 @@ process.env.POSIXLY_CORRECT = "1";
 // bounds long-hook defects, while the case below tests fail-closed timeout behavior.
 process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = "0.5";
 
-const { AgentGuardPlugin } = await import(`${pathToFileURL(pluginPath).href}?test=${Date.now()}`);
+const { AgentGuardPlugin, default: AgentGuardV2 } = await import(`${pathToFileURL(pluginPath).href}?test=${Date.now()}`);
 
 let passed = 0;
 let failed = 0;
@@ -1620,6 +1620,260 @@ await check("skips internal agents but guards task subagents", async () => {
   await hooks.dispose();
 });
 
+async function v2(overrides = {}) {
+  const registered = new Map();
+  let disposals = 0;
+  const registration = () => ({ dispose: async () => { disposals += 1; } });
+  const hook = (domain) => async (name, callback) => {
+    registered.set(`${domain}.${name}`, callback);
+    return registration();
+  };
+  const signals = [];
+  const ctx = {
+    location: { directory: sourceDirectory },
+    tool: { hook: hook("tool"), transform: async (edit) => { edit({ list: () => [], update() {} }); return registration(); } },
+    shell: { hook: hook("shell") },
+    session: { hook: hook("session"), get: async () => ({ agent: "build", location: { directory: sourceDirectory } }) },
+    permission: { hook: hook("permission") },
+    mcp: { list: async () => ({ data: [{ name: "dynamic", status: { status: "connected" } }] }) },
+    event: { subscribe: ({ signal }) => ({ async *[Symbol.asyncIterator]() {
+      signals.push(signal);
+      await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+    } }) },
+    ...overrides,
+  };
+  const dispose = await AgentGuardV2.setup(ctx);
+  return { ctx, registered, signals, dispose, disposals: () => disposals };
+}
+
+await check("V2 default export registers all domain hooks and cleans up", async () => {
+  const host = await v2();
+  assert.equal(AgentGuardV2.id, "agentguard");
+  assert.deepEqual([...host.registered.keys()], ["shell.create.before", "session.prompt", "session.context", "permission.evaluate", "tool.execute.before", "tool.execute.after"]);
+  await host.dispose();
+  assert.ok(host.signals[0].aborted);
+  assert.equal(host.disposals(), 7);
+  await assert.rejects(host.registered.get("tool.execute.before")({ sessionID: "late" }), /unloaded/);
+});
+
+await check("V2 native shell denial fails closed", async () => {
+  const host = await v2();
+  behavior("agent-hook-pre-bash", { exit: 2, stderr: "v2 protected denial" });
+  try {
+    await assert.rejects(host.registered.get("tool.execute.before")({ tool: "shell", sessionID: "v2", id: "deny", input: { command: "true", cwd: sourceDirectory } }), /denial/);
+  } finally { clearBehavior("agent-hook-pre-bash"); await host.dispose(); }
+});
+
+for (const tool of ["edit", "write"]) {
+  await check(`V2 ${tool} passes native path to its protected hook`, async () => {
+    clearLog();
+    const host = await v2();
+    await host.registered.get("tool.execute.before")({ tool, sessionID: "v2", id: tool, input: { path: ".env", content: "secret", oldString: "a", newString: "b" } });
+    assert.equal(logs().find((item) => item.hook === "agent-hook-pre-edit").payload.tool_input.file_path, ".env");
+    await host.dispose();
+  });
+}
+
+await check("V2 discovers dynamically registered MCP servers", async () => {
+  clearLog();
+  const host = await v2();
+  await host.registered.get("tool.execute.before")({ tool: "dynamic_query", sessionID: "v2", id: "mcp", input: { query: "safe" } });
+  assert.ok(logs().some((record) => record.payload.tool_name === "mcp__dynamic__query"));
+  await host.dispose();
+});
+
+await check("V2 rejects unknown MCP tools when native inventory fails", async () => {
+  const host = await v2({ mcp: { list: async () => { throw new Error("inventory offline"); } } });
+  await assert.rejects(host.registered.get("tool.execute.before")({ tool: "dynamic_query", sessionID: "v2", id: "mcp", input: {} }), /inventory unavailable/);
+  await host.dispose();
+});
+
+await check("V2 reports executed MCP errors with native metadata", async () => {
+  clearLog();
+  const host = await v2();
+  await host.registered.get("tool.execute.before")({ tool: "dynamic_query", sessionID: "v2", id: "mcp", input: {} });
+  await host.registered.get("tool.execute.after")({ tool: "dynamic_query", sessionID: "v2", id: "mcp", status: "error", error: { message: "MCP failed", metadata: { source: "native" } }, input: {} });
+  await host.dispose();
+  const post = logs().find((item) => item.hook === "agent-hook-post-mcp");
+  assert.equal(post.payload.tool_result_is_error, true);
+  assert.deepEqual(post.payload.tool_response.metadata, { source: "native" });
+});
+
+for (const error of [{ message: "denied", error: { _tag: "Permission.DeniedError" } }, { message: "cancelled", metadata: { interrupted: true } }]) {
+  await check(`V2 suppresses nonexecution ${error.message} MCP post hooks`, async () => {
+    clearLog();
+    const host = await v2();
+    await host.registered.get("tool.execute.before")({ tool: "dynamic_query", sessionID: "v2", id: "mcp", input: {} });
+    await host.registered.get("tool.execute.after")({ tool: "dynamic_query", sessionID: "v2", id: "mcp", status: "error", error, input: {} });
+    await host.dispose();
+    assert.ok(!logs().some((item) => item.hook === "agent-hook-post-mcp"));
+  });
+}
+
+await check("V2 keeps guidance out of user text and adds typed system parts", async () => {
+  behavior("agent-hook-prompt-submit", { stdout: JSON.stringify({ context: "v2 guidance" }) });
+  const host = await v2();
+  const event = { sessionID: "v2", prompt: { text: "hello" } };
+  await host.registered.get("session.prompt")(event);
+  assert.equal(event.prompt.text, "hello");
+  const context = { sessionID: "v2", agent: "build", system: [] };
+  await host.registered.get("session.context")(context);
+  assert.equal(context.system[0].type, "text");
+  assert.match(context.system[0].text, /v2 guidance/);
+  clearBehavior("agent-hook-prompt-submit");
+  await host.dispose();
+});
+
+await check("V2 masks parent shell identity outside executions", async () => {
+  const host = await v2();
+  const event = { env: { AGENTGUARD_SESSION_ID: "outer" } };
+  host.registered.get("shell.create.before")(event);
+  assert.equal(event.env.AGENTGUARD_NAME, "opencode");
+  assert.equal(event.env.AGENTGUARD_SESSION_ID, "");
+  await host.dispose();
+});
+
+await check("V2 keeps concurrent shell execution identities separate", async () => {
+  const definition = { id: "shell", name: "shell", async execute(input, context) {
+    await input.ready;
+    const event = { env: {} };
+    host.registered.get("shell.create.before")(event);
+    return { identity: event.env.AGENTGUARD_SESSION_ID, same: this === definition, signal: context.signal };
+  } };
+  const hostHooks = new Map();
+  const host = await v2({ tool: { hook: async (name, callback) => { hostHooks.set(`tool.${name}`, callback); return { dispose: async () => {} }; }, transform: async (edit) => { edit({ list: () => [definition], update: (_id, callback) => callback(definition) }); return { dispose: async () => {} }; } } });
+  let release;
+  const ready = new Promise((resolve) => { release = resolve; });
+  const signal = new AbortController().signal;
+  const first = definition.execute({ ready }, { sessionID: "first", signal });
+  const second = await definition.execute({ ready: Promise.resolve() }, { sessionID: "second", signal });
+  release();
+  assert.deepEqual(await first, { identity: "first", same: true, signal });
+  assert.deepEqual(second, { identity: "second", same: true, signal });
+  await host.dispose();
+});
+
+await check("V2 disposes prior registrations when setup partially fails", async () => {
+  let disposed = 0;
+  const ctx = {
+    location: { directory: sourceDirectory },
+    tool: { transform: async () => ({ dispose: async () => { disposed += 1; } }) },
+    shell: { hook: async () => { throw new Error("registration failed"); } },
+    mcp: {},
+  };
+  await assert.rejects(AgentGuardV2.setup(ctx), /registration failed/);
+  assert.equal(disposed, 1);
+});
+
+await check("V2 respects the session's directory and subpath", async () => {
+  clearLog();
+  const directory = path.join(root, "nested-project");
+  fs.mkdirSync(directory);
+  const callbacks = new Map();
+  const host = await v2({ session: { hook: async (name, callback) => { callbacks.set(`session.${name}`, callback); return { dispose: async () => {} }; }, get: async () => ({ agent: "build", location: { directory: root }, subpath: "nested-project" }) } });
+  await host.registered.get("tool.execute.before")({ tool: "shell", sessionID: "nested", id: "nested", input: { command: "pwd" } });
+  assert.equal(logs().find((item) => item.hook === "agent-hook-pre-bash").cwd, directory);
+  await host.dispose();
+});
+
+await check("V2 refreshes the agent when a session changes agents", async () => {
+  clearLog();
+  let agent = "title";
+  const callbacks = new Map();
+  const host = await v2({ session: { hook: async (name, callback) => { callbacks.set(name, callback); return { dispose: async () => {} }; }, get: async () => ({ agent, location: { directory: sourceDirectory } }) } });
+  await callbacks.get("prompt")({ sessionID: "internal", prompt: { text: "bookkeeping" } });
+  assert.equal(logs().length, 0);
+  agent = "build";
+  await callbacks.get("prompt")({ sessionID: "internal", prompt: { text: "task" } });
+  assert.ok(logs().some((item) => item.hook === "agent-hook-prompt-submit"));
+  await host.dispose();
+});
+
+await check("V2 permission notifications only observe native ask decisions", async () => {
+  clearLog();
+  const host = await v2();
+  for (const effect of ["allow", "deny", "ask"]) {
+    const event = { effect, sessionID: "v2", action: "shell", resources: ["echo test"] };
+    await host.registered.get("permission.evaluate")(event);
+    assert.equal(event.effect, effect);
+  }
+  await host.dispose();
+  assert.equal(logs().filter((item) => item.hook === "agent-hook-notification").length, 1);
+});
+
+await check("V2 shell post hooks receive native stdout and signal failure", async () => {
+  clearLog();
+  const host = await v2();
+  const identity = { tool: "shell", sessionID: "v2", id: "native-shell", input: { command: "echo text" } };
+  await host.registered.get("tool.execute.before")(identity);
+  const result = { output: { output: "text", status: "completed" }, metadata: { status: "completed", signal: "SIGTERM" } };
+  const event = { ...identity, status: "completed", result };
+  await host.registered.get("tool.execute.after")(event);
+  const payload = logs().find((item) => item.hook === "agent-hook-post-bash").payload;
+  assert.equal(payload.tool_response.stdout, "text");
+  assert.equal(payload.tool_response.exit_code, 1);
+  assert.deepEqual(event.result.output, result.output);
+  await host.dispose();
+});
+
+await check("V2 background shell admission does not report completed execution", async () => {
+  clearLog();
+  const host = await v2();
+  const identity = { tool: "shell", sessionID: "v2", id: "background", input: { command: "echo text" } };
+  await host.registered.get("tool.execute.before")(identity);
+  await host.registered.get("tool.execute.after")({ ...identity, status: "completed", result: { output: { status: "running", output: "partial" }, metadata: { status: "running" } } });
+  assert.ok(!logs().some((item) => item.hook === "agent-hook-post-bash"));
+  await host.dispose();
+});
+
+await check("V2 lifecycle envelopes drain Stop and SessionEnd once", async () => {
+  clearLog();
+  let publish;
+  const messages = [];
+  const host = await v2({ event: { subscribe: ({ signal }) => ({ async *[Symbol.asyncIterator]() {
+    while (!signal.aborted) {
+      if (!messages.length) await new Promise((resolve) => { publish = resolve; signal.addEventListener("abort", resolve, { once: true }); });
+      if (messages.length) yield messages.shift();
+    }
+  } }) } });
+  await host.registered.get("session.prompt")({ sessionID: "life-v2", prompt: { text: "task" } });
+  for (const type of ["session.idle", "session.idle", "session.deleted"]) messages.push({ type, data: { sessionID: "life-v2" } });
+  publish();
+  const deadline = Date.now() + 3000;
+  while (!logs().some((item) => item.hook === "agent-hook-session-end") && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+  await host.dispose();
+  assert.equal(logs().filter((item) => item.hook === "agent-hook-stop").length, 1);
+  assert.equal(logs().filter((item) => item.hook === "agent-hook-session-end").length, 1);
+});
+
+await check("V2 delayed session lookup cannot start hooks after unload", async () => {
+  clearLog();
+  let release;
+  const callbacks = new Map();
+  const lookup = new Promise((resolve) => { release = resolve; });
+  const host = await v2({ session: { hook: async (name, callback) => { callbacks.set(name, callback); return { dispose: async () => {} }; }, get: async () => { await lookup; return { agent: "build", location: { directory: sourceDirectory } }; } } });
+  const prompt = callbacks.get("prompt")({ sessionID: "delayed", prompt: { text: "late" } });
+  const rejection = assert.rejects(prompt, /unloaded/);
+  const cleanup = host.dispose();
+  release();
+  await cleanup;
+  await rejection;
+  assert.equal(logs().length, 0);
+});
+
+await check("V2 model context awaits error-post guidance before the next request", async () => {
+  behavior("agent-hook-post-mcp", { delayMs: 30, stdout: JSON.stringify({ context: "error guidance" }) });
+  const host = await v2();
+  const identity = { tool: "dynamic_query", sessionID: "context-error", id: "mcp-context", input: {} };
+  await host.registered.get("tool.execute.before")(identity);
+  await host.registered.get("tool.execute.after")({ ...identity, status: "error", error: { message: "MCP executed error" } });
+  const context = { sessionID: identity.sessionID, agent: "build", system: [] };
+  await host.registered.get("session.context")(context);
+  assert.match(context.system[0].text, /error guidance/);
+  clearBehavior("agent-hook-post-mcp");
+  await host.dispose();
+});
+
 console.log(`Results: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
 TEST_SCRIPT
@@ -1641,41 +1895,139 @@ if command -v opencode >/dev/null 2>&1; then
   load_home="$test_root/load-home"
   load_plugins="$load_home/.config/opencode/plugins"
   load_marker="$test_root/global-plugin-loaded"
-  mkdir -p "$load_plugins"
+  mkdir -p "$load_plugins" "$load_home/data" "$load_home/state" "$load_home/cache" "$load_home/tmp"
+  # Supporting modules stay outside discovery so the real runtime initializes
+  # exactly one adapter instance through the characterization entrypoint.
   cp "$root/share/agentguard/integrations/opencode/agentguard.js" \
-    "$load_plugins/agentguard.js"
+    "$load_home/.config/opencode/agentguard.mjs"
   cat >"$load_plugins/characterization.js" <<'LOAD_PLUGIN'
+import assert from "node:assert/strict";
 import fs from "node:fs";
-import { AgentGuardPlugin } from "./agentguard.js";
+import AgentGuard from "../agentguard.mjs";
 
-export const CharacterizationPlugin = async (input) => {
-  const hooks = await AgentGuardPlugin(input);
-  if (
-    typeof hooks.config !== "function" ||
-    typeof hooks["shell.env"] !== "function" ||
-    typeof hooks["tool.execute.before"] !== "function"
-  ) {
-    throw new Error("AgentGuard adapter returned an incomplete hook surface");
-  }
-  // `opencode debug config` invokes returned config callbacks. Write the marker
-  // there, rather than during module import, so CI proves the pinned public
-  // runtime accepts and calls at least one real adapter callback signature.
-  return {
-    ...hooks,
-    config: async (config) => {
-      await hooks.config(config);
+export default {
+  id: "agentguard.characterization",
+  async server(input) {
+    const hooks = await AgentGuard.server(input);
+    return {
+      ...hooks,
+      config: async (config) => {
+        await hooks.config(config);
+        fs.writeFileSync(process.env.AGENTGUARD_TEST_OPENCODE_LOAD_MARKER, "configured");
+      },
+    };
+  },
+  async setup(ctx) {
+    const dispose = await AgentGuard.setup(ctx);
+    try {
+      // Exercise the native Promise -> Effect -> shell boundary: a direct mock
+      // would miss async-local identity loss inside the host's executor.
+      const shell = (await ctx.tool.list()).find((tool) => tool.id === "shell");
+      assert.ok(shell, "native shell tool is registered");
+      const command = 'printf "identity=%s:%s\\n" "$AGENTGUARD_NAME" "$AGENTGUARD_SESSION_ID"';
+      const sessions = await Promise.all([0, 1].map(() => ctx.session.create({
+        permissions: [{ action: "shell", resource: command, effect: "allow" }],
+      })));
+      const results = await Promise.all(sessions.map((session, index) => shell.execute(
+        { command, cwd: ctx.location.directory, description: "Fixture identity probe" },
+        { sessionID: session.id, agent: "build", messageID: "msg_probe", id: `call_probe_${index}`,
+          signal: new AbortController().signal, progress: async () => {} },
+      )));
+      results.forEach((result, index) => {
+        assert.equal(result.output.exit, 0);
+        assert.equal(result.output.output, `identity=opencode:${sessions[index].id}\n`);
+      });
+      await Promise.all(sessions.map((session) => ctx.session.remove({ sessionID: session.id })));
+      // This marker follows registration and actual concurrent shell execution.
       fs.writeFileSync(process.env.AGENTGUARD_TEST_OPENCODE_LOAD_MARKER, "configured");
-    },
-  };
+      return dispose;
+    } catch (error) {
+      await dispose();
+      throw error;
+    }
+  },
 };
 LOAD_PLUGIN
-  HOME="$load_home" \
-    XDG_CONFIG_HOME="$load_home/.config" \
-    AGENTGUARD_TEST_OPENCODE_LOAD_MARKER="$load_marker" \
-    opencode debug config >/dev/null
+  native_version=$(opencode --version) || exit 1
+  native_version=${native_version##* }
+  native_version=${native_version#v}
+  case "$native_version" in
+    1.*)
+      HOME="$load_home" \
+        XDG_CONFIG_HOME="$load_home/.config" XDG_DATA_HOME="$load_home/data" \
+        XDG_STATE_HOME="$load_home/state" XDG_CACHE_HOME="$load_home/cache" \
+        TMPDIR="$load_home/tmp" \
+        AGENTGUARD_TEST_OPENCODE_LOAD_MARKER="$load_marker" \
+        opencode debug config >/dev/null || exit 1
+      ;;
+    2.*)
+      # V2 inventory reads do not activate plugins. Exercise the normal TUI
+      # startup under an owned terminal, with bounded process-group cleanup.
+      if ! python3 - "$load_home" "$load_marker" "$(command -v opencode)" <<'LOAD_V2'
+import errno
+import os
+from pathlib import Path
+import pty
+import select
+import signal
+import subprocess
+import sys
+import time
+
+home, marker, executable = sys.argv[1:]
+env = {key: value for key, value in os.environ.items() if not key.startswith("OPENCODE_")}
+env.update(HOME=home, XDG_CONFIG_HOME=home + "/.config", XDG_DATA_HOME=home + "/data",
+           XDG_STATE_HOME=home + "/state", XDG_CACHE_HOME=home + "/cache",
+           TMPDIR=home + "/tmp", TERM="xterm-256color",
+           AGENTGUARD_TEST_OPENCODE_LOAD_MARKER=marker)
+master, slave = pty.openpty()
+child = None
+capture = bytearray()
+try:
+    child = subprocess.Popen([executable, "--standalone"], cwd=home, env=env,
+                             stdin=slave, stdout=slave, stderr=slave, start_new_session=True)
+    os.close(slave)
+    slave = None
+    deadline = time.monotonic() + 30
+    while not Path(marker).exists():
+        if child.poll() is not None or time.monotonic() >= deadline:
+            raise RuntimeError("V2 adapter did not complete registration; terminal output: " +
+                               capture.decode(errors="replace")[-2000:])
+        if select.select([master], [], [], 0.1)[0]:
+            try:
+                capture.extend(os.read(master, 65536))
+            except OSError as error:
+                if error.errno != errno.EIO:
+                    raise
+    # Ask the terminal client to stop before the supervisor escalates.
+    os.write(master, b"\x03\x03")
+finally:
+    if slave is not None:
+        os.close(slave)
+    if child is not None:
+        try:
+            child.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            os.killpg(child.pid, signal.SIGTERM)
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
+    os.close(master)
+LOAD_V2
+      then
+        exit 1
+      fi
+      ;;
+    *)
+      echo "FAIL: unsupported OpenCode native test version: $native_version" >&2
+      exit 1
+      ;;
+  esac
   if [[ "$(cat "$load_marker" 2>/dev/null)" != "configured" ]]; then
-    echo "FAIL: OpenCode invokes the AgentGuard config callback" >&2
+    echo "FAIL: OpenCode invokes the AgentGuard registration callback" >&2
     exit 1
   fi
-  echo "PASS: OpenCode invokes the AgentGuard config callback"
+  echo "PASS: OpenCode invokes the AgentGuard registration callback"
 fi

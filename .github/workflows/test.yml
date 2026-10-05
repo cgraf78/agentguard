@@ -46,11 +46,15 @@ jobs:
       - uses: cgraf78/actions/.github/actions/verify-consumer-sync@dea363fed9e62883887a39790006a111a458af31
 
   opencode:
-    name: Public OpenCode adapter
+    name: Public OpenCode adapter (${{ matrix.version }})
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [1.18.13, 2.0.22]
     env:
-      OPENCODE_TEST_VERSION: 1.18.13
+      OPENCODE_TEST_VERSION: ${{ matrix.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         # Name checkout's throwaway initial branch so Git skips its hint.
@@ -74,5 +78,7 @@ jobs:
         shell: bash
         run: |-
           set -euo pipefail
-          test "$(opencode --version)" = "$OPENCODE_TEST_VERSION"
+          version=$(opencode --version)
+          version=${version##* }
+          test "${version#v}" = "$OPENCODE_TEST_VERSION"
           test/suites/opencode-agentguard-test
