@@ -3,7 +3,9 @@
 `agentguard.js` is the native OpenCode adapter for AgentGuard. OpenCode exposes
 JavaScript plugin callbacks rather than a declarative hook table, so the adapter
 translates those callbacks into the same payload contract consumed by the
-PATH-visible `agent-hook-*` commands.
+PATH-visible `agent-hook-*` commands. Its default export provides a V1 `server`
+entrypoint and a V2 `setup` entrypoint with the stable plugin ID `agentguard`.
+Both entrypoints share one guard and lifecycle implementation.
 
 ## What the Adapter Owns
 
@@ -46,9 +48,13 @@ initialization.
 
 Each child otherwise inherits the caller's ordinary environment, with
 `AGENTGUARD_NAME` and `AGENTGUARD_SESSION_ID` set by the adapter. The `shell.env`
-callback exports the same generic keys into OpenCode's actual shell tool so
+callback (V2: `shell.create.before`) exports the same generic keys into OpenCode's actual shell tool so
 other AgentGuard-aware tools can attribute child activity without the adapter
-depending on their vocabulary.
+depending on their vocabulary. V2 does not include session identity in shell
+events, so the adapter wraps registered tool executors in an asynchronous
+execution scope. Concurrent calls keep separate identities; shell processes
+launched outside a tool execution receive an empty session ID to mask any
+inherited parent-agent identity.
 
 ## Failure Semantics
 
@@ -79,6 +85,32 @@ canonical/resource identity or flattened `<server>_<tool>` identity fails
 closed. A cold status failure therefore cannot turn a runtime-added MCP tool
 into an unguarded call merely because it was absent from startup configuration.
 
+## OpenCode V2
+
+V2 hooks are registered on the tool, shell, session, and permission domains.
+The adapter translates native `shell` and edit/write `path` inputs, structured
+shell results, and MCP inventory returned by `mcp.list`. Namespaced resource
+helpers retain their canonical MCP identities; the combined V2 resource list
+guards both resource and template operations for each contacted server. Unscoped
+lists refuse incomplete inventories rather than guarding only a cached subset.
+Denial still rejects
+execution before the tool runs. MCP errors are delivered by the native
+`execute.after` failure variant. Interrupted calls and failures retaining a
+structured permission-denial cause skip execution post-hooks. OpenCode can wrap
+MCP permission failures in an opaque `Tool.Error`; without that cause, the
+adapter conservatively reports a failed MCP invocation, never a success.
+
+Prompt and lifecycle guidance enters typed model system parts, without changing
+user prompt text. Session locations and subpaths determine hook working
+directories. The server event stream uses V2 data envelopes for Stop and
+SessionEnd; unloading aborts the subscription, removes registrations, and drains
+started session lifecycles.
+
+A native background shell result marked `running` is admission, not completed
+execution. Its pre-hook runs normally, but the adapter does not run a completion
+post-hook for that partial result. Later output from `shell_read`/`shell_wait` is
+not currently forwarded to the shell post-hook.
+
 ## Configuration
 
 - `AGENTGUARD_OPENCODE_NAME` overrides the default `opencode` runtime identity
@@ -92,6 +124,6 @@ and symlinks and should treat a missing provider asset as a failed refresh, not
 as an instruction to delete the last working plugin.
 
 Run `test/suites/opencode-agentguard-test` for the adapter's behavioral suite.
-The dedicated CI job also loads it through a pinned public OpenCode release and
-proves that runtime invokes its real `config` callback, covering discovery and
-one native callback boundary in addition to direct behavioral tests.
+The dedicated CI job loads the installed asset through pinned public V1 and V2
+OpenCode releases, covering native discovery and callback boundaries in addition
+to the direct behavioral suite.

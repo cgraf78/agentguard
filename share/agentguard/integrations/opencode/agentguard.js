@@ -1,5 +1,6 @@
 // agentguard-managed:opencode-plugin
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
@@ -8,17 +9,27 @@ import path from "node:path";
 // These agents are OpenCode bookkeeping, not user-delegated workers. Starting
 // memory/security lifecycles for them would create noise and orphan sessions;
 // real task subagents deliberately remain guarded.
+// Private core barrier: V1 events remain fire-and-forget, while V2 model
+// context must await error/lifecycle guidance before its next request.
+const DRAIN = Symbol("agentguard.drain");
+
 const INTERNAL_AGENTS = new Set(["title", "summary", "compaction"]);
 
 // OpenCode's generic MCP helpers use different names from the server-prefixed
 // tools it synthesizes. Keep that vocabulary in one table so pre/post mapping
 // cannot silently drift between resource operations.
 const RESOURCE_TOOLS = new Map([
-  ["read_mcp_resource", "read_resource"],
-  ["list_mcp_resources", "list_resources"],
-  ["list_mcp_resource_templates", "list_resource_templates"],
+  ["read_mcp_resource", { operations: ["read_resource"], list: false }],
+  ["list_mcp_resources", { operations: ["list_resources"], list: true }],
+  ["list_mcp_resource_templates", { operations: ["list_resource_templates"], list: true }],
+  ["opencode_read_mcp_resource", { operations: ["read_resource"], list: false }],
+  // The V2 helper returns both catalogs. Guard both identities so a policy
+  // specifically protecting templates cannot be bypassed through this helper.
+  [
+    "opencode_list_mcp_resources",
+    { operations: ["list_resources", "list_resource_templates"], list: true },
+  ],
 ]);
-const LIST_RESOURCE_TOOLS = new Set(["list_mcp_resources", "list_mcp_resource_templates"]);
 const TIMEOUTS = new Map([
   ["agent-hook-pre-bash", 600_000],
   ["agent-hook-post-bash", 120_000],
@@ -183,17 +194,17 @@ function appendOutputContext(output, contexts) {
 // camel-case arguments here instead of teaching individual guard hooks about
 // another runtime.
 function canonicalToolInput(tool, args) {
-  if (tool === "bash") {
+  if (tool === "bash" || tool === "shell") {
     return {
       command: args.command,
       ...(args.timeout === undefined ? {} : { timeout: args.timeout }),
-      ...(args.workdir === undefined ? {} : { workdir: args.workdir }),
+      ...((args.workdir ?? args.cwd) === undefined ? {} : { workdir: args.workdir ?? args.cwd }),
     };
   }
   if (tool === "edit") {
     return {
       ...args,
-      file_path: args.filePath,
+      file_path: args.filePath ?? args.path,
       old_string: args.oldString,
       new_string: args.newString,
       replace_all: args.replaceAll,
@@ -202,14 +213,14 @@ function canonicalToolInput(tool, args) {
   if (tool === "write") {
     return {
       ...args,
-      file_path: args.filePath,
+      file_path: args.filePath ?? args.path,
       content: args.content,
     };
   }
   if (tool === "multiedit") {
     return {
       ...args,
-      file_path: args.filePath,
+      file_path: args.filePath ?? args.path,
       edits: (args.edits ?? []).map((edit) => ({
         old_string: edit.oldString,
         new_string: edit.newString,
@@ -230,7 +241,7 @@ function directTarget(tool, args) {
   // AgentGuard's edit policy covers all filesystem mutation primitives. Keep
   // OpenCode's visible Write name for audit clarity while routing it through
   // the same pre/post-edit executable.
-  if (tool === "bash") {
+  if (tool === "bash" || tool === "shell") {
     return { kind: "bash", name: "Bash", input: canonicalToolInput(tool, args) };
   }
   if (tool === "edit") {
@@ -258,22 +269,22 @@ function matchingMcpTargets(tool, args, servers, prefixFor) {
     }));
 }
 
+function resourceServer(args) {
+  return typeof args.server === "string" && args.server ? args.server : undefined;
+}
+
 function mcpTargets(tool, args, servers) {
-  const resourceName = RESOURCE_TOOLS.get(tool);
-  if (resourceName) {
-    if (typeof args.server === "string" && args.server) {
-      return [{ kind: "mcp", name: `mcp__${args.server}__${resourceName}`, input: args }];
-    }
-    if (LIST_RESOURCE_TOOLS.has(tool)) {
-      // An unscoped list may contact every active server. Fan out before the
-      // operation so one server-specific denial blocks the aggregate request.
-      return servers.map((server) => ({
+  const resource = RESOURCE_TOOLS.get(tool);
+  if (resource) {
+    const scoped = resourceServer(args);
+    const targets = scoped ? [scoped] : resource.list ? servers : [];
+    return targets.flatMap((server) =>
+      resource.operations.map((operation) => ({
         kind: "mcp",
-        name: `mcp__${server}__${resourceName}`,
-        input: { ...args, server },
-      }));
-    }
-    return [];
+        name: `mcp__${server}__${operation}`,
+        input: scoped ? args : { ...args, server },
+      })),
+    );
   }
 
   // Canonical aliases remain executable in compatible runtimes even when the
@@ -352,11 +363,19 @@ function toolResponse(target, output) {
       exitCode = metadata.exit === null ? 1 : metadata.exit;
     } else if (Object.hasOwn(metadata, "exit_code")) {
       exitCode = metadata.exit_code;
-    } else if (Object.hasOwn(metadata, "status")) {
+    } else if (metadata.signal || metadata.timeout === true) {
+      exitCode = 1;
+    } else if (
+      Object.hasOwn(metadata, "status") &&
+      !["completed", "running"].includes(metadata.status)
+    ) {
       exitCode = metadata.status;
     }
     return {
-      stdout: output.output,
+      stdout:
+        typeof output.output === "object" && output.output !== null
+          ? output.output.output
+          : output.output,
       ...(metadata.stderr === undefined ? {} : { stderr: metadata.stderr }),
       ...(exitCode === undefined ? {} : { exit_code: exitCode }),
       metadata: output.metadata,
@@ -517,7 +536,7 @@ function spawnHook(command, hook, payload, directory, sessionID, runtimeName) {
   });
 }
 
-export const AgentGuardPlugin = async ({ directory, client }) => {
+export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
   // Session records serialize lifecycle events that OpenCode intentionally
   // dispatches without awaiting. Call records are separate because concurrent
   // tools need their own pre-hook context and cleanup boundary.
@@ -711,7 +730,10 @@ export const AgentGuardPlugin = async ({ directory, client }) => {
         basePayload(record.id, directory, "SessionStart"),
       )
         .then((result) => {
-          if (result.context) record.pending.push(result.context);
+          if (result.context) {
+            record.pending.push(result.context);
+            onContext?.(record.id, [result.context]);
+          }
           return result;
         })
         .catch((error) => {
@@ -795,6 +817,7 @@ export const AgentGuardPlugin = async ({ directory, client }) => {
     queue(record, async () => {
       const contexts = await runPostHooks(sessionID, call, output);
       record.pending.push(...contexts);
+      onContext?.(sessionID, contexts);
     });
     return true;
   }
@@ -836,6 +859,9 @@ export const AgentGuardPlugin = async ({ directory, client }) => {
   }
 
   return {
+    [DRAIN]: async (sessionID) => {
+      await sessions.get(sessionID)?.chain;
+    },
     config: async (config) => {
       // Retain the shared object rather than a startup snapshot. Plugins run
       // config hooks sequentially and a later plugin may mutate MCP entries.
@@ -906,6 +932,17 @@ export const AgentGuardPlugin = async ({ directory, client }) => {
         const inventory = directTarget(input.tool, output.args)
           ? { servers: [], complete: true }
           : await activeMcpServers();
+        if (
+          !inventory.complete &&
+          RESOURCE_TOOLS.get(input.tool)?.list &&
+          !resourceServer(output.args)
+        ) {
+          // An unscoped helper contacts every server. Guarding only the cached
+          // subset would leave runtime-added servers unprotected during outages.
+          throw new Error(
+            `MCP inventory unavailable; refusing unscoped resource list ${input.tool}`,
+          );
+        }
         targets = targetsFor(input.tool, output.args, inventory.servers).map((target) => ({
           ...target,
           cwd: targetCwd(target, directory),
@@ -979,7 +1016,10 @@ export const AgentGuardPlugin = async ({ directory, client }) => {
             "agent-hook-stop",
             basePayload(sessionID, directory, "Stop"),
           );
-          if (result.context) record.pending.push(result.context);
+          if (result.context) {
+            record.pending.push(result.context);
+            onContext?.(record.id, [result.context]);
+          }
         });
       } else if (event.type === "session.deleted") {
         void finalize(record);
@@ -991,4 +1031,222 @@ export const AgentGuardPlugin = async ({ directory, client }) => {
       await Promise.all([...sessions.values()].map(finalize));
     },
   };
+};
+
+// V2 moved extension points into domains. Both hosts use the same guard and
+// lifecycle core; this boundary only translates the published 2.0.22 shapes.
+// Plugin.define is an identity function, so a local JS asset needs no SDK import.
+export default {
+  id: "agentguard",
+  server: AgentGuardPlugin,
+  async setup(ctx) {
+    const execution = new AsyncLocalStorage();
+    const sessions = new Map();
+    const registrations = [];
+    const controller = new AbortController();
+    let disposed = false;
+    const client = {
+      mcp: {
+        status: async () => {
+          const response = await ctx.mcp.list();
+          if (!Array.isArray(response?.data)) throw new Error("MCP list returned no data");
+          return {
+            data: Object.fromEntries(response.data.map((server) => [server.name, server.status])),
+          };
+        },
+      },
+    };
+    async function session(sessionID) {
+      if (disposed) throw new Error("AgentGuard plugin is unloaded");
+      let record = sessions.get(sessionID);
+      if (!record) {
+        // Session location can differ from plugin location (worktrees/subpaths).
+        // Resolve once per session, not per tool, and share its core across calls.
+        record = (async () => {
+          const info = await ctx.session.get({ sessionID });
+          const directory = path.resolve(info.location.directory, info.subpath ?? ".");
+          const record = { context: "" };
+          record.hooks = await AgentGuardPlugin({
+            directory,
+            client,
+            onContext: (_id, contexts) => {
+              record.context = appendContext(record.context, contexts);
+            },
+          });
+          return record;
+        })();
+        sessions.set(sessionID, record);
+        record.catch(() => {
+          if (sessions.get(sessionID) === record) sessions.delete(sessionID);
+        });
+      }
+      const resolved = await record;
+      if (disposed) throw new Error("AgentGuard plugin is unloaded");
+      return resolved;
+    }
+    async function cleanup() {
+      disposed = true;
+      controller.abort();
+      // Dispose explicitly before draining children, including partially failed
+      // setup. A retained callback may not recreate a finalized session.
+      await Promise.allSettled(registrations.map((registration) => registration.dispose()));
+      await Promise.allSettled(
+        [...sessions.values()].map(async (record) => (await record).hooks.dispose()),
+      );
+      sessions.clear();
+    }
+    try {
+      registrations.push(
+        await ctx.tool.transform((editor) => {
+          // The shell domain omits session identity. Async scope must follow the
+          // executor, never the last observed pre-hook, because tools overlap.
+          for (const tool of editor.list()) {
+            editor.update(tool.id, (definition) => {
+              const execute = definition.execute;
+              definition.execute = function (input, context) {
+                return execution.run(context, () => execute.call(this, input, context));
+              };
+            });
+          }
+        }),
+      );
+      registrations.push(
+        await ctx.shell.hook("create.before", (event) => {
+          if (disposed) throw new Error("AgentGuard plugin is unloaded");
+          event.env.AGENTGUARD_NAME = agentName();
+          event.env.AGENTGUARD_SESSION_ID = execution.getStore()?.sessionID ?? "";
+        }),
+      );
+      registrations.push(
+        await ctx.session.hook("prompt", async (event) => {
+          const record = await session(event.sessionID);
+          const info = await ctx.session.get({ sessionID: event.sessionID });
+          if (disposed) throw new Error("AgentGuard plugin is unloaded");
+          const output = { message: {}, parts: [{ type: "text", text: event.prompt.text }] };
+          await record.hooks["chat.message"](
+            { sessionID: event.sessionID, agent: info.agent },
+            output,
+          );
+          record.context = output.message.system ?? "";
+        }),
+      );
+      registrations.push(
+        await ctx.session.hook("context", async (event) => {
+          if (INTERNAL_AGENTS.has(event.agent)) return;
+          const record = await session(event.sessionID);
+          await record.hooks[DRAIN](event.sessionID);
+          if (disposed) throw new Error("AgentGuard plugin is unloaded");
+          if (record.context) event.system.push({ type: "text", text: record.context });
+        }),
+      );
+      registrations.push(
+        await ctx.permission.hook("evaluate", async (event) => {
+          if (event.effect !== "ask") return;
+          const record = await session(event.sessionID);
+          await record.hooks["permission.ask"](event);
+        }),
+      );
+      registrations.push(
+        await ctx.tool.hook("execute.before", async (event) => {
+          const record = await session(event.sessionID);
+          const output = { args: event.input };
+          await record.hooks["tool.execute.before"]({ ...event, callID: event.id }, output);
+          event.input = output.args;
+        }),
+      );
+      registrations.push(
+        await ctx.tool.hook("execute.after", async (event) => {
+          const record = await session(event.sessionID);
+          const output =
+            event.status === "completed"
+              ? { ...event.result, isError: event.result.metadata?.isError }
+              : { isError: true, output: event.error.message, metadata: event.error.metadata };
+          if (
+            event.status === "completed" &&
+            event.tool === "shell" &&
+            event.result.metadata?.status === "running"
+          ) {
+            // A background shell is admitted but not complete. Do not label a
+            // partial result as successful execution or run completion hooks.
+            return;
+          }
+          if (event.status === "error") {
+            // Reuse the core's terminal-error suppression (permission rejection
+            // and cancellation are not completed MCP invocations). V2 reports
+            // failures directly; V1 needed message-part event recovery instead.
+            await record.hooks.event({
+              event: {
+                type: "message.part.updated",
+                properties: {
+                  sessionID: event.sessionID,
+                  part: {
+                    type: "tool",
+                    callID: event.id,
+                    tool: event.tool,
+                    sessionID: event.sessionID,
+                    state: {
+                      status: "error",
+                      input: event.input,
+                      error: event.error.message,
+                      metadata: {
+                        ...event.error.metadata,
+                        ...(event.error.error?._tag === "Permission.DeniedError"
+                          ? { interrupted: true }
+                          : {}),
+                      },
+                    },
+                  },
+                },
+              },
+            });
+            await record.hooks[DRAIN](event.sessionID);
+            return;
+          }
+          await record.hooks["tool.execute.after"](
+            { ...event, callID: event.id, args: event.input },
+            output,
+          );
+          // isError is the legacy bridge's machine field, not part of Tool.Result.
+          delete output.isError;
+          event.result = output;
+        }),
+      );
+    } catch (error) {
+      await cleanup();
+      throw error;
+    }
+    const events = (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          if (disposed) break;
+          if (event.location?.directory && event.location.directory !== ctx.location.directory)
+            continue;
+          const sessionID = event.data?.sessionID;
+          if (
+            !sessionID ||
+            !["session.created", "session.idle", "session.deleted"].includes(event.type)
+          )
+            continue;
+          // Do not lazily start lifecycles for unrelated sessions merely because
+          // the server event stream observes them. Prompt/tool callbacks own it.
+          const pending = sessions.get(sessionID);
+          if (!pending) continue;
+          const record = await pending;
+          if (disposed) break;
+          await record.hooks.event({ event: { type: event.type, properties: { sessionID } } });
+          if (event.type === "session.deleted") {
+            await record.hooks.dispose();
+            sessions.delete(sessionID);
+          }
+        }
+      } catch (error) {
+        if (!controller.signal.aborted)
+          console.error(`[opencode-agentguard] event stream: ${error.message}`);
+      }
+    })();
+    return async () => {
+      await cleanup();
+      await events;
+    };
+  },
 };
