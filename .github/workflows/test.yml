@@ -52,9 +52,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: [1.18.13, 2.0.22]
+        include:
+          - version: 1.18.13
+            package: opencode-ai
+          - version: 2.0.22
+            package: '@opencode/cli'
     env:
       OPENCODE_TEST_VERSION: ${{ matrix.version }}
+      OPENCODE_TEST_PACKAGE: ${{ matrix.package }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         # Name checkout's throwaway initial branch so Git skips its hint.
@@ -71,7 +76,7 @@ jobs:
           set -euo pipefail
           prefix="$RUNNER_TEMP/opencode"
           npm install --prefix "$prefix" --no-save --package-lock=false \
-            "opencode-ai@$OPENCODE_TEST_VERSION"
+            "$OPENCODE_TEST_PACKAGE@$OPENCODE_TEST_VERSION"
           echo "$prefix/node_modules/.bin" >>"$GITHUB_PATH"
 
       - name: Test OpenCode adapter
