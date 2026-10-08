@@ -18,6 +18,11 @@ _HOOK_CTX=''
 _HOOK_HM_CONFIG_PATH=''
 _HOOK_INPUT_STATE_REFRESHED=''
 _HOOK_PROMPT_SUBMITTED=''
+# Telemetry accumulators: block/warn/remind messages joined by ASCII record
+# separators so multi-line messages survive intact into the audit record.
+_HOOK_TELEMETRY_BLOCKS=''
+_HOOK_TELEMETRY_WARNINGS=''
+_HOOK_TELEMETRY_REMINDERS=''
 
 # General non-interactive shells get env.d through BASH_ENV/.zshenv. This is a
 # hook-local fallback for launchers that invoke hook scripts by absolute path
@@ -52,6 +57,12 @@ unset _agentguard_lib_source
 # shellcheck source=detect.sh
 # shellcheck disable=SC1091 # sibling module resolved from this file's dir.
 source "$_AGENTGUARD_LIB_DIR/detect.sh"
+# shellcheck source=telemetry.sh
+# shellcheck disable=SC1091 # sibling module resolved from this file's dir.
+source "$_AGENTGUARD_LIB_DIR/telemetry.sh"
+# Captured as early as possible so a record's duration covers session
+# resolution and payload parsing, not just the hook's policy logic.
+_agentguard_telemetry_now_us _HOOK_TELEMETRY_START_US
 
 # Return a stable Codex session key when Codex does not hand hooks a runtime
 # session id. Codex launches hook scripts as short-lived child processes, so $$
@@ -359,11 +370,13 @@ _hook_refresh_state_dir
 
 _hook_block() {
   _HOOK_BLOCKED=1
+  _hook_telemetry_note _HOOK_TELEMETRY_BLOCKS "$1"
   printf 'BLOCKED: %s\n' "$1" >&2
 }
 
 _hook_warn() {
   local message="$1"
+  _hook_telemetry_note _HOOK_TELEMETRY_WARNINGS "$message"
   printf 'WARNING: %s\n' "$message" >&2
   # Successful hook stderr is not a reliable model-visible channel across
   # agents. Warnings are behavioral steer, so carry them through the protocol
@@ -373,6 +386,7 @@ _hook_warn() {
 
 _hook_remind() {
   local message="$1"
+  _hook_telemetry_note _HOOK_TELEMETRY_REMINDERS "$message"
   printf 'REMINDER: %s\n' "$message" >&2
   # Same rationale as _hook_warn: reminders should affect the next model turn,
   # not depend on whether a client happens to surface successful-hook stderr.
@@ -1398,6 +1412,153 @@ _hook_hm_stop() {
   _hook_hm_event stop
 }
 
+# --- Telemetry ---
+
+# Append message $2 to the accumulator named by $1 (record-separator joined).
+_hook_telemetry_note() {
+  local current="${!1}"
+  if [ -n "$current" ]; then
+    printf -v "$1" '%s\x1e%s' "$current" "$2"
+  else
+    printf -v "$1" '%s' "$2"
+  fi
+}
+
+# jq program that turns the unit-separated field stream written by
+# _hook_telemetry_exit into one schema v1 record. The payload is the last
+# field and is re-joined, so a stray separator inside it cannot shift columns.
+# Raw payload text travels through stdin, never argv or the environment:
+# Linux caps a single argument or variable at 128 KiB, which a PostToolUse
+# payload carrying full command output easily exceeds.
+# shellcheck disable=SC2016 # jq variables, not shell expansions.
+_HOOK_TELEMETRY_JQ='
+  def nonempty: select(. != null and . != "" and . != []);
+  def list: if . == "" then [] else split("\u001e") end;
+  split("\u001f") as $f
+  | ($f[7:] | join("\u001f")) as $raw
+  | (if $raw == "" then null
+     else ($raw | try fromjson catch {unparsed: $raw}) end) as $payload
+  | ($payload | if type == "object" then . else {} end) as $p
+  | ($sec | tonumber | todate | sub("Z$"; ".\($frac)Z")) as $ts
+  | {
+      schema: $schema,
+      kind: $kind,
+      ts: $ts,
+      agent: $agent,
+      session_key: $key,
+      session_id: ($p.session_id // $p.sessionId // (if $sid == "" then null else $sid end)),
+      event: ($p.hook_event_name // $p.hookEventName // (if $event == "" then null else $event end)),
+      hook: $hook,
+      tool_name: ($p.tool_name // $p.toolName),
+      tool_use_id: ($p.tool_use_id // $p.toolUseId // $p.call_id // $p.callId),
+      cwd: ($p.cwd // $pwd),
+      host: $host,
+      pid: ($pid | tonumber),
+      ppid: ($ppid | tonumber),
+      exit_status: ($status | tonumber),
+      outcome: (if $status == "0" then "ok" elif $status == "2" then "blocked" else "error" end),
+      duration_ms: ($duration | tonumber),
+      blocked: ($f[0] | list),
+      warnings: ($f[1] | list),
+      reminders: ($f[2] | list),
+      context: $f[3],
+      command: $f[4],
+      edit_files: ($f[5] | split("\n") | map(select(. != ""))),
+      mcp_server: $f[6],
+      payload_truncated_chars: (if $truncated == "" then null else ($truncated | tonumber) end)
+    }
+  | with_entries(select(.value | nonempty))
+  | if $kind == "event" then . + {payload: $payload} else . end
+'
+
+# EXIT trap for hook entry points: write one audit record for this hook
+# invocation. Running from the trap rather than _hook_finish covers every exit
+# path, including early no-op exits and fail-closed parse errors, and observes
+# the real exit status the host receives.
+#
+# Record kinds:
+#   event — written by agent-hook-telemetry; carries the full host payload.
+#   hook  — written by every other hook; carries the decision (exit status,
+#           block/warn/remind messages, injected context, parsed command or
+#           edit files) but not the payload, which the matching event record
+#           already holds. Storing it twice would double the disk cost of
+#           large tool outputs.
+#
+# Telemetry must never change hook behavior: every failure is silent, and the
+# trap leaves the exit status untouched (it never calls `exit`).
+_hook_telemetry_exit() {
+  local status=$? hook kind root agent dir end_us elapsed duration
+  local stem tmp event='' raw='' truncated='' max
+  _agentguard_telemetry_enabled || return 0
+  root=$(_agentguard_telemetry_root 2>/dev/null) || return 0
+  hook="${_HOOK_SELF:-$0}"
+  hook="${hook##*/}"
+  if [ "$hook" = "agent-hook-telemetry" ]; then
+    kind=event
+  else
+    kind=hook
+    event=$(_hook_event_name 2>/dev/null) || event=''
+  fi
+  agent=$(_hook_agent_name 2>/dev/null) || agent=agent
+  _hook_session_key_safe "$agent" || agent=agent
+  _hook_session_key_safe "${_HOOK_SESSION_KEY:-}" || return 0
+  dir="$root/sessions/$agent/$_HOOK_SESSION_KEY"
+
+  _agentguard_telemetry_now_us end_us
+  elapsed=$((end_us - ${_HOOK_TELEMETRY_START_US:-$end_us}))
+  [ "$elapsed" -ge 0 ] || elapsed=0
+  printf -v duration '%d.%03d' "$((elapsed / 1000))" "$((elapsed % 1000))"
+
+  raw="${_HOOK_INPUT:-}"
+  max="${AGENTGUARD_TELEMETRY_MAX_PAYLOAD_CHARS:-8388608}"
+  case "$max" in
+    '' | *[!0-9]*) max=8388608 ;;
+  esac
+  if [ "$kind" = event ] && [ "${#raw}" -gt "$max" ]; then
+    # Keep a bounded prefix instead of nothing: the record still shows what
+    # the call was, and the original length documents the truncation.
+    truncated="${#raw}"
+    raw="${raw:0:max}"
+  fi
+
+  # Exiting anyway, so the restrictive umask cannot leak into caller state.
+  # It keeps records (which can hold secrets from tool output) owner-only.
+  umask 077
+  [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || return 0
+  stem="$end_us-$$-${hook#agent-hook-}"
+  tmp="$dir/.$stem.tmp"
+  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' \
+    "$_HOOK_TELEMETRY_BLOCKS" \
+    "$_HOOK_TELEMETRY_WARNINGS" \
+    "$_HOOK_TELEMETRY_REMINDERS" \
+    "$_HOOK_CTX" \
+    "${AGENTGUARD_CMD_TRIMMED:-}" \
+    "${AGENTGUARD_EDIT_FILES:-}" \
+    "${_HOOK_MCP_SERVER:-}" \
+    "$raw" |
+    jq -Rsc \
+      --arg schema "$_AGENTGUARD_TELEMETRY_SCHEMA" \
+      --arg kind "$kind" \
+      --arg sec "${end_us:0:${#end_us}-6}" \
+      --arg frac "${end_us: -6}" \
+      --arg agent "$agent" \
+      --arg key "$_HOOK_SESSION_KEY" \
+      --arg sid "${AGENTGUARD_SESSION_ID:-}" \
+      --arg event "$event" \
+      --arg hook "$hook" \
+      --arg pwd "$PWD" \
+      --arg host "${HOSTNAME:-}" \
+      --arg pid "$$" \
+      --arg ppid "$PPID" \
+      --arg status "$status" \
+      --arg duration "$duration" \
+      --arg truncated "$truncated" \
+      "$_HOOK_TELEMETRY_JQ" >"$tmp" 2>/dev/null &&
+    mv -f "$tmp" "$dir/$stem.json" 2>/dev/null
+  [ -e "$tmp" ] && rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
 # --- Agent identification ---
 
 # Returns the name of the running agent. Delegates to the shared
@@ -1565,3 +1726,11 @@ _hook_finish() {
   [ -n "$_HOOK_BLOCKED" ] && exit 2
   exit 0
 }
+
+# Record every hook entry point's invocation. Only executables named
+# agent-hook-* install the trap: non-hook launchers (agentguard-churn-bypass)
+# and test harnesses also source this library, and their exits are not hook
+# events. Extensions run inside the hook process and share its single record.
+case "${_HOOK_SELF:-$0}" in
+  agent-hook-* | */agent-hook-*) trap _hook_telemetry_exit EXIT ;;
+esac

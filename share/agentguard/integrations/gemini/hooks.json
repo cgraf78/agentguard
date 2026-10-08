@@ -9,6 +9,15 @@
             "type": "command"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
       }
     ],
     "SessionEnd": [
@@ -17,6 +26,15 @@
           {
             "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-session-end",
             "timeout": 30,
+            "type": "command"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-telemetry",
+            "timeout": 10,
             "type": "command"
           }
         ]
@@ -32,6 +50,16 @@
           }
         ],
         "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ],
     "AfterAgent": [
@@ -39,6 +67,16 @@
         "hooks": [
           {
             "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-stop",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-telemetry",
+            "timeout": 10,
             "type": "command"
           }
         ],
@@ -75,6 +113,16 @@
           }
         ],
         "matcher": "mcp__"
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ],
     "AfterTool": [
@@ -107,6 +155,16 @@
           }
         ],
         "matcher": "mcp__"
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ],
     "Notification": [
@@ -114,6 +172,16 @@
         "hooks": [
           {
             "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-notification",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-telemetry",
+            "timeout": 10,
             "type": "command"
           }
         ],

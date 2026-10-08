@@ -220,6 +220,12 @@ _cleanup() {
 }
 trap _cleanup EXIT
 
+# Hooks record audit telemetry under the user's state home by default. Point
+# every suite, and every hook it spawns, at a private directory so test runs
+# never write into real audit records. Telemetry suites read this path.
+AGENTGUARD_TELEMETRY_DIR="$(_tmpdir)/telemetry"
+export AGENTGUARD_TELEMETRY_DIR
+
 # ---------------------------------------------------------------------------
 # Common test setup
 # ---------------------------------------------------------------------------

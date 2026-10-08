@@ -26,6 +26,11 @@ and no `suppressOutput` (see `_hook_strict_output_agent`).
   Sourced extensions can read `AGENTGUARD_CMD_TRIMMED`,
   `AGENTGUARD_CMD_LINE1`, `AGENTGUARD_EDIT_FILES`, and
   `AGENTGUARD_EDIT_FILE` after the matching parser helper runs.
+- `telemetry.sh` owns the audit-telemetry storage contract (root resolution,
+  retention, clock). `hook-helpers.sh` sources it and installs an `EXIT` trap
+  in every `agent-hook-*` executable that writes one record per invocation;
+  `agentguard-telemetry` sources it alone to read records. The layout and
+  schema are documented in `docs/telemetry.md`.
 - `detect.sh` is internal to those public entry points.
 - Native hook fragments and runtime adapters are public assets under
   `share/agentguard/integrations/`. Consumers own activation and configuration

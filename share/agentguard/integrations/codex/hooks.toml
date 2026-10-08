@@ -82,3 +82,49 @@ command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"
 type = "command"
 command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-prompt-submit"
 timeout = 10
+
+# Audit telemetry: record every supported event and every tool call,
+# including tools no guard matches. A matcher-less group matches all tools.
+# agent-hook-telemetry never blocks or injects context.
+
+[[hooks.SessionStart]]
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
+timeout = 10
+
+[[hooks.PreToolUse]]
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
+timeout = 10
+
+[[hooks.PostToolUse]]
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
+timeout = 10
+
+[[hooks.Stop]]
+[[hooks.Stop.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
+timeout = 10
+
+[[hooks.SessionEnd]]
+[[hooks.SessionEnd.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
+timeout = 10
+
+[[hooks.PermissionRequest]]
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
+timeout = 10
+
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
+timeout = 10

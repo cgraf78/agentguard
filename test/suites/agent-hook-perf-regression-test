@@ -99,11 +99,14 @@ SCRIPT
 chmod +x "$_mock_jq_dir/jq"
 
 _parse_jq_calls() {
-  # $1: payload. Prints jq invocations for one in-process parse.
-  local input="$1"
+  # $1: payload; $2: AGENTGUARD_TELEMETRY (default 0). Prints jq invocations
+  # for one in-process parse. Telemetry is off by default here so the parse
+  # budget is measured alone; the exit-trap recorder is budgeted separately.
+  local input="$1" telemetry="${2:-0}"
   : >"$_mock_jq_calls"
   MOCK_JQ_CALLS="$_mock_jq_calls" PATH="$_mock_jq_dir:$PATH" \
     AGENTGUARD_PROCESS_DETECT=0 _HOOK_SELF=/x/bin/agent-hook-pre-bash \
+    AGENTGUARD_TELEMETRY="$telemetry" \
     bash -c 'source "$1"; _HOOK_INPUT="$2"; _hook_parse_command' _ \
     "$HELPERS" "$input" >/dev/null 2>&1
   wc -l <"$_mock_jq_calls" | tr -d ' '
@@ -114,6 +117,9 @@ _assert_eq "jq: command parse costs exactly one jq" "1" "$count"
 
 count=$(_parse_jq_calls 'not json at all')
 _assert_eq "jq: invalid payload still costs exactly one jq" "1" "$count"
+
+count=$(_parse_jq_calls '{"tool_input":{"command":"ls"}}' 1)
+_assert_eq "jq: telemetry record adds exactly one jq" "2" "$count"
 
 echo "=== perf-regression: refresh skipped without session fields ==="
 

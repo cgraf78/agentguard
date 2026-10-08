@@ -1,0 +1,100 @@
+.TH AGENTGUARD-TELEMETRY 1 "2026-10-07" "agentguard" "User Commands"
+.SH NAME
+agentguard-telemetry \- find, read, and prune AgentGuard audit records
+.SH SYNOPSIS
+.B agentguard-telemetry dir
+.br
+.B agentguard-telemetry sessions
+.RB [ \-\-agent
+.IR NAME ]
+.RB [ \-n
+.IR N ]
+.RB [ \-\-json ]
+.br
+.B agentguard-telemetry show
+.RI [ SESSION ]
+.RB [ \-\-json ]
+.br
+.B agentguard-telemetry path
+.RI [ SESSION ]
+.br
+.B agentguard-telemetry prune
+.RB [ \-\-days
+.IR N ]
+.SH DESCRIPTION
+AgentGuard hooks record what every agent session did: prompts, every tool
+call with its full input and output, guard decisions, and lifecycle events.
+Records live under
+.I ${XDG_STATE_HOME:-~/.local/state}/agentguard/telemetry/sessions/AGENT/SESSION/
+as one JSON file per hook invocation.
+.B agentguard-telemetry
+is the read side.
+.TP
+.B dir
+Print the telemetry root that hooks write to.
+.TP
+.B sessions
+List sessions with their last activity, record count, working directory,
+and first prompt, newest first.
+.B \-\-agent
+filters by runtime,
+.B \-n
+limits the count (default 20, 0 for all), and
+.B \-\-json
+prints one JSON object per session.
+.TP
+.B show
+Print a session's timeline, one line per record. With
+.BR \-\-json ,
+print the raw records as JSONL for
+.BR jq (1).
+.TP
+.B path
+Print a session's record directory.
+.TP
+.B prune
+Delete sessions idle for more than
+.I N
+days (default
+.B AGENTGUARD_TELEMETRY_RETENTION_DAYS
+or 90).
+.PP
+.I SESSION
+is
+.B latest
+(the default),
+.B current
+(the agent session running the command, from its runtime session
+variables), an exact
+.IR AGENT / KEY
+or
+.IR KEY ,
+a unique key prefix, or a session directory path. For Claude Code the key
+is the session UUID that also names its transcript.
+.PP
+Readers search the override root, the
+.B XDG_STATE_HOME
+root, and
+.IR ~/.local/state ,
+because some runtimes scrub
+.B XDG_*
+variables from hook environments.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+No matching session, an ambiguous prefix, or no records.
+.TP
+.B 2
+Usage error.
+.SH EXAMPLES
+.nf
+agentguard-telemetry show current
+agentguard-telemetry show 8a15fead \-\-json |
+  jq \-r 'select(.event=="PreToolUse") | .payload.tool_input.command // empty'
+rg \-l 'rm \-rf' "$(agentguard-telemetry dir)"
+.fi
+.SH SEE ALSO
+.BR agent-hook-telemetry (1)

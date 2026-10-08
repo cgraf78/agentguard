@@ -114,6 +114,39 @@ expected = {
     },
 }
 
+# Audit telemetry contract: every wired event ends with the passive
+# agent-hook-telemetry recorder, and tool events match every tool (not only the
+# guarded ones) so the audit trail is complete. Codex expresses "all tools" by
+# omitting the matcher; JSON runtimes use "" (match-all for both literal and
+# regex matcher semantics). Lifecycle events without a matcher stay without one.
+TELEMETRY = "agent-hook-telemetry"
+telemetry_only_events = {
+    "claude": [
+        "PostToolUseFailure",
+        "PermissionRequest",
+        "PermissionDenied",
+        "SubagentStart",
+        "SubagentStop",
+        "PreCompact",
+        "PostCompact",
+    ],
+}
+tool_events = {
+    "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest",
+    "PermissionDenied", "BeforeTool", "AfterTool",
+}
+for runtime, events in expected.items():
+    for event in telemetry_only_events.get(runtime, []):
+        events.setdefault(event, [])
+    for event, groups in events.items():
+        if runtime == "codex":
+            matcher = None
+        elif event in tool_events or any(group[0] is not None for group in groups):
+            matcher = ""
+        else:
+            matcher = None
+        groups.append((matcher, TELEMETRY, 10))
+
 identity_prefixes = {
     "claude": 'env -u BASH_ENV -u ENV AGENTGUARD_NAME=claude AGENTGUARD_SESSION_ID="${CLAUDE_CODE_CURRENT_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}" ',
     "codex": 'env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID="${CODEX_THREAD_ID:-}" ',

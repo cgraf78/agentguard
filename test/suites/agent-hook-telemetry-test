@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+# agent-hook-telemetry-test — audit telemetry records and the read-side CLI.
+
+# shellcheck disable=SC1090,SC1091,SC2030,SC2031 # dynamic helper path; subshell env fixtures.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+TELEMETRY_HOOK="$BIN_DIR/agent-hook-telemetry"
+TELEMETRY_CLI="$BIN_DIR/agentguard-telemetry"
+CHURN_BYPASS="$BIN_DIR/agentguard-churn-bypass"
+
+# Fresh telemetry root per case so record counts are exact.
+_fresh_root() {
+  AGENTGUARD_TELEMETRY_DIR="$(_tmpdir)/telemetry"
+  export AGENTGUARD_TELEMETRY_DIR
+  SESSION_DIR="$AGENTGUARD_TELEMETRY_DIR/sessions/agent/$TEST_SID"
+}
+
+_records() {
+  local f
+  for f in "$SESSION_DIR"/*.json; do
+    [ -e "$f" ] && jq -c . "$f"
+  done
+}
+
+_record_count() {
+  local -a files=("$SESSION_DIR"/*.json)
+  if [ -e "${files[0]}" ]; then
+    echo "${#files[@]}"
+  else
+    echo 0
+  fi
+}
+
+# Run the CLI with captured stdout/stderr/exit. Readers also search the
+# XDG_STATE_HOME and ~/.local/state roots, so give them an empty HOME: only
+# the fixture root may contribute sessions.
+CLI_HOME="$(_tmpdir)"
+_run_cli() {
+  CLI_EXIT=0
+  CLI_OUT=$(env -u XDG_STATE_HOME HOME="$CLI_HOME" "$TELEMETRY_CLI" "$@" 2>"$TEST_TMPDIR/cli.err") || CLI_EXIT=$?
+  CLI_ERR=$(cat "$TEST_TMPDIR/cli.err")
+}
+
+PRE_TOOL='{"session_id":"s","hook_event_name":"PreToolUse","cwd":"/work","tool_name":"Read","tool_use_id":"toolu_1","tool_input":{"file_path":"/etc/hosts"}}'
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== telemetry hook: event records ==="
+
+_fresh_root
+_run_hook "$TELEMETRY_HOOK" "$PRE_TOOL"
+_assert_eq "event: exit 0" "0" "$HOOK_EXIT"
+_assert_eq "event: empty response" "{}" "$HOOK_STDOUT"
+_assert_eq "event: one record" "1" "$(_record_count)"
+rec=$(_records)
+_assert_eq "event: schema" "agentguard.telemetry.v1" "$(jq -r .schema <<<"$rec")"
+_assert_eq "event: kind" "event" "$(jq -r .kind <<<"$rec")"
+_assert_eq "event: hook name" "agent-hook-telemetry" "$(jq -r .hook <<<"$rec")"
+_assert_eq "event: event from payload" "PreToolUse" "$(jq -r .event <<<"$rec")"
+_assert_eq "event: tool name" "Read" "$(jq -r .tool_name <<<"$rec")"
+_assert_eq "event: tool use id" "toolu_1" "$(jq -r .tool_use_id <<<"$rec")"
+_assert_eq "event: cwd from payload" "/work" "$(jq -r .cwd <<<"$rec")"
+_assert_eq "event: session key" "$TEST_SID" "$(jq -r .session_key <<<"$rec")"
+_assert_eq "event: outcome ok" "ok" "$(jq -r .outcome <<<"$rec")"
+_assert_eq "event: full payload kept verbatim" \
+  "$(jq -cS . <<<"$PRE_TOOL")" "$(jq -cS .payload <<<"$rec")"
+if jq -e '.ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}\\.[0-9]{6}Z$")' <<<"$rec" >/dev/null; then
+  _pass "event: RFC 3339 UTC timestamp with microseconds"
+else
+  _fail "event: RFC 3339 UTC timestamp with microseconds (got $(jq -r .ts <<<"$rec"))"
+fi
+if jq -e '(.duration_ms | type) == "number" and (.pid | type) == "number"' <<<"$rec" >/dev/null; then
+  _pass "event: numeric duration and pid"
+else
+  _fail "event: numeric duration and pid"
+fi
+
+echo ""
+echo "=== telemetry hook: payload edge cases ==="
+
+_fresh_root
+_run_hook "$TELEMETRY_HOOK" 'not json {'
+_assert_eq "invalid json: exit 0" "0" "$HOOK_EXIT"
+_assert_eq "invalid json: raw text kept" "not json {" "$(_records | jq -r .payload.unparsed)"
+
+# A payload above Linux's 128 KiB single-argument limit must still be recorded
+# intact: the recorder passes it through stdin, never argv or the environment.
+_fresh_root
+big_payload=$(head -c 300000 /dev/zero | tr '\0' 'x' |
+  jq -Rsc '{session_id:"s",hook_event_name:"PostToolUse",tool_name:"Bash",tool_response:{stdout:.}}')
+_run_hook "$TELEMETRY_HOOK" "$big_payload"
+_assert_eq "large payload: output length preserved" "300000" \
+  "$(_records | jq -r '.payload.tool_response.stdout | length')"
+
+_fresh_root
+AGENTGUARD_TELEMETRY_MAX_PAYLOAD_CHARS=20 _run_hook "$TELEMETRY_HOOK" "$PRE_TOOL"
+rec=$(_records)
+_assert_eq "truncation: original length recorded" "${#PRE_TOOL}" "$(jq -r .payload_truncated_chars <<<"$rec")"
+_assert_eq "truncation: bounded prefix kept" "${PRE_TOOL:0:20}" "$(jq -r .payload.unparsed <<<"$rec")"
+
+_fresh_root
+_run_hook "$TELEMETRY_HOOK" ''
+_assert_eq "no payload: exit 0" "0" "$HOOK_EXIT"
+_assert_eq "no payload: invocation still recorded" "1" "$(_record_count)"
+_assert_eq "no payload: payload is null" "null" "$(_records | jq -c .payload)"
+
+_fresh_root
+prompt_payload='{"session_id":"s","hook_event_name":"UserPromptSubmit","prompt":"line one\nline two"}'
+_run_hook "$TELEMETRY_HOOK" "$prompt_payload"
+_assert_eq "multi-line prompt kept" $'line one\nline two' "$(_records | jq -r .payload.prompt)"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== guard hooks: decision records ==="
+
+_fresh_root
+_run_hook "$PRE_BASH" '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_use_id":"toolu_rm","tool_input":{"command":"rm -rf /"}}'
+_assert_eq "block: hook exits 2" "2" "$HOOK_EXIT"
+_assert_eq "block: one record" "1" "$(_record_count)"
+rec=$(_records)
+_assert_eq "block: kind hook" "hook" "$(jq -r .kind <<<"$rec")"
+_assert_eq "block: hook name" "agent-hook-pre-bash" "$(jq -r .hook <<<"$rec")"
+_assert_eq "block: exit status" "2" "$(jq -r .exit_status <<<"$rec")"
+_assert_eq "block: outcome" "blocked" "$(jq -r .outcome <<<"$rec")"
+_assert_eq "block: parsed command" "rm -rf /" "$(jq -r .command <<<"$rec")"
+_assert_eq "block: tool use id joins the event record" "toolu_rm" "$(jq -r .tool_use_id <<<"$rec")"
+_assert_contains "block: block message recorded" "never allowed" "$(jq -r '.blocked[0]' <<<"$rec")"
+_assert_eq "block: no duplicated payload" "false" "$(jq 'has("payload")' <<<"$rec")"
+
+_fresh_root
+_run_hook "$PRE_EDIT" '{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/w/a.py"}}'
+rec=$(_records)
+_assert_eq "reminder: outcome ok" "ok" "$(jq -r .outcome <<<"$rec")"
+_assert_eq "reminder: edit file recorded" '["/w/a.py"]' "$(jq -c .edit_files <<<"$rec")"
+_assert_contains "reminder: reminder recorded" "Code edit" "$(jq -r '.reminders[0]' <<<"$rec")"
+_assert_contains "reminder: injected context recorded" "Code edit" "$(jq -r .context <<<"$rec")"
+
+# Early no-op exits (no edit target) still leave an audit record.
+_fresh_root
+_run_hook "$PRE_EDIT" '{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{}}'
+_assert_eq "early exit: exit 0" "0" "$HOOK_EXIT"
+_assert_eq "early exit: recorded" "1" "$(_record_count)"
+_assert_eq "early exit: event derived from hook name" "PreToolUse" "$(_records | jq -r .event)"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== storage location and privacy ==="
+
+_fresh_root
+_run_hook "$TELEMETRY_HOOK" "$PRE_TOOL"
+dir_mode=$(stat -c '%a' "$SESSION_DIR" 2>/dev/null || stat -f '%Lp' "$SESSION_DIR")
+root_mode=$(stat -c '%a' "$AGENTGUARD_TELEMETRY_DIR" 2>/dev/null || stat -f '%Lp' "$AGENTGUARD_TELEMETRY_DIR")
+file_mode=$(stat -c '%a' "$SESSION_DIR"/*.json 2>/dev/null || stat -f '%Lp' "$SESSION_DIR"/*.json)
+_assert_eq "privacy: session dir 0700" "700" "$dir_mode"
+_assert_eq "privacy: root dir 0700" "700" "$root_mode"
+_assert_eq "privacy: record 0600" "600" "$file_mode"
+leftovers=("$SESSION_DIR"/.*.tmp)
+_assert_eq "atomic write: no temp file left" "false" "$([ -e "${leftovers[0]}" ] && echo true || echo false)"
+
+state_home="$(_tmpdir)/state"
+(
+  unset AGENTGUARD_TELEMETRY_DIR
+  export XDG_STATE_HOME="$state_home"
+  _run_hook "$TELEMETRY_HOOK" "$PRE_TOOL"
+)
+_assert_eq "default root: XDG_STATE_HOME/agentguard/telemetry" "true" \
+  "$(compgen -G "$state_home/agentguard/telemetry/sessions/agent/$TEST_SID/*.json" >/dev/null && echo true || echo false)"
+
+fake_home="$(_tmpdir)"
+(
+  unset AGENTGUARD_TELEMETRY_DIR XDG_STATE_HOME
+  export HOME="$fake_home"
+  _run_hook "$TELEMETRY_HOOK" "$PRE_TOOL"
+)
+_assert_eq "fallback root: ~/.local/state/agentguard/telemetry" "true" \
+  "$(compgen -G "$fake_home/.local/state/agentguard/telemetry/sessions/agent/$TEST_SID/*.json" >/dev/null && echo true || echo false)"
+
+# A relative override would scatter records across working directories.
+rel_cwd="$(_tmpdir)"
+state_home="$(_tmpdir)/state"
+(
+  cd "$rel_cwd" || exit 1
+  export AGENTGUARD_TELEMETRY_DIR=relative/telemetry XDG_STATE_HOME="$state_home"
+  _run_hook "$TELEMETRY_HOOK" "$PRE_TOOL"
+)
+_assert_eq "relative override: ignored" "false" "$([ -e "$rel_cwd/relative" ] && echo true || echo false)"
+_assert_eq "relative override: falls back to state home" "true" \
+  "$([ -d "$state_home/agentguard/telemetry/sessions" ] && echo true || echo false)"
+
+# Untrusted session ids must never select a path outside the session tree.
+_fresh_root
+escape_root="$(_tmpdir)"
+AGENTGUARD_SESSION_ID="../../../${escape_root##*/}" \
+  bash -c 'printf "%s" "$1" | AGENTGUARD_NAME=agent "$2" >/dev/null 2>&1' _ "$PRE_TOOL" "$TELEMETRY_HOOK"
+outside=$(compgen -G "$escape_root/*" || true)
+_assert_eq "unsafe session id: nothing written outside root" "" "$outside"
+inside=$(compgen -G "$AGENTGUARD_TELEMETRY_DIR/sessions/agent/*/*.json" | wc -l | tr -d ' ')
+_assert_eq "unsafe session id: still recorded inside root" "1" "$inside"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== opt-out and non-hook launchers ==="
+
+_fresh_root
+AGENTGUARD_TELEMETRY=0 _run_hook "$TELEMETRY_HOOK" "$PRE_TOOL"
+_assert_eq "disabled: telemetry hook still answers" "{}" "$HOOK_STDOUT"
+AGENTGUARD_TELEMETRY=off _run_hook "$PRE_BASH" '{"tool_name":"Bash","tool_input":{"command":"ls"}}'
+_assert_eq "disabled: no records" "false" "$([ -e "$AGENTGUARD_TELEMETRY_DIR" ] && echo true || echo false)"
+
+# agentguard-churn-bypass sources the hook runtime but is not a hook event.
+_fresh_root
+AGENTGUARD_SESSION_ID="$TEST_SID" "$CHURN_BYPASS" status >/dev/null 2>&1
+_assert_eq "non-hook launcher: no record" "false" "$([ -e "$AGENTGUARD_TELEMETRY_DIR" ] && echo true || echo false)"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== concurrent hooks ==="
+
+# Hosts run matching hooks in parallel; every record must land intact.
+_fresh_root
+pids=()
+for _ in $(seq 1 16); do
+  (printf '%s' "$big_payload" |
+    AGENTGUARD_SESSION_ID="$TEST_SID" AGENTGUARD_NAME=agent "$TELEMETRY_HOOK" >/dev/null 2>&1) &
+  pids+=("$!")
+done
+for pid in "${pids[@]}"; do wait "$pid"; done
+_assert_eq "concurrent: one record per hook" "16" "$(_record_count)"
+valid=$(for f in "$SESSION_DIR"/*.json; do jq -e '.payload.tool_response.stdout | length == 300000' "$f" >/dev/null && echo ok; done | wc -l | tr -d ' ')
+_assert_eq "concurrent: every record parses with full payload" "16" "$valid"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== retention ==="
+
+_fresh_root
+old="$AGENTGUARD_TELEMETRY_DIR/sessions/agent/old-session"
+new="$AGENTGUARD_TELEMETRY_DIR/sessions/agent/new-session"
+mkdir -p "$old" "$new"
+touch -t 202001010000 "$old"
+_run_cli prune --days 30
+_assert_eq "prune: exit 0" "0" "$CLI_EXIT"
+_assert_eq "prune: idle session removed" "false" "$([ -d "$old" ] && echo true || echo false)"
+_assert_eq "prune: active session kept" "true" "$([ -d "$new" ] && echo true || echo false)"
+
+mkdir -p "$old"
+touch -t 202001010000 "$old"
+_run_cli prune --days 0
+_assert_eq "prune 0: keeps everything" "true" "$([ -d "$old" ] && echo true || echo false)"
+_run_cli prune --days abc
+_assert_eq "prune: invalid days is a usage error" "2" "$CLI_EXIT"
+
+# SessionStart triggers a background prune with the configured retention.
+touch -t 202001010000 "$old"
+AGENTGUARD_TELEMETRY_RETENTION_DAYS=30 _run_hook "$TELEMETRY_HOOK" '{"hook_event_name":"SessionStart","session_id":"s"}'
+_assert_eq "session start: hook returns at once" "0" "$HOOK_EXIT"
+deadline=$((SECONDS + 10))
+while [ -d "$old" ] && [ "$SECONDS" -lt "$deadline" ]; do
+  sleep 0.1
+done
+_assert_eq "session start: background prune removed idle session" "false" \
+  "$([ -d "$old" ] && echo "true (still present after 10s)" || echo false)"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== agentguard-telemetry CLI ==="
+
+_fresh_root
+_run_cli show
+_assert_eq "no sessions: show fails" "1" "$CLI_EXIT"
+_assert_contains "no sessions: explains" "no telemetry sessions" "$CLI_ERR"
+
+_run_hook "$TELEMETRY_HOOK" "$prompt_payload"
+_run_hook "$TELEMETRY_HOOK" '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_use_id":"t9","cwd":"/w","tool_input":{"command":"rm -rf /"}}'
+_run_hook "$PRE_BASH" '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_use_id":"t9","tool_input":{"command":"rm -rf /"}}'
+other_key="other-session-$$"
+# Codex keys sessions by the payload's session_id, so omit it here.
+printf '%s' '{"hook_event_name":"PreToolUse","tool_name":"Read"}' |
+  AGENTGUARD_SESSION_ID="$other_key" AGENTGUARD_NAME=codex "$TELEMETRY_HOOK" >/dev/null 2>&1
+
+_run_cli dir
+_assert_eq "dir: prints the root" "$AGENTGUARD_TELEMETRY_DIR" "$CLI_OUT"
+
+_run_cli sessions --json
+_assert_eq "sessions --json: one line per session" "2" "$(printf '%s\n' "$CLI_OUT" | grep -c '^{')"
+_assert_eq "sessions --json: newest first" "$other_key" "$(printf '%s\n' "$CLI_OUT" | head -n 1 | jq -r .session_key)"
+mine=$(printf '%s\n' "$CLI_OUT" | jq -c "select(.session_key == \"$TEST_SID\")")
+_assert_eq "sessions --json: record count" "3" "$(jq -r .records <<<"$mine")"
+_assert_eq "sessions --json: first prompt" $'line one\nline two' "$(jq -r .first_prompt <<<"$mine")"
+
+_run_cli sessions --agent codex --json
+_assert_eq "sessions --agent: filters" "codex" "$(jq -r .agent <<<"$CLI_OUT")"
+_run_cli sessions --limit 1 --json
+_assert_eq "sessions --limit: bounded" "1" "$(printf '%s\n' "$CLI_OUT" | grep -c '^{')"
+_run_cli sessions
+_assert_contains "sessions table: header" "LAST_ACTIVITY" "$CLI_OUT"
+_assert_contains "sessions table: prompt on one line" "line one line two" "$CLI_OUT"
+
+_run_cli show "$TEST_SID"
+_assert_eq "show: exit 0" "0" "$CLI_EXIT"
+_assert_contains "show: guard decision" "BLOCKED:" "$CLI_OUT"
+_assert_contains "show: command summary" "rm -rf /" "$CLI_OUT"
+_assert_contains "show: prompt summary" "line one line two" "$CLI_OUT"
+
+_run_cli show "agent/$TEST_SID" --json
+_assert_eq "show --json: JSONL, one line per record" "3" "$(printf '%s\n' "$CLI_OUT" | jq -c . | wc -l | tr -d ' ')"
+_assert_eq "show --json: chronological" "UserPromptSubmit" "$(printf '%s\n' "$CLI_OUT" | head -n 1 | jq -r .event)"
+
+_run_cli path "${TEST_SID:0:12}"
+_assert_eq "path: unique prefix resolves" "$SESSION_DIR" "$CLI_OUT"
+
+_run_cli show latest --json
+_assert_eq "show latest: newest session" "$other_key" "$(printf '%s\n' "$CLI_OUT" | head -n 1 | jq -r .session_key)"
+
+CLI_EXIT=0
+CLI_OUT=$(env -u XDG_STATE_HOME HOME="$CLI_HOME" AGENTGUARD_SESSION_ID="$TEST_SID" \
+  "$TELEMETRY_CLI" path current 2>/dev/null) || CLI_EXIT=$?
+_assert_eq "current: resolves from runtime session env" "$SESSION_DIR" "$CLI_OUT"
+
+_run_cli show no-such-session
+_assert_eq "unknown session: exit 1" "1" "$CLI_EXIT"
+printf '%s' "$PRE_TOOL" | AGENTGUARD_SESSION_ID="${TEST_SID}-twin" AGENTGUARD_NAME=agent "$TELEMETRY_HOOK" >/dev/null 2>&1
+_run_cli show "${TEST_SID:0:12}"
+_assert_eq "ambiguous prefix: exit 1" "1" "$CLI_EXIT"
+_assert_contains "ambiguous prefix: explains" "matches 2 sessions" "$CLI_ERR"
+
+_run_cli bogus
+_assert_eq "unknown command: exit 2" "2" "$CLI_EXIT"
+_run_cli sessions --nope
+_assert_eq "unknown option: exit 2" "2" "$CLI_EXIT"
+_run_cli --help
+_assert_contains "help: documents the storage root" "agentguard-telemetry dir" "$CLI_OUT"
+
+_test_summary

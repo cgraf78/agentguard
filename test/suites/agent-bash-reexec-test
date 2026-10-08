@@ -265,7 +265,7 @@ for closing_entry in agent-hook-pre-bash agentguard-classify-command; do
 done
 
 for closing_mode in clean dirty; do
-  closing_env=(env -i HOME="$HOME" PATH="$PATH")
+  closing_env=(env -i HOME="$HOME" PATH="$PATH" AGENTGUARD_TELEMETRY_DIR="$AGENTGUARD_TELEMETRY_DIR")
   if [[ $closing_mode == dirty ]]; then
     closing_env+=('BASH_FUNC_agentguard_fd_closer%%=() { :; }')
   fi
@@ -1049,20 +1049,20 @@ _run_control_entry() {
   if [[ $kind == hook ]]; then
     if [[ $mode == dirty ]]; then
       printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
-        env -i HOME="$HOME" PATH="$PATH" "$name=$value" \
+        env -i HOME="$HOME" PATH="$PATH" AGENTGUARD_TELEMETRY_DIR="$AGENTGUARD_TELEMETRY_DIR" "$name=$value" \
           'BASH_FUNC_agentguard_control%%=() { :; }' \
           "$control_hook" >"$output" 2>"$error"
     else
       printf '%s' '{"tool_input":{"command":"rm -rf /"}}' |
-        env -i HOME="$HOME" PATH="$PATH" "$name=$value" \
+        env -i HOME="$HOME" PATH="$PATH" AGENTGUARD_TELEMETRY_DIR="$AGENTGUARD_TELEMETRY_DIR" "$name=$value" \
           "$control_hook" >"$output" 2>"$error"
     fi
   elif [[ $mode == dirty ]]; then
-    env -i HOME="$HOME" PATH="$PATH" "$name=$value" \
+    env -i HOME="$HOME" PATH="$PATH" AGENTGUARD_TELEMETRY_DIR="$AGENTGUARD_TELEMETRY_DIR" "$name=$value" \
       'BASH_FUNC_agentguard_control%%=() { :; }' \
       "$control_classifier" --json -- 'printf ok' >"$output" 2>"$error"
   else
-    env -i HOME="$HOME" PATH="$PATH" "$name=$value" \
+    env -i HOME="$HOME" PATH="$PATH" AGENTGUARD_TELEMETRY_DIR="$AGENTGUARD_TELEMETRY_DIR" "$name=$value" \
       "$control_classifier" --json -- 'printf ok' >"$output" 2>"$error"
   fi
   rc=$?
@@ -1106,13 +1106,13 @@ for closed_mode in clean dirty; do
   closed_error="$TEST_TMPDIR/closed-stdin-$closed_mode.error"
   set +e
   if [[ $closed_mode == dirty ]]; then
-    env -i HOME="$HOME" PATH="$PATH" \
+    env -i HOME="$HOME" PATH="$PATH" AGENTGUARD_TELEMETRY_DIR="$AGENTGUARD_TELEMETRY_DIR" \
       AGENTGUARD_EXPECT_STDIN_CLOSED=1 \
       'BASH_FUNC_agentguard_closed_stdin%%=() { :; }' \
       "$control_classifier" --json -- 'printf ok' \
       0<&- >"$closed_output" 2>"$closed_error"
   else
-    env -i HOME="$HOME" PATH="$PATH" \
+    env -i HOME="$HOME" PATH="$PATH" AGENTGUARD_TELEMETRY_DIR="$AGENTGUARD_TELEMETRY_DIR" \
       AGENTGUARD_EXPECT_STDIN_CLOSED=1 \
       "$control_classifier" --json -- 'printf ok' \
       0<&- >"$closed_output" 2>"$closed_error"
@@ -1162,7 +1162,7 @@ for write_stdin_mode in clean dirty; do
     write_stdin_output="$TEST_TMPDIR/write-only-$write_stdin_kind-$write_stdin_mode.out"
     write_stdin_error="$TEST_TMPDIR/write-only-$write_stdin_kind-$write_stdin_mode.err"
     write_stdin_capture="$TEST_TMPDIR/write-only-$write_stdin_kind-$write_stdin_mode.stdin"
-    write_stdin_env=(env -i HOME="$HOME" PATH="$PATH")
+    write_stdin_env=(env -i HOME="$HOME" PATH="$PATH" AGENTGUARD_TELEMETRY_DIR="$AGENTGUARD_TELEMETRY_DIR")
     if [[ $write_stdin_mode == dirty ]]; then
       write_stdin_env+=('BASH_FUNC_agentguard_write_only%%=() { :; }')
     fi
@@ -1240,7 +1240,7 @@ _run_xtracefd_entry() {
     if [[ $kind == hook ]]; then
       if [[ $mode == dirty ]]; then
         printf '%s' '{"tool_input":{"command":"true"}}' |
-          env -i HOME="$HOME" PATH="$PATH" BASH_XTRACEFD="$control_fd" \
+          env -i HOME="$HOME" PATH="$PATH" AGENTGUARD_TELEMETRY_DIR="$AGENTGUARD_TELEMETRY_DIR" BASH_XTRACEFD="$control_fd" \
             AGENTGUARD_CONTROL_PROBE="$control_probe" \
             AGENTGUARD_CONTROL_FD="$control_fd" \
             AGENTGUARD_CONTROL_CAPTURE="$capture" \
@@ -1248,21 +1248,21 @@ _run_xtracefd_entry() {
             "$control_hook" >"$output" 2>"$error"
       else
         printf '%s' '{"tool_input":{"command":"true"}}' |
-          env -i HOME="$HOME" PATH="$PATH" BASH_XTRACEFD="$control_fd" \
+          env -i HOME="$HOME" PATH="$PATH" AGENTGUARD_TELEMETRY_DIR="$AGENTGUARD_TELEMETRY_DIR" BASH_XTRACEFD="$control_fd" \
             AGENTGUARD_CONTROL_PROBE="$control_probe" \
             AGENTGUARD_CONTROL_FD="$control_fd" \
             AGENTGUARD_CONTROL_CAPTURE="$capture" \
             "$control_hook" >"$output" 2>"$error"
       fi
     elif [[ $mode == dirty ]]; then
-      env -i HOME="$HOME" PATH="$PATH" BASH_XTRACEFD="$control_fd" \
+      env -i HOME="$HOME" PATH="$PATH" AGENTGUARD_TELEMETRY_DIR="$AGENTGUARD_TELEMETRY_DIR" BASH_XTRACEFD="$control_fd" \
         AGENTGUARD_CONTROL_PROBE="$control_probe" \
         AGENTGUARD_CONTROL_FD="$control_fd" \
         AGENTGUARD_CONTROL_CAPTURE="$capture" \
         'BASH_FUNC_agentguard_xtracefd%%=() { :; }' \
         "$control_classifier" --json -- 'printf ok' >"$output" 2>"$error"
     else
-      env -i HOME="$HOME" PATH="$PATH" BASH_XTRACEFD="$control_fd" \
+      env -i HOME="$HOME" PATH="$PATH" AGENTGUARD_TELEMETRY_DIR="$AGENTGUARD_TELEMETRY_DIR" BASH_XTRACEFD="$control_fd" \
         AGENTGUARD_CONTROL_PROBE="$control_probe" \
         AGENTGUARD_CONTROL_FD="$control_fd" \
         AGENTGUARD_CONTROL_CAPTURE="$capture" \
@@ -1378,7 +1378,7 @@ for spoof_marker in _AGENTGUARD_BASH_ENTRY _AGENTGUARD_ENV_CLEAN; do
   for spoof_mode in clean dirty; do
     spoof_output="$TEST_TMPDIR/classifier-spoof-$spoof_marker-$spoof_mode.out"
     spoof_error="$TEST_TMPDIR/classifier-spoof-$spoof_marker-$spoof_mode.err"
-    spoof_env=(env -i HOME="$HOME" PATH="$PATH" "$spoof_marker=caller")
+    spoof_env=(env -i HOME="$HOME" PATH="$PATH" AGENTGUARD_TELEMETRY_DIR="$AGENTGUARD_TELEMETRY_DIR" "$spoof_marker=caller")
     if [[ $spoof_mode == dirty ]]; then
       spoof_env+=("BASH_FUNC_agentguard_spoof_marker%%=$raw_function")
     fi
@@ -1406,7 +1406,7 @@ sed '/^[[:space:]]*printf .*agentguard-environment-end-v2$/d' \
 command cat "$truncated_classifier.tmp" >"$truncated_classifier"
 rm -f "$truncated_classifier.tmp"
 set +e
-_with_timeout 5 env -i HOME="$HOME" PATH="$PATH" \
+_with_timeout 5 env -i HOME="$HOME" PATH="$PATH" AGENTGUARD_TELEMETRY_DIR="$AGENTGUARD_TELEMETRY_DIR" \
   _agentguard_complete=1 \
   _agentguard_name=_AGENTGUARD_BASH_ENTRY \
   'BASH_FUNC_agentguard_truncated_stream%%=() { :; }' \

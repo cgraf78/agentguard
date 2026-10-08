@@ -9,6 +9,16 @@
           }
         ],
         "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ],
     "PostToolUseFailure": [
@@ -21,6 +31,16 @@
           }
         ],
         "matcher": "mcp__|.+__"
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ],
     "PostToolUse": [
@@ -53,6 +73,16 @@
           }
         ],
         "matcher": "mcp__|.+__"
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ],
     "PreToolUse": [
@@ -85,6 +115,16 @@
           }
         ],
         "matcher": "mcp__|.+__"
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ],
     "SessionEnd": [
@@ -96,6 +136,15 @@
             "type": "command"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
       }
     ],
     "SessionStart": [
@@ -103,6 +152,15 @@
         "hooks": [
           {
             "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-session-start",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-telemetry",
             "timeout": 10,
             "type": "command"
           }
@@ -118,6 +176,15 @@
             "type": "command"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
       }
     ],
     "Stop": [
@@ -125,6 +192,16 @@
         "hooks": [
           {
             "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-stop",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-telemetry",
+            "timeout": 10,
             "type": "command"
           }
         ],
@@ -140,6 +217,16 @@
           }
         ],
         "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ],
     "UserPromptSubmit": [
@@ -147,6 +234,16 @@
         "hooks": [
           {
             "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-prompt-submit",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-telemetry",
             "timeout": 10,
             "type": "command"
           }

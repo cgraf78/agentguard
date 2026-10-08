@@ -30,6 +30,16 @@
           }
         ],
         "matcher": "mcp__"
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ],
     "PreToolUse": [
@@ -72,6 +82,16 @@
           }
         ],
         "matcher": "mcp__"
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ],
     "SessionStart": [
@@ -79,6 +99,15 @@
         "hooks": [
           {
             "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-session-start",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-telemetry",
             "timeout": 10,
             "type": "command"
           }
@@ -94,6 +123,16 @@
           }
         ],
         "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
       }
     ],
     "UserPromptSubmit": [
@@ -101,6 +140,16 @@
         "hooks": [
           {
             "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-prompt-submit",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-telemetry",
             "timeout": 10,
             "type": "command"
           }
