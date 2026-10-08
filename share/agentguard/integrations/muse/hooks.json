@@ -84,7 +84,7 @@
             "type": "command"
           }
         ],
-        "matcher": "mcp__"
+        "matcher": "^mcp__"
       },
       {
         "hooks": [
@@ -159,7 +159,7 @@
             "type": "command"
           }
         ],
-        "matcher": "mcp__"
+        "matcher": "^mcp__"
       },
       {
         "hooks": [

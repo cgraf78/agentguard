@@ -28,12 +28,12 @@ expected = {
         "PostToolUse": [
             ("Edit|Write", "agent-hook-post-edit", 60),
             ("Bash", "agent-hook-post-bash", 120),
-            ("mcp__", "agent-hook-post-mcp", 10),
+            ("^mcp__", "agent-hook-post-mcp", 10),
         ],
         "PreToolUse": [
             ("Bash", "agent-hook-pre-bash", 600),
             ("Edit|Write", "agent-hook-pre-edit", 10),
-            ("mcp__", "agent-hook-pre-mcp", 10),
+            ("^mcp__", "agent-hook-pre-mcp", 10),
         ],
         "SessionEnd": [(None, "agent-hook-session-end", 30)],
         "SessionStart": [(None, "agent-hook-session-start", 10)],
@@ -58,19 +58,20 @@ expected = {
         "UserPromptSubmit": [(None, "agent-hook-prompt-submit", 10)],
     },
     "gemini": {
-        "SessionStart": [(None, "agent-hook-session-start", 10)],
-        "SessionEnd": [(None, "agent-hook-session-end", 30)],
-        "BeforeAgent": [("", "agent-hook-prompt-submit", 10)],
+        # Gemini hook timeouts are milliseconds.
+        "SessionStart": [(None, "agent-hook-session-start", 10000)],
+        "SessionEnd": [(None, "agent-hook-session-end", 30000)],
+        "BeforeAgent": [("", "agent-hook-prompt-submit", 10000)],
         "AfterAgent": [("", "agent-hook-stop", None)],
         "BeforeTool": [
-            ("run_shell_command", "agent-hook-pre-bash", 600),
-            ("replace|write_file", "agent-hook-pre-edit", 10),
-            ("mcp__", "agent-hook-pre-mcp", 10),
+            ("run_shell_command", "agent-hook-pre-bash", 600000),
+            ("replace|write_file", "agent-hook-pre-edit", 10000),
+            ("^mcp_", "agent-hook-pre-mcp", 10000),
         ],
         "AfterTool": [
-            ("replace|write_file", "agent-hook-post-edit", 60),
-            ("run_shell_command", "agent-hook-post-bash", 120),
-            ("mcp__", "agent-hook-post-mcp", 10),
+            ("replace|write_file", "agent-hook-post-edit", 60000),
+            ("run_shell_command", "agent-hook-post-bash", 120000),
+            ("^mcp_", "agent-hook-post-mcp", 10000),
         ],
         "Notification": [("", "agent-hook-notification", None)],
     },
@@ -78,13 +79,13 @@ expected = {
         "PostToolUse": [
             ("Edit|Write", "agent-hook-post-edit", 60),
             ("Bash", "agent-hook-post-bash", 120),
-            ("mcp__", "agent-hook-post-mcp", 10),
+            ("^mcp__", "agent-hook-post-mcp", 10),
         ],
         "PreToolUse": [
             ("Bash", "agent-hook-pre-bash", 600),
             ("Edit|Write", "agent-hook-pre-edit", 10),
             ("Grep|Search", "agent-hook-pre-search", 10),
-            ("mcp__", "agent-hook-pre-mcp", 10),
+            ("^mcp__", "agent-hook-pre-mcp", 10),
         ],
         "SessionEnd": [(None, "agent-hook-session-end", 30)],
         "SessionStart": [(None, "agent-hook-session-start", 10)],
@@ -236,6 +237,42 @@ for runtime, path in paths.items():
             raise AssertionError(
                 f"{runtime} {event} differs: expected {expected_groups!r}, got {actual_groups!r}"
             )
+
+# Matchers must select the tools they guard under each runtime's own grammar,
+# not just compare equal to a literal: Claude and Muse treat a matcher made only
+# of letters, digits, `_`, and `|` as exact tool names, so a bare `mcp__` prefix
+# silently matched nothing there. Codex, Gemini, and Grok matchers are
+# unanchored regexes.
+import re
+
+exact_grammar = {"claude", "muse"}
+mcp_tool_names = {
+    "claude": "mcp__github__create_issue",
+    "codex": "mcp__github__create_issue",
+    "muse": "mcp__github__create_issue",
+    "gemini": "mcp_github_create_issue",
+    "grok": "github__create_issue",
+}
+
+
+def selects(runtime, matcher, tool):
+    if matcher in (None, "", "*"):
+        return True
+    if runtime in exact_grammar and re.fullmatch(r"[A-Za-z0-9_|]+", matcher):
+        return tool in matcher.split("|")
+    return re.search(matcher, tool) is not None
+
+
+for runtime, events in expected.items():
+    for event, groups in events.items():
+        for matcher, executable, _ in groups:
+            if executable.endswith("-mcp") and not selects(
+                runtime, matcher, mcp_tool_names[runtime]
+            ):
+                raise AssertionError(
+                    f"{runtime} {event} matcher {matcher!r} does not select "
+                    f"{mcp_tool_names[runtime]!r}"
+                )
 PY
 asset_status=$?
 

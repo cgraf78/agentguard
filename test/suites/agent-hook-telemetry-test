@@ -450,6 +450,15 @@ _assert_eq "codex: event and decision share tool_use_id" "call_x call_x" \
 _assert_eq "codex: nothing filed under the inherited thread id" "false" \
   "$([ -d "$AGENTGUARD_TELEMETRY_DIR/sessions/codex/thread-A" ] && echo true || echo false)"
 
+# Codex apply_patch carries the patch in tool_input.command; the edit guard's
+# decision record must still name the edited files.
+_fresh_root
+codex_patch=$(jq -cn --arg patch "$(printf '%s\n' '*** Begin Patch' '*** Update File: /tmp/test/a.py' '@@' '-old' '+new' '*** End Patch')" \
+  '{session_id:"thread-P",hook_event_name:"PreToolUse",tool_name:"apply_patch",tool_use_id:"call_p",tool_input:{command:$patch}}')
+_run_hook_as codex "" "$PRE_EDIT" "$codex_patch"
+_assert_eq "codex apply_patch: edit files from tool_input.command" "/tmp/test/a.py" \
+  "$(_dir_records "$AGENTGUARD_TELEMETRY_DIR/sessions/codex/thread-P" | jq -r '.edit_files[0]')"
+
 # Gemini: the state key is the CLI pid, but records file under the payload's
 # real session id so pid reuse and `/clear` cannot merge sessions.
 _fresh_root
@@ -499,6 +508,25 @@ _run_hook_as grok "GROK_SESSION_ID=grok-parent AGENTGUARD_SESSION_ID=grok-parent
   '{"hookEventName":"session_start","sessionId":"grok-parent"}'
 _assert_eq "grok: parent and child share one session directory" "1" \
   "$(find "$AGENTGUARD_TELEMETRY_DIR/sessions/grok" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+
+# MCP guards must recognise each runtime's MCP naming, or their decision
+# records (and circuit breakers) never see the server.
+PRE_MCP="$BIN_DIR/agent-hook-pre-mcp"
+_fresh_root
+_run_hook_as gemini "AGENTGUARD_SESSION_ID=gemini-4242" "$PRE_MCP" \
+  '{"session_id":"g-mcp","hook_event_name":"BeforeTool","tool_name":"mcp_github_create_issue","tool_input":{}}'
+_assert_eq "gemini mcp: server parsed from mcp_<server>_<tool>" "github" \
+  "$(_dir_records "$AGENTGUARD_TELEMETRY_DIR/sessions/gemini/g-mcp" | jq -r .mcp_server)"
+_fresh_root
+_run_hook_as claude "AGENTGUARD_SESSION_ID=c-mcp" "$PRE_MCP" \
+  '{"session_id":"c-mcp","hook_event_name":"PreToolUse","tool_name":"mcp__github__create_issue","tool_input":{}}'
+_assert_eq "claude mcp: server parsed from mcp__<server>__<tool>" "github" \
+  "$(_dir_records "$AGENTGUARD_TELEMETRY_DIR/sessions/claude/c-mcp" | jq -r .mcp_server)"
+_fresh_root
+_run_hook_as grok "GROK_SESSION_ID=k-mcp AGENTGUARD_SESSION_ID=k-mcp" "$PRE_MCP" \
+  '{"sessionId":"k-mcp","hookEventName":"pre_tool_use","toolName":"mcp_x__create_issue","toolInput":{}}'
+_assert_eq "grok mcp: gemini spelling is not special outside gemini" "mcp_x" \
+  "$(_dir_records "$AGENTGUARD_TELEMETRY_DIR/sessions/grok/k-mcp" | jq -r .mcp_server)"
 
 # Muse and OpenCode: the launcher-provided id is already durable.
 _fresh_root

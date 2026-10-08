@@ -856,8 +856,9 @@ _hook_tool_stdout() {
 }
 
 # Parses edited file paths from hook JSON input. Edit/Write style tools pass a
-# single file_path; Codex API apply_patch passes a patch body, so extract the
-# file headers from that structured patch format.
+# single file_path; Codex API apply_patch passes a patch body (in Codex hook
+# payloads, as tool_input.command), so extract the file headers from that
+# structured patch format.
 _hook_parse_edit_files() {
   if ! _hook_read_input; then
     AGENTGUARD_EDIT_FILES=''
@@ -871,7 +872,7 @@ _hook_parse_edit_files() {
     def patch_text:
       if (tool_payload | type) == "string" then tool_payload
       elif (tool_payload | type) == "object" then
-        (tool_payload.patch // tool_payload.input // tool_payload.diff // empty)
+        (tool_payload.patch // tool_payload.input // tool_payload.diff // tool_payload.command // empty)
       else empty end;
     def first_seen:
       reduce .[] as $item ([]; if index($item) then . else . + [$item] end);
@@ -897,21 +898,31 @@ _hook_parse_mcp() {
   local tool_name remainder
   tool_name=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_name // .toolName // empty')
   [ -z "$tool_name" ] && exit 0
-  case "$tool_name" in
-    mcp__*__*)
-      remainder="${tool_name#mcp__}"
-      _HOOK_MCP_SERVER="${remainder%__*}"
-      _HOOK_MCP_TOOL_NAME="${remainder##*__}"
-      ;;
-    *__*)
-      # Grok (and Cursor-compat) MCP calls arrive as qualified server__tool
-      # names, not Claude's mcp__server__tool prefix. Split on the first
-      # separator so a tool name that itself contains __ stays intact.
-      _HOOK_MCP_SERVER="${tool_name%%__*}"
-      _HOOK_MCP_TOOL_NAME="${tool_name#*__}"
-      ;;
-    *) exit 0 ;;
-  esac
+  if [ "${AGENTGUARD_NAME:-}" = "gemini" ] && [[ "$tool_name" == mcp_[!_]*_?* ]]; then
+    # Gemini CLI qualifies MCP tools as mcp_<server>_<tool>. Its server
+    # segment never contains `_` (Gemini's own parser splits on the first
+    # one), so split there too. Gated on the runtime because elsewhere that
+    # spelling is just a tool name.
+    remainder="${tool_name#mcp_}"
+    _HOOK_MCP_SERVER="${remainder%%_*}"
+    _HOOK_MCP_TOOL_NAME="${remainder#*_}"
+  else
+    case "$tool_name" in
+      mcp__*__*)
+        remainder="${tool_name#mcp__}"
+        _HOOK_MCP_SERVER="${remainder%__*}"
+        _HOOK_MCP_TOOL_NAME="${remainder##*__}"
+        ;;
+      *__*)
+        # Grok (and Cursor-compat) MCP calls arrive as qualified server__tool
+        # names, not Claude's mcp__server__tool prefix. Split on the first
+        # separator so a tool name that itself contains __ stays intact.
+        _HOOK_MCP_SERVER="${tool_name%%__*}"
+        _HOOK_MCP_TOOL_NAME="${tool_name#*__}"
+        ;;
+      *) exit 0 ;;
+    esac
+  fi
   [ -z "$_HOOK_MCP_SERVER" ] && exit 0
   [ -z "$_HOOK_MCP_TOOL_NAME" ] && exit 0
 
