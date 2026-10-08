@@ -202,7 +202,7 @@ history: do not commit, sync, or share it without review.
 | Gemini CLI | All tools; agent turns (prompt and response), compression, notifications, session start/end | yes |
 | Grok | All tools; prompts, tool failures, subagents, notifications, stop, session start/end | yes |
 | Muse | All tools; prompts, permission requests, tool failures, subagents, compaction, notifications, interrupts, stop, stop failures, session start/end | yes |
-| OpenCode | Not yet: the plugin adapter does not call `agent-hook-telemetry` | yes, for guarded tools |
+| OpenCode | All tools; prompts, permission requests, tool failures, compaction, turn failures (`StopFailure`), stop, session start/end | yes |
 
 Each runtime records every audit-relevant event it exposes, with two
 deliberate exclusions everywhere: per-model-call events (Gemini

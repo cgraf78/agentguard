@@ -42,8 +42,8 @@ runtime-specific compatibility behind generator conditionals.
 Every event in each declarative fragment ends with `agent-hook-telemetry`,
 registered with a match-all matcher so the audit trail covers every tool, not
 only the guarded ones (see `docs/telemetry.md`). It never blocks or injects
-context. The OpenCode adapter does not invoke it yet; its guard hooks still
-write decision records.
+context. The OpenCode adapter has no declarative fragment; it spawns the
+recorder itself for every tool call and lifecycle event.
 
 ## Consumption
 

@@ -17,9 +17,17 @@ fixture_home="$test_root/home"
 fixture_bin="$fixture_home/.local/bin"
 behavior_dir="$test_root/behaviors"
 hook_log="$test_root/hooks.jsonl"
+telemetry_log="$test_root/telemetry.jsonl"
 mkdir -p "$fixture_bin" "$behavior_dir"
 
 cp "$root/share/agentguard/integrations/opencode/agentguard.js" "$test_root/agentguard.mjs"
+
+# The adapter resolves agent-hook-telemetry from HOME and then PATH, where a
+# developer's real recorder may live: Node cases without the fixture and the
+# native OpenCode load checks both reach it. Disable it and pin its root to
+# scratch so the suite can never write into the caller's audit trail.
+export AGENTGUARD_TELEMETRY=0
+export AGENTGUARD_TELEMETRY_DIR="$test_root/telemetry"
 
 cat >"$test_root/hook-fixture.mjs" <<'HOOK_FIXTURE'
 #!/usr/bin/env node
@@ -103,6 +111,66 @@ process.exit(behavior.exit ?? 0);
 HOOK_FIXTURE
 chmod +x "$test_root/hook-fixture.mjs"
 
+# The audit recorder gets its own fixture and log so guard-hook assertions keep
+# exact counts. Tests install it only while they need it; everywhere else the
+# adapter must find no recorder and stay silent.
+cat >"$test_root/telemetry-fixture.mjs" <<'TELEMETRY_FIXTURE'
+#!/usr/bin/env node
+
+import fs from "node:fs";
+import path from "node:path";
+
+const behaviorPath = path.join(
+  process.env.AGENTGUARD_TEST_HOOK_BEHAVIOR_DIR,
+  "agent-hook-telemetry.json",
+);
+const behavior = fs.existsSync(behaviorPath)
+  ? JSON.parse(fs.readFileSync(behaviorPath, "utf8"))
+  : {};
+if (behavior.pidDir) {
+  fs.writeFileSync(path.join(behavior.pidDir, String(process.pid)), String(process.pid));
+}
+// Neither adversarial mode reads stdin, so a large payload also fills the pipe.
+// The hang is bounded so a failed test cannot leave a permanent orphan.
+if (behavior.mode === "hang") {
+  setTimeout(() => process.exit(0), 60_000);
+} else if (behavior.mode === "early-exit") {
+  process.exit(0);
+} else {
+  const input = await new Promise((resolve) => {
+    let data = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      data += chunk;
+    });
+    process.stdin.on("end", () => resolve(data));
+  });
+  const payload = JSON.parse(input);
+  // Per-event delays let a case slow one record and prove later ones wait.
+  const delay = behavior.delayFor?.[payload.hook_event_name] ?? behavior.delayMs;
+  if (delay) {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+  }
+  fs.appendFileSync(
+    process.env.AGENTGUARD_TEST_TELEMETRY_LOG,
+    `${JSON.stringify({
+      payload,
+      cwd: process.cwd(),
+      name: process.env.AGENTGUARD_NAME,
+      session: process.env.AGENTGUARD_SESSION_ID,
+    })}\n`,
+  );
+  if (behavior.mode === "fail") {
+    // A recorder must never be able to steer OpenCode, even if it emits a
+    // well-formed block decision and a failing status.
+    process.stdout.write(JSON.stringify({ decision: "block", reason: "recorder veto" }));
+    process.stderr.write("recorder failed");
+    process.exit(3);
+  }
+}
+TELEMETRY_FIXTURE
+chmod +x "$test_root/telemetry-fixture.mjs"
+
 for hook in \
   agent-hook-session-start \
   agent-hook-prompt-submit \
@@ -173,6 +241,65 @@ function clearLog() {
 function logs() {
   const raw = fs.readFileSync(logPath, "utf8").trim();
   return raw ? raw.split("\n").map((line) => JSON.parse(line)) : [];
+}
+
+const telemetryLog = process.env.AGENTGUARD_TEST_TELEMETRY_LOG;
+const recorderPath = path.join(home, ".local/bin/agent-hook-telemetry");
+
+function installRecorder(value) {
+  if (value) {
+    behavior("agent-hook-telemetry", value);
+  } else {
+    clearBehavior("agent-hook-telemetry");
+  }
+  fs.symlinkSync(path.join(root, "telemetry-fixture.mjs"), recorderPath);
+}
+
+function removeRecorder() {
+  fs.rmSync(recorderPath, { force: true });
+  clearBehavior("agent-hook-telemetry");
+}
+
+// Recorder children are never awaited, so a late record from an earlier case
+// can still land. Every audit case uses its own session ID and filters by it.
+function audits(sessionID) {
+  const raw = fs.existsSync(telemetryLog) ? fs.readFileSync(telemetryLog, "utf8").trim() : "";
+  const records = [];
+  for (const line of raw ? raw.split("\n") : []) {
+    try {
+      records.push(JSON.parse(line));
+    } catch {
+      // A record still being appended is retried by the next poll.
+    }
+  }
+  return records.filter((record) => record.payload.session_id === sessionID);
+}
+
+async function waitForAudit(sessionID, eventName, predicate = () => true) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const match = audits(sessionID).find(
+      (record) => record.payload.hook_event_name === eventName && predicate(record.payload),
+    );
+    if (match) return match;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(
+    `no ${eventName} audit record for ${sessionID}; saw ${JSON.stringify(audits(sessionID))}`,
+  );
+}
+
+function pidsIn(directory) {
+  return fs.readdirSync(directory).map(Number);
+}
+
+async function waitForPids(directory, count) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (pidsIn(directory).length >= count) return pidsIn(directory);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.fail(`expected ${count} recorder PIDs, saw ${JSON.stringify(pidsIn(directory))}`);
 }
 
 async function waitForProcessExit(pid, description) {
@@ -1946,6 +2073,806 @@ await check("V2 malformed resource server cannot bypass an incomplete inventory"
   } finally { Date.now = now; await host.dispose(); }
 });
 
+await check("records unguarded tools before and after execution with full output", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin();
+    const call = { tool: "read", sessionID: "audit-read", callID: "audit-read-call" };
+    const args = { filePath: "notes.txt", offset: 3 };
+    await hooks["tool.execute.before"](call, { args });
+    // The pre record must exist before the tool's after-callback ever runs.
+    const pre = await waitForAudit("audit-read", "PreToolUse");
+    const body = `${"line\n".repeat(64 * 1024)}end`;
+    const output = { title: "notes.txt", output: body, metadata: { lines: 65537 } };
+    await hooks["tool.execute.after"]({ ...call, args }, output);
+
+    const post = await waitForAudit("audit-read", "PostToolUse");
+    assert.equal(pre.payload.tool_name, "read");
+    assert.deepEqual(pre.payload.tool_input, args);
+    assert.equal(pre.payload.tool_use_id, "audit-read-call");
+    assert.equal(post.payload.tool_use_id, "audit-read-call");
+    assert.equal(post.payload.tool_response.output, body);
+    assert.deepEqual(post.payload.tool_response.metadata, { lines: 65537 });
+    assert.equal(pre.name, "opencode");
+    assert.equal(pre.session, "audit-read");
+    assert.equal(output.output, body);
+    assert.deepEqual(logs(), []);
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("joins guard payloads and audit records on tool_use_id", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin();
+    const call = { tool: "bash", sessionID: "audit-join", callID: "audit-join-call" };
+    const args = { command: "echo joined" };
+    await hooks["tool.execute.before"](call, { args });
+    await hooks["tool.execute.after"](
+      { ...call, args },
+      { title: "echo", output: "joined\n", metadata: { exit: 0 } },
+    );
+
+    const guards = logs().filter((record) => record.payload.session_id === "audit-join");
+    assert.deepEqual(
+      guards.map((record) => [record.hook, record.payload.tool_use_id]),
+      [
+        ["agent-hook-pre-bash", "audit-join-call"],
+        ["agent-hook-post-bash", "audit-join-call"],
+      ],
+    );
+    const pre = await waitForAudit("audit-join", "PreToolUse");
+    const post = await waitForAudit("audit-join", "PostToolUse");
+    assert.equal(pre.payload.tool_name, "Bash");
+    assert.equal(pre.payload.tool_use_id, "audit-join-call");
+    assert.equal(post.payload.tool_use_id, "audit-join-call");
+    assert.equal(post.payload.tool_response.stdout, "joined\n");
+    assert.equal(post.payload.tool_response.exit_code, 0);
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("records MCP calls under their guarded identity", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin({ mcp: { alpha: {}, beta: {} } });
+    const sessionID = "audit-mcp";
+    await hooks["tool.execute.before"](
+      { tool: "alpha_lookup", sessionID, callID: "audit-mcp-single" },
+      { args: { query: "x" } },
+    );
+    // A helper that fans out to several servers is still one OpenCode call.
+    await hooks["tool.execute.before"](
+      { tool: "list_mcp_resources", sessionID, callID: "audit-mcp-fanout" },
+      { args: {} },
+    );
+    const single = await waitForAudit(
+      sessionID,
+      "PreToolUse",
+      (payload) => payload.tool_use_id === "audit-mcp-single",
+    );
+    const fanout = await waitForAudit(
+      sessionID,
+      "PreToolUse",
+      (payload) => payload.tool_use_id === "audit-mcp-fanout",
+    );
+    assert.equal(single.payload.tool_name, "mcp__alpha__lookup");
+    assert.equal(fanout.payload.tool_name, "list_mcp_resources");
+    assert.equal(
+      logs().filter((record) => record.payload.tool_use_id === "audit-mcp-fanout").length,
+      2,
+    );
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("records a tool request even when its guard denies it", async () => {
+  clearLog();
+  installRecorder();
+  behavior("agent-hook-pre-bash", { exit: 2, stderr: "audited denial" });
+  let hooks;
+  try {
+    hooks = await plugin();
+    await assert.rejects(
+      hooks["tool.execute.before"](
+        { tool: "bash", sessionID: "audit-denied", callID: "audit-denied-call" },
+        { args: { command: "danger" } },
+      ),
+      /audited denial/,
+    );
+    const pre = await waitForAudit("audit-denied", "PreToolUse");
+    assert.equal(pre.payload.tool_input.command, "danger");
+    assert.equal(pre.payload.tool_use_id, "audit-denied-call");
+  } finally {
+    clearBehavior("agent-hook-pre-bash");
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("records a request refused during MCP identity resolution", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin({ mcp: { a: {}, a_b: {} } });
+    const output = { args: { query: "x" } };
+    await assert.rejects(
+      hooks["tool.execute.before"](
+        { tool: "a_b_lookup", sessionID: "audit-ambiguous", callID: "audit-ambiguous-call" },
+        output,
+      ),
+      /ambiguous MCP/i,
+    );
+    assert.equal(output.decision, "deny");
+    const pre = await waitForAudit("audit-ambiguous", "PreToolUse");
+    assert.equal(pre.payload.tool_name, "a_b_lookup");
+    assert.equal(pre.payload.tool_use_id, "audit-ambiguous-call");
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("records a Bash request whose workdir does not exist", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin();
+    const missing = path.join(root, "no-such-workdir");
+    // The guard cannot even start there and fails closed; the audit record
+    // must not depend on that directory.
+    await assert.rejects(
+      hooks["tool.execute.before"](
+        { tool: "bash", sessionID: "audit-workdir", callID: "audit-workdir-call" },
+        { args: { command: "pwd", workdir: missing } },
+      ),
+      /launch failed/,
+    );
+    const pre = await waitForAudit("audit-workdir", "PreToolUse");
+    assert.equal(pre.payload.cwd, missing);
+    assert.equal(pre.payload.tool_input.workdir, missing);
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("records the full prompt and each lifecycle event once", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin();
+    const sessionID = "audit-life";
+    void hooks.event({ event: { type: "session.created", properties: { info: { id: sessionID } } } });
+    await hooks["chat.message"](
+      { sessionID, agent: "build" },
+      {
+        message: {},
+        parts: [
+          { type: "text", text: "first line" },
+          { type: "file", url: "file:///ignored" },
+          { type: "text", text: "second line" },
+        ],
+      },
+    );
+    void hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+    void hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+    void hooks.event({ event: { type: "session.deleted", properties: { info: { id: sessionID } } } });
+
+    // Wait before unloading: the drain may stop a recorder a busy runner has
+    // not scheduled yet, and this case is about the records, not the drain.
+    const prompt = await waitForAudit(sessionID, "UserPromptSubmit");
+    assert.equal(prompt.payload.prompt, "first line\nsecond line");
+    for (const eventName of ["SessionStart", "Stop", "SessionEnd"]) {
+      await waitForAudit(sessionID, eventName);
+    }
+    await hooks.dispose();
+    hooks = undefined;
+    const counts = {};
+    for (const record of audits(sessionID)) {
+      counts[record.payload.hook_event_name] = (counts[record.payload.hook_event_name] ?? 0) + 1;
+    }
+    assert.deepEqual(counts, { SessionStart: 1, UserPromptSubmit: 1, Stop: 1, SessionEnd: 1 });
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("internal maintenance agents record no prompts or lifecycle", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin();
+    for (const agent of ["title", "summary", "compaction"]) {
+      await hooks["chat.message"](
+        { sessionID: "audit-internal", agent },
+        { message: {}, parts: [{ type: "text", text: agent }] },
+      );
+    }
+    // Records land in spawn order on an idle runner; this later sentinel bounds
+    // how long any wrongly spawned internal record could still be in flight.
+    await hooks["chat.message"](
+      { sessionID: "audit-internal-sentinel", agent: "build" },
+      { message: {}, parts: [{ type: "text", text: "real" }] },
+    );
+    await waitForAudit("audit-internal-sentinel", "UserPromptSubmit");
+    assert.deepEqual(audits("audit-internal"), []);
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("unload waits for an in-flight SessionEnd record", async () => {
+  clearLog();
+  installRecorder({ delayMs: 200 });
+  // Scale the drain up so a loaded runner cannot outlast it; the case is that
+  // unload waits, not how long.
+  const normalTimeoutScale = process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE;
+  process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = "3";
+  let hooks;
+  try {
+    hooks = await plugin();
+    await hooks["chat.message"](
+      { sessionID: "audit-drain", agent: "build" },
+      { message: {}, parts: [{ type: "text", text: "work" }] },
+    );
+    await hooks.dispose();
+    hooks = undefined;
+    // No polling: dispose itself must have waited for the delayed recorder.
+    assert.ok(
+      audits("audit-drain").some((record) => record.payload.hook_event_name === "SessionEnd"),
+    );
+  } finally {
+    await hooks?.dispose();
+    process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = normalTimeoutScale;
+    removeRecorder();
+  }
+});
+
+await check("a tool's PostToolUse record never lands before its PreToolUse", async () => {
+  clearLog();
+  installRecorder({ delayFor: { PreToolUse: 300 } });
+  let hooks;
+  try {
+    hooks = await plugin();
+    const call = { tool: "read", sessionID: "audit-order", callID: "audit-order-call" };
+    const args = { filePath: "a.txt" };
+    await hooks["tool.execute.before"](call, { args });
+    await hooks["tool.execute.after"]({ ...call, args }, { title: "a", output: "a", metadata: {} });
+    await waitForAudit("audit-order", "PostToolUse");
+    // The log is append-ordered, which is the order records finish in.
+    assert.deepEqual(
+      audits("audit-order").map((record) => record.payload.hook_event_name),
+      ["PreToolUse", "PostToolUse"],
+    );
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("lifecycle records keep their dispatch order", async () => {
+  clearLog();
+  installRecorder({ delayFor: { SessionStart: 300 } });
+  let hooks;
+  try {
+    hooks = await plugin();
+    await hooks["chat.message"](
+      { sessionID: "audit-life-order", agent: "build" },
+      { message: {}, parts: [{ type: "text", text: "work" }] },
+    );
+    await waitForAudit("audit-life-order", "UserPromptSubmit");
+    assert.deepEqual(
+      audits("audit-life-order").map((record) => record.payload.hook_event_name),
+      ["SessionStart", "UserPromptSubmit"],
+    );
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("a turn failure replaces that turn's Stop record", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin();
+    const sessionID = "audit-turn-failure";
+    const message = (text) =>
+      hooks["chat.message"]({ sessionID, agent: "build" }, { message: {}, parts: [{ type: "text", text }] });
+    await message("fails");
+    const error = { name: "MessageAbortedError", data: {} };
+    void hooks.event({ event: { type: "session.error", properties: { sessionID, error } } });
+    void hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+    await message("succeeds");
+    void hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+    // Lifecycle records are chained, so once this later prompt lands every
+    // Stop or StopFailure dispatched before it has landed too.
+    await message("sentinel");
+    await waitForAudit(sessionID, "UserPromptSubmit", (payload) => payload.prompt === "sentinel");
+    assert.deepEqual(
+      audits(sessionID)
+        .map((record) => record.payload.hook_event_name)
+        .filter((name) => name === "Stop" || name === "StopFailure"),
+      ["StopFailure", "Stop"],
+    );
+    // Only the audit record is replaced; the stop guard still runs per turn.
+    await hooks.dispose();
+    hooks = undefined;
+    assert.equal(
+      logs().filter((record) => record.hook === "agent-hook-stop" && record.session === sessionID)
+        .length,
+      2,
+    );
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("malformed tool arguments are audited and still denied", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin();
+    const output = { args: { filePath: "a.txt", edits: [null] } };
+    await assert.rejects(
+      hooks["tool.execute.before"](
+        { tool: "multiedit", sessionID: "audit-malformed", callID: "audit-malformed-call" },
+        output,
+      ),
+    );
+    assert.equal(output.decision, "deny");
+    const pre = await waitForAudit("audit-malformed", "PreToolUse");
+    assert.equal(pre.payload.tool_name, "multiedit");
+    assert.deepEqual(pre.payload.tool_input, { filePath: "a.txt", edits: [null] });
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("records permission requests", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin();
+    await hooks["permission.ask"]({
+      id: "audit-permission-1",
+      sessionID: "audit-permission",
+      type: "edit",
+      title: "Allow edit",
+      metadata: {},
+    });
+    const record = await waitForAudit("audit-permission", "PermissionRequest");
+    assert.equal(record.payload.permission.id, "audit-permission-1");
+    assert.equal(record.payload.permission.type, "edit");
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("records a terminal tool failure once", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin();
+    const call = { tool: "read", sessionID: "audit-failure", callID: "audit-failure-call" };
+    const input = { filePath: "missing.txt" };
+    await hooks["tool.execute.before"](call, { args: input });
+    const event = toolErrorEvent({ ...call, input, error: "File not found: missing.txt" });
+    void hooks.event({ event });
+    void hooks.event({ event });
+
+    const failure = await waitForAudit("audit-failure", "PostToolUseFailure");
+    assert.equal(failure.payload.tool_name, "read");
+    assert.equal(failure.payload.tool_use_id, "audit-failure-call");
+    assert.equal(failure.payload.error, "File not found: missing.txt");
+    // A wrongly duplicated record would have been spawned with the first.
+    await waitForAudit("audit-failure", "PreToolUse");
+    await hooks.dispose();
+    hooks = undefined;
+    assert.equal(
+      audits("audit-failure").filter(
+        (record) => record.payload.hook_event_name === "PostToolUseFailure",
+      ).length,
+      1,
+    );
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("records a permission-rejected tool call as a failure", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin({ mcp: { docs: { type: "local" } } });
+    const call = { tool: "docs_lookup", sessionID: "audit-rejected", callID: "audit-rejected-call" };
+    const input = { query: "x" };
+    await hooks["tool.execute.before"](call, { args: input });
+    const error = "The user rejected permission to use this specific tool call.";
+    void hooks.event({ event: toolErrorEvent({ ...call, input, error }) });
+
+    // The MCP post-hook skips work that never executed; the audit does not.
+    const failure = await waitForAudit("audit-rejected", "PostToolUseFailure");
+    assert.equal(failure.payload.error, error);
+    assert.equal(failure.payload.tool_name, "mcp__docs__lookup");
+    await hooks.dispose();
+    hooks = undefined;
+    assert.ok(!logs().some((record) => record.hook === "agent-hook-post-mcp"));
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("records compaction and turn failures only for started sessions", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin();
+    // An unstarted (internal or foreign) session gains no audit records. Send
+    // its events first so the started session's records below act as a bound.
+    void hooks.event({
+      event: { type: "session.created", properties: { info: { id: "audit-unstarted" } } },
+    });
+    await hooks["experimental.session.compacting"]({ sessionID: "audit-unstarted" }, { context: [] });
+    void hooks.event({
+      event: { type: "session.compacted", properties: { sessionID: "audit-unstarted" } },
+    });
+
+    const sessionID = "audit-compact";
+    await hooks["chat.message"](
+      { sessionID, agent: "build" },
+      { message: {}, parts: [{ type: "text", text: "work" }] },
+    );
+    const compacting = { context: [] };
+    await hooks["experimental.session.compacting"]({ sessionID }, compacting);
+    void hooks.event({ event: { type: "session.compacted", properties: { sessionID } } });
+    const error = { name: "APIError", data: { message: "overloaded" } };
+    void hooks.event({ event: { type: "session.error", properties: { sessionID, error } } });
+
+    await waitForAudit(sessionID, "PreCompact");
+    await waitForAudit(sessionID, "PostCompact");
+    const failure = await waitForAudit(sessionID, "StopFailure");
+    assert.deepEqual(failure.payload.error, error);
+    assert.deepEqual(compacting, { context: [] });
+    assert.deepEqual(audits("audit-unstarted"), []);
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("V2 records unguarded tools, prompts, and permission requests", async () => {
+  clearLog();
+  installRecorder();
+  let host;
+  try {
+    host = await v2();
+    const sessionID = "audit-v2";
+    await host.registered.get("session.prompt")({ sessionID, prompt: { text: "v2 prompt" } });
+    const identity = { tool: "read", sessionID, id: "audit-v2-read", input: { path: "a.txt" } };
+    await host.registered.get("tool.execute.before")(identity);
+    const event = { ...identity, status: "completed", result: { output: "v2 body", metadata: {} } };
+    await host.registered.get("tool.execute.after")(event);
+    await host.registered.get("permission.evaluate")({
+      effect: "ask",
+      sessionID,
+      action: "edit",
+      resources: ["a.txt"],
+    });
+
+    const prompt = await waitForAudit(sessionID, "UserPromptSubmit");
+    assert.equal(prompt.payload.prompt, "v2 prompt");
+    const pre = await waitForAudit(sessionID, "PreToolUse");
+    const post = await waitForAudit(sessionID, "PostToolUse");
+    assert.equal(pre.payload.tool_name, "read");
+    assert.equal(pre.payload.tool_use_id, "audit-v2-read");
+    assert.equal(post.payload.tool_use_id, "audit-v2-read");
+    assert.equal(post.payload.tool_response.output, "v2 body");
+    assert.equal(event.result.output, "v2 body");
+    const permission = await waitForAudit(sessionID, "PermissionRequest");
+    assert.equal(permission.payload.permission.action, "edit");
+  } finally {
+    await host?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("V2 records failed tool executions", async () => {
+  clearLog();
+  installRecorder();
+  let host;
+  try {
+    host = await v2();
+    const sessionID = "audit-v2-failure";
+    const identity = { tool: "read", sessionID, id: "audit-v2-failed", input: { path: "gone.txt" } };
+    await host.registered.get("tool.execute.before")(identity);
+    await host.registered.get("tool.execute.after")({
+      ...identity,
+      status: "error",
+      error: { message: "File not found", metadata: {} },
+    });
+    const failure = await waitForAudit(sessionID, "PostToolUseFailure");
+    assert.equal(failure.payload.tool_use_id, "audit-v2-failed");
+    assert.equal(failure.payload.error, "File not found");
+  } finally {
+    await host?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("V2 records compaction and execution failures from the event stream", async () => {
+  clearLog();
+  installRecorder();
+  let publish;
+  const messages = [];
+  let host;
+  try {
+    host = await v2({ event: { subscribe: ({ signal }) => ({ async *[Symbol.asyncIterator]() {
+      while (!signal.aborted) {
+        if (!messages.length) await new Promise((resolve) => { publish = resolve; signal.addEventListener("abort", resolve, { once: true }); });
+        if (messages.length) yield messages.shift();
+      }
+    } }) } });
+    const sessionID = "audit-v2-stream";
+    await host.registered.get("session.prompt")({ sessionID, prompt: { text: "task" } });
+    const error = { type: "provider", message: "rate limited" };
+    messages.push(
+      { type: "session.compaction.started", data: { sessionID, reason: "auto", recent: "m1" } },
+      { type: "session.compaction.ended", data: { sessionID, reason: "auto", text: "summary", recent: "m1" } },
+      { type: "session.execution.failed", data: { sessionID, error } },
+    );
+    publish();
+
+    const started = await waitForAudit(sessionID, "PreCompact");
+    assert.equal(started.payload.trigger, "auto");
+    const ended = await waitForAudit(sessionID, "PostCompact");
+    assert.equal(ended.payload.compact_summary, "summary");
+    const failure = await waitForAudit(sessionID, "StopFailure");
+    assert.deepEqual(failure.payload.error, error);
+  } finally {
+    await host?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("a hung recorder does not delay tools or decisions and unload is bounded", async () => {
+  clearLog();
+  const pidDir = fs.mkdtempSync(path.join(root, "hung-recorder-"));
+  installRecorder({ mode: "hang", pidDir });
+  // At this scale the recorder watchdog (30s) outlasts the worst case for
+  // spawn, the 6s unload drain, and the exit poll together, so only unload's
+  // own cleanup can stop the recorders in time, and only a bounded drain can
+  // return before the watchdog.
+  const normalTimeoutScale = process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE;
+  process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = "3";
+  let hooks;
+  let pids = [];
+  try {
+    hooks = await plugin();
+    const call = { tool: "bash", sessionID: "audit-hang", callID: "audit-hang-call" };
+    const args = { command: "echo fine" };
+    const output = { title: "echo", output: "x".repeat(1024 * 1024), metadata: { exit: 0 } };
+    await hooks["tool.execute.before"](call, { args });
+    await hooks["tool.execute.after"]({ ...call, args }, output);
+    assert.equal(output.output, "x".repeat(1024 * 1024));
+    assert.equal(logs().filter((record) => record.payload.session_id === "audit-hang").length, 2);
+
+    // Both callbacks have already returned. A recorder still alive now proves
+    // they never waited for it, whatever the scheduler did. Only the
+    // PreToolUse recorder exists: the PostToolUse one is queued behind it.
+    pids = await waitForPids(pidDir, 1);
+    for (const pid of pids) process.kill(pid, 0);
+
+    const unloadStarted = Date.now();
+    await hooks.dispose();
+    hooks = undefined;
+    assert.ok(Date.now() - unloadStarted < 15_000, "unload waited for the recorder watchdog");
+    for (const pid of pids) await waitForProcessExit(pid, "hung recorder");
+    // Unload cancelled the queued recorder rather than releasing it once the
+    // hung one died. A spawn would publish its PID within this window.
+    const observeUntil = Date.now() + 500;
+    while (Date.now() < observeUntil) {
+      assert.equal(pidsIn(pidDir).length, 1, "a cancelled recorder spawned after unload");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  } finally {
+    await hooks?.dispose();
+    process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = normalTimeoutScale;
+    for (const pid of pids) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Unload already stopped it.
+      }
+    }
+    removeRecorder();
+    fs.rmSync(pidDir, { recursive: true, force: true });
+  }
+});
+
+await check("a hung recorder is stopped by its watchdog without unload", async () => {
+  clearLog();
+  const pidDir = fs.mkdtempSync(path.join(root, "watchdog-recorder-"));
+  // A shell recorder publishes its PID within milliseconds, well inside the
+  // shortened watchdog even on a loaded runner; `exec` keeps that PID.
+  fs.writeFileSync(
+    recorderPath,
+    `#!/bin/sh\nprintf '%s' "$$" >${JSON.stringify(pidDir)}/"$$"\nexec sleep 60\n`,
+    { mode: 0o755 },
+  );
+  // A small scale makes the 10s watchdog fire after 2s. Only an unguarded tool
+  // runs, so no guard hook is subject to the shortened budget.
+  const normalTimeoutScale = process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE;
+  process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = "0.2";
+  let hooks;
+  let pids = [];
+  try {
+    hooks = await plugin();
+    await hooks["tool.execute.before"](
+      { tool: "read", sessionID: "audit-watchdog", callID: "audit-watchdog-call" },
+      { args: { filePath: "a.txt" } },
+    );
+    pids = await waitForPids(pidDir, 1);
+    for (const pid of pids) await waitForProcessExit(pid, "watchdog recorder");
+  } finally {
+    process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = normalTimeoutScale;
+    await hooks?.dispose();
+    for (const pid of pids) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // The watchdog already stopped it.
+      }
+    }
+    removeRecorder();
+    fs.rmSync(pidDir, { recursive: true, force: true });
+  }
+});
+
+await check("a failing recorder cannot change tool results or decisions", async () => {
+  clearLog();
+  installRecorder({ mode: "fail" });
+  const savedConsoleError = console.error;
+  const errors = [];
+  console.error = (...args) => errors.push(args.join(" "));
+  let hooks;
+  try {
+    hooks = await plugin();
+    const call = { tool: "bash", sessionID: "audit-fail", callID: "audit-fail-call" };
+    const args = { command: "echo kept" };
+    const decision = { args };
+    await hooks["tool.execute.before"](call, decision);
+    assert.equal(decision.decision, undefined);
+    const output = { title: "echo", output: "original", metadata: { exit: 0 } };
+    await hooks["tool.execute.after"]({ ...call, args }, output);
+    assert.equal(output.output, "original");
+
+    behavior("agent-hook-pre-bash", { exit: 2, stderr: "guard denial" });
+    const denied = { args: { command: "danger" } };
+    await assert.rejects(
+      hooks["tool.execute.before"](
+        { tool: "bash", sessionID: "audit-fail", callID: "audit-fail-denied" },
+        denied,
+      ),
+      /guard denial/,
+    );
+    assert.equal(denied.reason, "guard denial");
+
+    // The fixture logs before failing, which proves it really ran.
+    await waitForAudit("audit-fail", "PostToolUse");
+    await waitForAudit("audit-fail", "PreToolUse", (payload) => payload.tool_use_id === "audit-fail-denied");
+    await hooks.dispose();
+    hooks = undefined;
+    assert.deepEqual(errors, []);
+  } finally {
+    console.error = savedConsoleError;
+    clearBehavior("agent-hook-pre-bash");
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("a recorder that exits before reading a large payload is harmless", async () => {
+  clearLog();
+  const pidDir = fs.mkdtempSync(path.join(root, "early-recorder-"));
+  installRecorder({ mode: "early-exit", pidDir });
+  let hooks;
+  try {
+    hooks = await plugin();
+    const call = { tool: "read", sessionID: "audit-epipe", callID: "audit-epipe-call" };
+    const args = { filePath: "big.txt" };
+    const body = "y".repeat(4 * 1024 * 1024);
+    const output = { title: "big.txt", output: body, metadata: {} };
+    await hooks["tool.execute.before"](call, { args });
+    await hooks["tool.execute.after"]({ ...call, args }, output);
+    assert.equal(output.output, body);
+    // Wait for the recorders to exit so the parent's EPIPE, which would kill
+    // this process without a listener, has occurred before the case passes.
+    for (const pid of await waitForPids(pidDir, 2)) {
+      await waitForProcessExit(pid, "early-exit recorder");
+    }
+    await hooks.dispose();
+    hooks = undefined;
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+    fs.rmSync(pidDir, { recursive: true, force: true });
+  }
+});
+
+await check("a missing recorder is silent", async () => {
+  clearLog();
+  removeRecorder();
+  // PATH holds only a node link: the fixture hooks still need `env node`, while
+  // no agent-hook-telemetry can resolve from HOME or PATH.
+  const nodeOnly = fs.mkdtempSync(path.join(root, "node-only-"));
+  fs.symlinkSync(process.execPath, path.join(nodeOnly, "node"));
+  const savedConsoleError = console.error;
+  const savedPath = process.env.PATH;
+  const errors = [];
+  console.error = (...args) => errors.push(args.join(" "));
+  process.env.PATH = nodeOnly;
+  let hooks;
+  try {
+    hooks = await plugin();
+    const sessionID = "audit-missing";
+    await hooks["chat.message"](
+      { sessionID, agent: "build" },
+      { message: {}, parts: [{ type: "text", text: "hello" }] },
+    );
+    // A guarded call proves the absence never reaches the fail-closed path.
+    const call = { tool: "bash", sessionID, callID: "audit-missing-call" };
+    const args = { command: "echo body" };
+    const decision = { args };
+    await hooks["tool.execute.before"](call, decision);
+    assert.equal(decision.decision, undefined);
+    const output = { title: "echo", output: "body", metadata: { exit: 0 } };
+    await hooks["tool.execute.after"]({ ...call, args }, output);
+    void hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+    void hooks.event({ event: { type: "session.deleted", properties: { info: { id: sessionID } } } });
+    await hooks.dispose();
+    hooks = undefined;
+    assert.equal(output.output, "body");
+    assert.deepEqual(errors, []);
+    assert.ok(logs().some((record) => record.hook === "agent-hook-session-end"));
+  } finally {
+    console.error = savedConsoleError;
+    process.env.PATH = savedPath;
+    await hooks?.dispose();
+    fs.rmSync(nodeOnly, { recursive: true, force: true });
+  }
+});
+
 console.log(`Results: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
 TEST_SCRIPT
@@ -1960,6 +2887,7 @@ mkdir -p "$test_root/workspace"
     AGENTGUARD_TEST_PLUGIN="$test_root/agentguard.mjs" \
     AGENTGUARD_TEST_HOOK_LOG="$hook_log" \
     AGENTGUARD_TEST_HOOK_BEHAVIOR_DIR="$behavior_dir" \
+    AGENTGUARD_TEST_TELEMETRY_LOG="$telemetry_log" \
     node "$test_root/test.mjs"
 ) || exit 1
 

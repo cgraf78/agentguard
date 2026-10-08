@@ -19,6 +19,7 @@ consumer:
 - protected pre-hook denial and protocol-failure behavior
 - advisory handling for post-tool and lifecycle failures
 - per-call state for concurrent tools and bounded cleanup for abandoned state
+- audit events for every tool, prompt, permission request, and lifecycle event
 
 It does not own permissions, OpenCode configuration beyond registering the
 plugin, Hive Memory configuration, shell startup files, or machine policy.
@@ -84,6 +85,48 @@ known server still receives its normal guard, while an otherwise unmatched
 canonical/resource identity or flattened `<server>_<tool>` identity fails
 closed. A cold status failure therefore cannot turn a runtime-added MCP tool
 into an unguarded call merely because it was absent from startup configuration.
+
+## Audit Telemetry
+
+The adapter sends each event to `agent-hook-telemetry` (see
+`docs/telemetry.md`), the passive recorder the declarative fragments register
+for every hook. Records use the guard hooks' snake_case envelope, with
+`tool_use_id` taken from the OpenCode call ID on pre, post, and guard payloads
+alike. A guarded tool keeps the canonical name and input its guard sees;
+unguarded tools such as `read` and `grep`, and MCP helpers that fan out to
+several servers, keep OpenCode's native name and arguments. Every call is
+recorded before any guard runs, so a denied request still has its `PreToolUse`
+record, and post records carry the full tool output, subject to the
+recorder's payload cap.
+
+| OpenCode source | Recorded event |
+| --- | --- |
+| first prompt of a session (lazy start) | `SessionStart` |
+| `chat.message` / V2 `session.prompt` | `UserPromptSubmit` |
+| `tool.execute.before` / `after` | `PreToolUse` / `PostToolUse` |
+| tool error part / V2 `execute.after` error | `PostToolUseFailure` |
+| `permission.ask` / V2 `permission.evaluate` ask | `PermissionRequest` |
+| `experimental.session.compacting` / V2 `session.compaction.started` | `PreCompact` |
+| `session.compacted` / V2 `session.compaction.ended` | `PostCompact` |
+| `session.error` / V2 `session.execution.failed` | `StopFailure` |
+| `session.idle` | `Stop`, unless that turn already recorded `StopFailure` |
+| `session.deleted` or unload | `SessionEnd` |
+
+Lifecycle records follow the guard lifecycle, so internal title, summary, and
+compaction sessions record no prompts or lifecycle events. A V2 background
+shell admitted as `running` records only its `PreToolUse`, matching the
+post-hook exception below.
+
+Each record is a separate recorder process, stamped when it finishes. A
+call's post or failure record starts only after its `PreToolUse` record
+finishes, and a session's lifecycle records start one after another, so the
+timeline keeps dispatch order. Independent calls still record concurrently.
+
+The recorder never affects a tool result or guard decision: it is spawned
+fire-and-forget, its output is discarded, and a missing, failing, or hung
+recorder is silent. A recorder still running after 10 seconds is stopped.
+Unload, and V2 session deletion, wait up to two seconds for in-flight records
+so the final `SessionEnd` lands, then stop or cancel the rest.
 
 ## OpenCode V2
 
