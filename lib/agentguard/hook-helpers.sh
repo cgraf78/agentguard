@@ -240,10 +240,14 @@ _hook_refresh_state_dir() {
       IFS= read -r input_prompt || true
       IFS= read -r input_event || true
     } < <(printf '%s' "$_HOOK_INPUT" | jq -r '
-      # One output line per field: only a string counts (an object would be
-      # printed as multi-line JSON), and CR/LF are removed so a value can
-      # never shift the fields read after it.
-      def line: if type == "string" then gsub("[\r\n]"; "") else "" end;
+      # One output line per field: strings (and numbers, as before) count, an
+      # object or array would print as multi-line JSON so it does not, and
+      # CR/LF are removed so a value can never shift the fields after it.
+      # split/join rather than gsub: jq 1.6 regex costs ~1 ms on this hot path.
+      def line:
+        if type == "string" then split("\n") | join("") | split("\r") | join("")
+        elif type == "number" then tostring
+        else "" end;
       ((.session_id // .sessionId) | line),
       ((.subagent_type // .subagentType) | line),
       ((.prompt_id // .promptId) | line),

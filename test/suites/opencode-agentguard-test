@@ -3166,6 +3166,45 @@ await check("a nested subagent stays under the top-level session after its paren
   }
 });
 
+await check("a re-activated middle subagent keeps its parent link", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin();
+    const created = (id, parentID) =>
+      hooks.event({ event: { type: "session.created", properties: { info: { id, parentID } } } });
+    void created("rev-p");
+    void created("rev-c", "rev-p");
+    void created("rev-g", "rev-c");
+    await hooks["chat.message"]({ sessionID: "rev-c", agent: "general" }, say("delegate"));
+    await hooks["chat.message"]({ sessionID: "rev-g", agent: "general" }, say("leaf work"));
+    // The middle subagent ends while its child works, then becomes active
+    // again; its child ending afterwards must not drop the middle link.
+    void hooks.event({ event: { type: "session.deleted", properties: { info: { id: "rev-c" } } } });
+    await waitForAudit("rev-p", "SubagentStop", (payload) => payload.agent_id === "rev-c");
+    await hooks["chat.message"]({ sessionID: "rev-c", agent: "general" }, say("resume"));
+    await waitForAudit(
+      "rev-p",
+      "SubagentStart",
+      (payload) => payload.agent_id === "rev-c" && payload.prompt === "resume",
+    );
+    void hooks.event({ event: { type: "session.deleted", properties: { info: { id: "rev-g" } } } });
+    await waitForAudit("rev-p", "SubagentStop", (payload) => payload.agent_id === "rev-g");
+
+    await hooks["tool.execute.before"](
+      { tool: "bash", sessionID: "rev-c", callID: "rev-c-after" },
+      { args: { command: "echo after" } },
+    );
+    const after = await waitForAudit("rev-p", "PreToolUse", (payload) => payload.tool_use_id === "rev-c-after");
+    assert.equal(after.session, "rev-p");
+    assert.deepEqual(audits("rev-c"), []);
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
 await check("V1 skips the parent lookup for a session whose creation was seen", async () => {
   clearLog();
   const lookups = [];

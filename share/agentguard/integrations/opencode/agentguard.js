@@ -769,6 +769,12 @@ function createLineage() {
       }
     },
 
+    // A session that is active again (a late event re-created its record)
+    // is live, so a descendant ending must not drop its link.
+    revive(sessionID) {
+      ended.delete(sessionID);
+    },
+
     end(sessionID) {
       if (!parents.has(sessionID)) return;
       ended.add(sessionID);
@@ -823,6 +829,7 @@ export const AgentGuardPlugin = async ({
         touched: Date.now(),
       };
       sessions.set(sessionID, record);
+      lineage.revive(sessionID);
     }
     record.touched = Date.now();
     return record;
