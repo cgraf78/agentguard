@@ -222,12 +222,17 @@ _assert_eq "non-hook launcher: no record" "false" "$([ -e "$AGENTGUARD_TELEMETRY
 echo ""
 echo "=== concurrent hooks ==="
 
-# Hosts run matching hooks in parallel; every record must land intact.
+# Hosts run matching hooks in parallel; every record must land intact. This
+# checks write atomicity, not stdin timing: on a loaded runner, 16 parallel
+# 300 KB pipes can miss the reader's 50 ms first-byte window, which yields a
+# valid record with a null payload. A generous window keeps the assertion on
+# the property under test.
 _fresh_root
 pids=()
 for _ in $(seq 1 16); do
   (printf '%s' "$big_payload" |
-    AGENTGUARD_SESSION_ID="$TEST_SID" AGENTGUARD_NAME=agent "$TELEMETRY_HOOK" >/dev/null 2>&1) &
+    AGENTGUARD_HOOK_STDIN_TIMEOUT=10 AGENTGUARD_SESSION_ID="$TEST_SID" \
+      AGENTGUARD_NAME=agent "$TELEMETRY_HOOK" >/dev/null 2>&1) &
   pids+=("$!")
 done
 for pid in "${pids[@]}"; do wait "$pid"; done
