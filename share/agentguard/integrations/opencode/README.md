@@ -109,24 +109,33 @@ recorder's payload cap.
 | `experimental.session.compacting` / V2 `session.compaction.started` | `PreCompact` |
 | `session.compacted` / V2 `session.compaction.ended` | `PostCompact` |
 | `session.error` / V2 `session.execution.failed` | `StopFailure` |
-| `session.idle` | `Stop`, unless that turn already recorded `StopFailure` |
+| `session.error` with `MessageAbortedError` / V2 `session.execution.interrupted` | `Interrupt` |
+| `session.idle` | `Stop`, unless that turn already recorded `StopFailure` or `Interrupt` |
 | `session.deleted` or unload | `SessionEnd` |
 
 Lifecycle records follow the guard lifecycle, so internal title, summary, and
-compaction sessions record no prompts or lifecycle events. A V2 background
+compaction sessions record no prompts or lifecycle events. An interrupted turn
+is an `Interrupt`, not a failure, matching the runtimes that expose that event
+natively; it keeps the V1 native error or the V2 `reason`. `StopFailure` and
+`Interrupt` each end their turn in place of its `Stop` record. The stop guard
+itself still runs once per turn. A V2 background
 shell admitted as `running` records only its `PreToolUse`, matching the
 post-hook exception below.
 
-Each record is a separate recorder process, stamped when it finishes. A
-call's post or failure record starts only after its `PreToolUse` record
-finishes, and a session's lifecycle records start one after another, so the
-timeline keeps dispatch order. Independent calls still record concurrently.
+Each record is a separate recorder process, stamped when it finishes, so the
+timeline guarantees only two orderings: a call's post or failure record lands
+after its own `PreToolUse`, and a session's lifecycle records land in dispatch
+order. Tool records are not ordered against lifecycle records or against other
+calls; a `PreToolUse` can be stamped before the prompt that led to it. Join
+records on `tool_use_id` rather than relying on position.
 
 The recorder never affects a tool result or guard decision: it is spawned
 fire-and-forget, its output is discarded, and a missing, failing, or hung
 recorder is silent. A recorder still running after 10 seconds is stopped.
 Unload, and V2 session deletion, wait up to two seconds for in-flight records
-so the final `SessionEnd` lands, then stop or cancel the rest.
+so the final `SessionEnd` lands, then stop or cancel the rest. A host that
+exits without unloading the plugin stops any recorder still running, with its
+process group, from its exit handler.
 
 ## OpenCode V2
 

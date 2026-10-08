@@ -111,6 +111,10 @@ _telemetry_sorted_rows() {
 # Gemini records are filed under it rather than under the state key (see
 # _hook_telemetry_key).
 _telemetry_current_keys() {
+  # The hook runtime installs its record-writing EXIT trap for any process
+  # whose _HOOK_SELF names a hook; an inherited value must not turn this
+  # read-only command into a hook that writes a record.
+  unset _HOOK_SELF
   # shellcheck source=../lib/agentguard/hook-helpers.sh
   # shellcheck disable=SC1091 # Resolved relative to this symlink-aware launcher.
   source "$_TELEMETRY_BIN_DIR/../lib/agentguard/hook-helpers.sh" || return 1
@@ -120,23 +124,49 @@ _telemetry_current_keys() {
   _hook_agent_shell_session_keys
 }
 
-# Directory of the most recent session among rows $1 whose records were
-# written under guard state key $2 (the record's `state_key`, present only
-# where it differs from the directory key). Only the newest record of the
-# most recent sessions is read: `current` is by definition still active.
-_telemetry_state_key_match() {
-  local rows="$1" want="$2" dir
-  local -a newest=() records
+# Directory of the most recently active session among rows $1 (newest first)
+# that belongs to one of the candidate keys on stdin: either its directory key
+# is a candidate, or its newest record carries one as `state_key` (Gemini and
+# Grok records file under a durable id that a tool shell may not see).
+# Picking the most recently active match, rather than the first candidate
+# with any match, keeps a stale directory left by a recycled pid from winning
+# over the live session, and makes a nested agent resolve to itself: the
+# inner agent's hook recorded the very tool call running this command.
+_telemetry_current_match() {
+  local rows="$1" key dir candidates=$'\n' state_dirs=$'\n'
+  local -a newest=() patterns=() records
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    candidates="$candidates$key"$'\n'
+    patterns+=(-e "\"state_key\":\"$key\"")
+  done
+  [ "${#patterns[@]}" -gt 0 ] || return 1
   while IFS=$'\t' read -r _ _ _ dir; do
     [ -n "$dir" ] || continue
     records=("$dir"/*.json)
-    [ -e "${records[0]}" ] || continue
-    newest+=("${records[${#records[@]} - 1]}")
-  done < <(printf '%s\n' "$rows" | head -n 20)
-  [ "${#newest[@]}" -gt 0 ] || return 1
-  jq -r --arg want "$want" \
-    'select(.state_key == $want) | input_filename' "${newest[@]}" 2>/dev/null |
-    head -n 1 | sed 's|/[^/]*$||' | grep .
+    [ -e "${records[0]}" ] && newest+=("${records[${#records[@]} - 1]}")
+  done <<<"$rows"
+  # One fixed-string scan over each session's newest record, instead of a jq
+  # parse per session, keeps `current` cheap with months of sessions. Keys
+  # are written as plain JSON strings (telemetry keys are [[:alnum:]._:-]).
+  if [ "${#newest[@]}" -gt 0 ]; then
+    while IFS= read -r dir; do
+      state_dirs="$state_dirs${dir%/*}"$'\n'
+    done < <(grep -l -F "${patterns[@]}" -- "${newest[@]}" 2>/dev/null)
+  fi
+  while IFS=$'\t' read -r _ _ key dir; do
+    case "$candidates" in *$'\n'"$key"$'\n'*)
+      printf '%s\n' "$dir"
+      return 0
+      ;;
+    esac
+    case "$state_dirs" in *$'\n'"$dir"$'\n'*)
+      printf '%s\n' "$dir"
+      return 0
+      ;;
+    esac
+  done <<<"$rows"
+  return 1
 }
 
 # Resolve a SESSION argument to exactly one record directory.
@@ -154,14 +184,7 @@ _telemetry_resolve() {
       return 0
       ;;
     current)
-      while IFS= read -r key; do
-        matches=$(printf '%s\n' "$rows" | awk -F '\t' -v k="$key" '$3 == k { print $4 }' | head -n 1)
-        [ -n "$matches" ] || matches=$(_telemetry_state_key_match "$rows" "$key") || matches=''
-        if [ -n "$matches" ]; then
-          printf '%s\n' "$matches"
-          return 0
-        fi
-      done < <(_telemetry_current_keys)
+      _telemetry_current_match "$rows" < <(_telemetry_current_keys) && return 0
       _telemetry_die "no telemetry for the current agent session (no runtime session id in the environment, or no records yet)"
       ;;
   esac
@@ -223,11 +246,16 @@ _telemetry_cmd_sessions() {
   while IFS=$'\t' read -r last agent key dir; do
     records=("$dir"/*.json)
     first="${records[0]}"
-    # Match the prompt event by its top-level field rather than any nested
-    # "prompt" key. Paths stream through xargs: a long session can exceed the
+    # Match the prompt `event` record (not the guard's payload-less `hook`
+    # record for the same prompt, which can land first) by its leading
+    # top-level fields, so text inside some other record's payload cannot
+    # match. The jq writer emits fields in a fixed order. Event names cover
+    # Claude/Codex/Muse/OpenCode, Gemini (BeforeAgent), and Grok's snake_case
+    # values. Paths stream through xargs: a long session can exceed the
     # platform's argument-length limit.
     prompt_file=$(printf '%s\0' "${records[@]}" |
-      xargs -0 grep -l -E '"event":"(UserPromptSubmit|BeforeAgent)"' 2>/dev/null | head -n 1)
+      xargs -0 grep -l -E '^\{"schema":"[^"]*","kind":"event","ts":"[^"]*","agent":"[^"]*","session_key":"[^"]*",("state_key":"[^"]*",)?("session_id":"[^"]*",)?"event":"(UserPromptSubmit|BeforeAgent|user_prompt_submit)"' \
+        2>/dev/null | head -n 1)
     summary=$(jq -nc \
       --arg agent "$agent" --arg key "$key" --arg dir "$dir" \
       --arg last "$last" --argjson count "${#records[@]}" \
@@ -384,6 +412,13 @@ _telemetry_cmd_prune() {
 
 _telemetry_main() {
   local cmd="${1:-}"
+  # Hooks ignore a relative override (they cannot report an error), but the
+  # CLI must not: readers would silently fall back to the real state home, and
+  # `prune` would delete there while the caller believes it is isolated.
+  case "${AGENTGUARD_TELEMETRY_DIR:-}" in
+    '' | /*) ;;
+    *) _telemetry_die "AGENTGUARD_TELEMETRY_DIR must be an absolute path: $AGENTGUARD_TELEMETRY_DIR" 2 ;;
+  esac
   [ $# -eq 0 ] || shift
   case "$cmd" in
     dir) _telemetry_cmd_dir "$@" ;;

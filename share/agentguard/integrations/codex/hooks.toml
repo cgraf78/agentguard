@@ -34,7 +34,7 @@ command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"
 timeout = 10
 
 [[hooks.PreToolUse]]
-matcher = "mcp__"
+matcher = "^mcp__"
 [[hooks.PreToolUse.hooks]]
 type = "command"
 command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-pre-mcp"
@@ -55,7 +55,7 @@ command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"
 timeout = 120
 
 [[hooks.PostToolUse]]
-matcher = "mcp__"
+matcher = "^mcp__"
 [[hooks.PostToolUse.hooks]]
 type = "command"
 command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-post-mcp"
@@ -111,8 +111,9 @@ type = "command"
 command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
 timeout = 10
 
-# Codex flushes the transcript and runs SessionEnd during shutdown, so the
-# recorder keeps the same short budget as the SessionEnd guard above.
+# Codex runs SessionEnd during shutdown and caps SessionEnd and Interrupt
+# hooks at 3 s (with a warning for anything longer), so both recorders use
+# that budget.
 [[hooks.SessionEnd]]
 [[hooks.SessionEnd.hooks]]
 type = "command"
@@ -159,4 +160,4 @@ timeout = 10
 [[hooks.Interrupt.hooks]]
 type = "command"
 command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
-timeout = 10
+timeout = 3

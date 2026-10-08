@@ -45,12 +45,12 @@ expected = {
         "PreToolUse": [
             ("Bash|exec_command|functions[.]exec_command", "agent-hook-pre-bash", 600),
             ("Edit|Write|apply_patch|functions[.]apply_patch", "agent-hook-pre-edit", 10),
-            ("mcp__", "agent-hook-pre-mcp", 10),
+            ("^mcp__", "agent-hook-pre-mcp", 10),
         ],
         "PostToolUse": [
             ("Edit|Write|apply_patch|functions[.]apply_patch", "agent-hook-post-edit", 60),
             ("Bash|exec_command|functions[.]exec_command", "agent-hook-post-bash", 120),
-            ("mcp__", "agent-hook-post-mcp", 10),
+            ("^mcp__", "agent-hook-post-mcp", 10),
         ],
         "Stop": [(None, "agent-hook-stop", None)],
         "SessionEnd": [(None, "agent-hook-session-end", 3)],
@@ -172,11 +172,11 @@ for runtime, events in expected.items():
         else:
             matcher = None
         # Gemini hook timeouts are milliseconds; every other runtime uses
-        # seconds. Both budgets are ten seconds, except that Codex runs
-        # SessionEnd during shutdown and keeps its guard's 3 s budget.
+        # seconds. Both budgets are ten seconds, except that Codex caps
+        # SessionEnd and Interrupt hooks at 3 s.
         if runtime == "gemini":
             timeout = 10000
-        elif runtime == "codex" and event == "SessionEnd":
+        elif runtime == "codex" and event in ("SessionEnd", "Interrupt"):
             timeout = 3
         else:
             timeout = 10
@@ -233,46 +233,55 @@ for runtime, path in paths.items():
             if not (root / "bin" / executable).is_file():
                 raise AssertionError(f"{runtime} {event} references missing {executable}")
             actual_groups.append((group.get("matcher"), executable, command.get("timeout")))
+            # Muse admits only asynchronous (observation-only) Interrupt
+            # handlers and silently skips synchronous ones.
+            if runtime == "muse" and event == "Interrupt" and command.get("async") is not True:
+                raise AssertionError("muse Interrupt handlers must declare async: true")
         if actual_groups != expected_groups:
             raise AssertionError(
                 f"{runtime} {event} differs: expected {expected_groups!r}, got {actual_groups!r}"
             )
 
 # Matchers must select the tools they guard under each runtime's own grammar,
-# not just compare equal to a literal: Claude and Muse treat a matcher made only
-# of letters, digits, `_`, and `|` as exact tool names, so a bare `mcp__` prefix
-# silently matched nothing there. Codex, Gemini, and Grok matchers are
-# unanchored regexes.
+# not just compare equal to a literal: Claude, Codex, and Muse treat a matcher
+# made only of letters, digits, `_`, and `|` as exact tool names (Claude also
+# accepts `,`, `-`, and spaces as exact-list characters on tool events), so a
+# bare `mcp__` prefix silently matched nothing there. Gemini and Grok
+# matchers are unanchored regexes.
 import re
 
-exact_grammar = {"claude", "muse"}
-mcp_tool_names = {
-    "claude": "mcp__github__create_issue",
-    "codex": "mcp__github__create_issue",
-    "muse": "mcp__github__create_issue",
-    "gemini": "mcp_github_create_issue",
-    "grok": "github__create_issue",
+exact_grammar = {
+    "claude": r"[A-Za-z0-9_|, -]+",
+    "codex": r"[A-Za-z0-9_|]+",
+    "muse": r"[A-Za-z0-9_|]+",
+}
+# Representative tool names each guard family must select, per runtime.
+guarded_tools = {
+    "claude": {"-mcp": "mcp__github__create_issue", "-bash": "Bash", "-edit": "Edit"},
+    "codex": {"-mcp": "mcp__github__create_issue", "-bash": "exec_command", "-edit": "apply_patch"},
+    "muse": {"-mcp": "mcp__github__create_issue", "-bash": "Bash", "-edit": "Write"},
+    "gemini": {"-mcp": "mcp_github_create_issue", "-bash": "run_shell_command", "-edit": "write_file"},
+    "grok": {"-mcp": "github__create_issue", "-bash": "run_terminal_command", "-edit": "search_replace"},
 }
 
 
 def selects(runtime, matcher, tool):
     if matcher in (None, "", "*"):
         return True
-    if runtime in exact_grammar and re.fullmatch(r"[A-Za-z0-9_|]+", matcher):
-        return tool in matcher.split("|")
+    exact = exact_grammar.get(runtime)
+    if exact and re.fullmatch(exact, matcher):
+        return tool in re.split(r"[|,]", matcher)
     return re.search(matcher, tool) is not None
 
 
 for runtime, events in expected.items():
     for event, groups in events.items():
         for matcher, executable, _ in groups:
-            if executable.endswith("-mcp") and not selects(
-                runtime, matcher, mcp_tool_names[runtime]
-            ):
-                raise AssertionError(
-                    f"{runtime} {event} matcher {matcher!r} does not select "
-                    f"{mcp_tool_names[runtime]!r}"
-                )
+            for suffix, tool in guarded_tools[runtime].items():
+                if executable.endswith(suffix) and not selects(runtime, matcher, tool):
+                    raise AssertionError(
+                        f"{runtime} {event} matcher {matcher!r} does not select {tool!r}"
+                    )
 PY
 asset_status=$?
 

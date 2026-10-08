@@ -51,7 +51,12 @@ _agentguard_telemetry_root() {
       return 0
       ;;
   esac
-  [ -n "${HOME:-}" ] || return 1
+  # Same reason as the override: a relative HOME would scatter records (and
+  # the secrets they hold) into whatever directory a hook runs in.
+  case "${HOME:-}" in
+    /*) ;;
+    *) return 1 ;;
+  esac
   printf '%s/.local/state/agentguard/telemetry\n' "$HOME"
 }
 

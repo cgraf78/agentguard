@@ -45,6 +45,11 @@ only the guarded ones (see `docs/telemetry.md`). It never blocks or injects
 context. The OpenCode adapter has no declarative fragment; it spawns the
 recorder itself for every tool call and lifecycle event.
 
+Codex runs a hook only after its trust hash is approved, and silently skips
+untrusted ones. Any new or changed Codex handler, including a changed
+matcher, needs approval once before it guards or records anything; consumers
+that manage Codex trust must recognise every event label in the fragment.
+
 ## Consumption
 
 When AgentGuard is managed by Shdeps, resolve assets through its public API

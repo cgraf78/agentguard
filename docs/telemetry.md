@@ -35,16 +35,21 @@ one timeline and can be matched to the runtime's own transcript:
 | Runtime | Session key | Transcript |
 | --- | --- | --- |
 | Claude Code | Session UUID | `~/.claude/projects/<project>/<session-id>.jsonl`; also `payload.transcript_path` |
-| Codex | Thread id (`session_id` in the payload) | `payload.transcript_path` (the rollout file) |
+| Codex | `session_id` from the payload (the root thread's id; subagent events stay under it) | `payload.transcript_path` (the rollout file) |
 | Gemini CLI | `session_id` from the payload (`GEMINI_SESSION_ID`) | `payload.transcript_path` |
-| Grok | `GROK_SESSION_ID`; subagent events stay under the parent session | the runtime's session store |
-| Muse | `MUSE_SESSION_ID` (the top-level chat id) | the runtime's session store |
+| Grok | `GROK_SESSION_ID`, which Grok exports to hooks; subagent events stay under the parent session | the runtime's session store |
+| Muse | `MUSE_SESSION_ID` (the top-level chat id), else the payload's `session_id` | the runtime's session store |
 | OpenCode | The plugin's `sessionID` | the runtime's session store |
 
 AgentGuard's guard state is keyed per live process instead (Gemini by its CLI
 pid, Grok subagents by a per-child key), which is right for state wiped at
 logout but would merge or split sessions over a 90-day retention window.
-Where the two differ, each record carries the guard key as `state_key`.
+Where the two differ, each record carries the guard key as `state_key`. A
+record only falls back to the guard key when the runtime supplies no id at
+all (for example a Gemini hook that received no payload). Session ids are
+untrusted input, so characters outside `[A-Za-z0-9._:-]` (and a leading dot)
+become `_` in directory names, which are capped at 128 characters; the
+record's `session_id` field keeps the original.
 
 [xdg]: https://specifications.freedesktop.org/basedir-spec/latest/
 
@@ -60,11 +65,14 @@ agentguard-telemetry show <key> --json | jq # raw records (JSONL)
 agentguard-telemetry show all --json        # every session, for cross-session audits
 ```
 
-(*) `current` resolves the agent session the same way AgentGuard's tool-shell
-helpers do: the runtime ids exported to the tool shell (`AGENTGUARD_SESSION_ID`,
-Claude, Codex, Grok, Muse, or `GEMINI_SESSION_ID`), then the nearest agent
-process for runtimes that export none. It matches either a session key or a
-record's `state_key`, so it works from every runtime's tool shell.
+(*) `current` collects the session ids visible to the calling shell, the same
+way AgentGuard's tool-shell helpers do (`GEMINI_SESSION_ID` where present,
+then `AGENTGUARD_SESSION_ID`, Muse, Codex, Grok, and Claude ids, then the
+nearest agent process for runtimes that export none). It picks the most
+recently active session whose key, or whose newest record's `state_key`,
+matches any of them. Recency is what keeps a stale directory from a recycled
+pid from winning, and what makes a nested agent (Gemini run from Claude)
+resolve to itself: its hook recorded the very tool call running the command.
 
 Common audits with `jq` (each record file is one line, so `show --json`
 prints valid JSONL). The top-level record fields (`event`, `tool_name`,
@@ -77,7 +85,7 @@ their values and the `payload` stay native to each runtime:
 | Codex | `PreToolUse` / `PostToolUse` | snake_case | `Bash` | `apply_patch` (patch in `tool_input.command`) |
 | Gemini CLI | `BeforeTool` / `AfterTool` | snake_case | `run_shell_command` | `replace`, `write_file` |
 | Grok | `pre_tool_use` / `post_tool_use` | camelCase (`toolInput`) | `Bash`, `run_terminal_command` | `Edit`, `Write`, `search_replace` |
-| OpenCode | `PreToolUse` / `PostToolUse` | snake_case (adapter envelope) | `Bash` | `Edit`, `Write`, `MultiEdit` |
+| OpenCode | `PreToolUse` / `PostToolUse` | snake_case (adapter envelope) | `Bash` | `Edit`, `Write`, `MultiEdit` (tools no guard inspects keep OpenCode's native names and arguments) |
 
 The first two recipes read guard decision records, which carry the command
 and edit files AgentGuard already parsed, so they work the same on every
@@ -88,11 +96,11 @@ s=<key>   # or: latest, current, a unique prefix
 
 # Every shell command the agent ran, in order (any runtime)
 agentguard-telemetry show "$s" --json |
-  jq -r 'select(.kind=="hook" and .hook=="agent-hook-pre-bash") | .command'
+  jq -r 'select(.kind=="hook" and .hook=="agent-hook-pre-bash") | .command // empty'
 
 # Every file the agent wrote or edited (any runtime)
 agentguard-telemetry show "$s" --json |
-  jq -r 'select(.kind=="hook" and .hook=="agent-hook-pre-edit") | .edit_files[]' |
+  jq -r 'select(.kind=="hook" and .hook=="agent-hook-pre-edit") | .edit_files[]?' |
   sort -u
 
 # Every tool call, including tools no guard inspects (Claude names)
@@ -148,10 +156,10 @@ normal finish path.
 | `agent` | all | Runtime identity (`AGENTGUARD_NAME` or detection). |
 | `session_key` | all | The durable session key; the directory name. |
 | `state_key` | all | AgentGuard's guard-state key, only when it differs from `session_key` (Gemini, Grok subagents). |
-| `session_id` | all | The payload's session id when present. |
+| `session_id` | all | The payload's own session id (a string) when it has one; never a launcher fallback. |
 | `event` | all | The payload's native event name (`PreToolUse`, `BeforeTool`, ...); for a hook that received no payload, AgentGuard's canonical name for that hook. |
 | `hook` | all | Executable that wrote the record. |
-| `tool_name`, `tool_use_id` | all | From the payload when present (`tool_use_id` also reads `toolUseId`, `toolCallId`, and `call_id`). |
+| `tool_name`, `tool_use_id` | all | From the payload when present (`tool_use_id` also reads `toolUseId`, `tool_call_id`, `toolCallId`, `call_id`, and `callId`). |
 | `cwd` | all | Payload `cwd`, else the hook's working directory. |
 | `host`, `pid`, `ppid` | all | Where the hook process ran. |
 | `exit_status` | all | The status the host received. |
@@ -174,7 +182,7 @@ version; a renamed or removed field will.
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `AGENTGUARD_TELEMETRY` | `1` | `0`, `false`, `no`, or `off` disables recording. |
-| `AGENTGUARD_TELEMETRY_DIR` | XDG state path above | Absolute root override; relative values are ignored. |
+| `AGENTGUARD_TELEMETRY_DIR` | XDG state path above | Absolute root override. Hooks ignore a relative value; the CLI rejects it (exit 2) rather than reading or pruning the default root. |
 | `AGENTGUARD_TELEMETRY_RETENTION_DAYS` | `90` | Sessions idle longer are deleted; `0` keeps everything. |
 | `AGENTGUARD_TELEMETRY_MAX_PAYLOAD_CHARS` | `8388608` | Larger payloads keep a prefix and record their length. |
 
@@ -189,9 +197,16 @@ not its start.
 ## Privacy
 
 Records contain everything the agent saw and did, including file contents and
-command output that may hold secrets. The tree is created owner-only (`0700`
-directories, `0600` files) and never leaves the machine. Treat it like shell
-history: do not commit, sync, or share it without review.
+command output that may hold secrets. Directories AgentGuard creates are
+`0700` and record files `0600`; records are never written through a
+symlinked session directory or into one owned by another user, and temp
+files are opened exclusively. Records never leave the machine. Treat the tree
+like shell history: do not commit, sync, or share it without review.
+
+The trail records what an agent did; it is not tamper-proof against that
+agent. Records are ordinary files owned by the user the agent runs as, so an
+agent that can run shell commands can delete them, and one that launches a
+nested agent can disable recording for it.
 
 ## Coverage
 
@@ -202,18 +217,29 @@ history: do not commit, sync, or share it without review.
 | Gemini CLI | All tools; agent turns (prompt and response), compression, notifications, session start/end | yes |
 | Grok | All tools; prompts, tool failures, subagents, notifications, stop, session start/end | yes |
 | Muse | All tools; prompts, permission requests, tool failures, subagents, compaction, notifications, interrupts, stop, stop failures, session start/end | yes |
-| OpenCode | All tools; prompts, permission requests, tool failures, compaction, turn failures (`StopFailure`), stop, session start/end | yes |
+| OpenCode | All tools; prompts, permission requests, tool failures, compaction, interrupts, turn failures (`StopFailure`), stop, session start/end | yes |
 
-Each runtime records every audit-relevant event it exposes, with two
-deliberate exclusions everywhere: per-model-call events (Gemini
-`BeforeModel`/`AfterModel`/`BeforeToolSelection`, Muse
-`PreLLMCall`/`PostLLMCall`), which fire on every request or streamed chunk and
-carry the full conversation each time; and configuration or workspace events
-(Claude `ConfigChange`, `FileChanged`, worktree events, and similar) that do
-not describe what the agent did. Use the runtime's own transcript for model
-traffic. Grok's event list could not be verified beyond the events above, so
-any further Grok events are not wired yet. Wiring one means adding it to the
-runtime's fragment after confirming the runtime accepts it.
+Every runtime records the same core set wherever it exposes the event:
+prompts, every tool call before and after (with failures), permission
+requests, subagents, compaction, notifications, stop and stop failures,
+interrupts, and session start/end. Events outside that set are not wired:
+
+- Per-model-call events, which fire on every request or streamed chunk and
+  carry the full conversation each time: Gemini `BeforeModel`, `AfterModel`,
+  and `BeforeToolSelection`; Muse `PreLLMCall` and `PostLLMCall`. Use the
+  runtime's own transcript for model traffic.
+- Events with no equivalent elsewhere, or that describe configuration rather
+  than agent actions: Claude `Setup`, `UserPromptExpansion`, `PostToolBatch`,
+  `MessageDisplay`, `Elicitation`, `ElicitationResult`, `TaskCreated`,
+  `TaskCompleted`, `TeammateIdle`, `InstructionsLoaded`, `ConfigChange`,
+  `CwdChanged`, `DirectoryAdded`, `FileChanged`, `WorktreeCreate`,
+  `WorktreeRemove`, `PreModelSwitch`, and `PostModelSwitch`; Muse
+  `PostToolBatch`, `ToolUseStart`, and `SessionFork`.
+- Grok events beyond those listed above: Grok's event list could not be
+  verified against a runtime, so nothing further is wired.
+
+Wiring one means adding it to the runtime's fragment after confirming the
+runtime accepts it.
 
 Codex only runs hooks whose trust hash has been approved, and an untrusted
 handler is skipped without an error: `sessions --agent codex` simply stays

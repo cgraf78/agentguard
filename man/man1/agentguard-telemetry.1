@@ -33,12 +33,12 @@ is the read side.
 .B dir
 Print the telemetry root that hooks write to.
 .TP
-.B sessions
+.BR sessions " (or " ls )
 List sessions with their last activity, record count, working directory,
 and first prompt, newest first.
 .B \-\-agent
 filters by runtime,
-.B \-n
+.BR \-n " or " \-\-limit
 limits the count (default 20, 0 for all), and
 .B \-\-json
 prints one JSON object per session.
@@ -68,17 +68,24 @@ is
 .B show
 only),
 .B current
-(the agent session running the command, from its runtime session
-variables), an exact
+(the most recently active session matching any session id visible to the
+calling shell: runtime session variables, then the nearest agent process;
+a session matches by its key or by the
+.B state_key
+of its newest record), an exact
 .IR AGENT / KEY
 or
 .IR KEY ,
-a unique key prefix, or a session directory path. For Claude Code the key
-is the session UUID that also names its transcript.
+a unique key prefix, or a session directory path. The key is the runtime's
+durable session id (for Claude Code, the session UUID that also names its
+transcript); where AgentGuard's guard-state key differs (Gemini, Grok
+subagents), records carry it as
+.BR state_key .
 .PP
 When
 .B AGENTGUARD_TELEMETRY_DIR
-is an absolute path, it is the only root searched or pruned. Otherwise
+is an absolute path, it is the only root searched or pruned; a relative
+value is a usage error. Otherwise
 readers merge the
 .B XDG_STATE_HOME
 root and

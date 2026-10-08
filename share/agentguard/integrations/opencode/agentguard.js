@@ -84,7 +84,13 @@ const V2_AUDIT_EVENTS = new Map([
     (data) => ["PostCompact", { trigger: data.reason, compact_summary: data.text }],
   ],
   ["session.execution.failed", (data) => ["StopFailure", { error: data.error }]],
+  // An interrupted turn did not fail. Codex and Muse expose this natively as
+  // Interrupt, and Claude reports no StopFailure for it, so keep the two apart.
+  ["session.execution.interrupted", (data) => ["Interrupt", { reason: data.reason }]],
 ]);
+// Either event ends its turn abnormally and takes the place of that turn's
+// Stop record, on V1 and V2 alike.
+const ABNORMAL_TURN_ENDS = new Set(["StopFailure", "Interrupt"]);
 const PERMISSION_FAILURE_PREFIXES = [
   "The user rejected permission to use this specific tool call.",
   "The user rejected permission to use this specific tool call with the following feedback:",
@@ -580,6 +586,36 @@ function spawnHook(command, hook, payload, directory, sessionID, runtimeName) {
   });
 }
 
+// Stop functions for recorders whose leader is still running. Their children
+// and watchdogs are unref'd so they never hold the host open; without this a
+// wedged recorder, with its process group, would outlive a host that exits
+// without unloading the plugin. The listener exists only while one is live.
+const liveRecorders = new Set();
+
+function stopLiveRecorders() {
+  // Exit handlers run synchronously and must never throw: each stop is a
+  // non-blocking SIGKILL that already swallows a lost race.
+  for (const terminate of liveRecorders) {
+    try {
+      terminate();
+    } catch {
+      // Keep stopping the rest.
+    }
+  }
+  liveRecorders.clear();
+}
+
+function trackRecorder(terminate) {
+  if (liveRecorders.size === 0) process.on("exit", stopLiveRecorders);
+  liveRecorders.add(terminate);
+}
+
+function untrackRecorder(terminate) {
+  if (liveRecorders.delete(terminate) && liveRecorders.size === 0) {
+    process.removeListener("exit", stopLiveRecorders);
+  }
+}
+
 // The recorder only observes, so none of its outcomes may reach OpenCode: it
 // bypasses invoke()'s fail-closed protocol, its output is discarded, and every
 // failure is silent. It still gets the guard hooks' sanitized environment and
@@ -624,7 +660,9 @@ function spawnRecorder(command, body, directory, sessionID, runtimeName) {
   }).then(() => {
     exited = true;
     clearTimeout(timer);
+    untrackRecorder(terminate);
   });
+  trackRecorder(terminate);
   // A wedged recorder gets the ordinary hook budget, then stops, so repeated
   // stalls cannot accumulate processes over a long session.
   timer = setTimeout(terminate, timeoutFor(RECORDER));
@@ -671,7 +709,7 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
         end: undefined,
         missing: new Set(),
         audited: undefined,
-        failedGeneration: -1,
+        abnormalGeneration: -1,
         touched: Date.now(),
       };
       sessions.set(sessionID, record);
@@ -890,8 +928,7 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
     const session = sessions.get(sessionID);
     if (!session?.start || session.ended) return;
     auditLifecycle(session, { ...basePayload(sessionID, directory, eventName), ...fields });
-    // StopFailure replaces Stop for the turn it ended, as in other runtimes.
-    if (eventName === "StopFailure") session.failedGeneration = session.generation;
+    if (ABNORMAL_TURN_ENDS.has(eventName)) session.abnormalGeneration = session.generation;
   }
 
   function queue(record, work) {
@@ -1051,7 +1088,12 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
   }
 
   function sessionIDFromEvent(event) {
-    return event.properties?.sessionID ?? event.properties?.info?.id;
+    // Older message.part.updated shapes carry the session only on the part.
+    return (
+      event.properties?.sessionID ??
+      event.properties?.info?.id ??
+      event.properties?.part?.sessionID
+    );
   }
 
   return {
@@ -1247,7 +1289,7 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
           if (!record.start || record.stoppedGeneration === record.generation) return;
           record.stoppedGeneration = record.generation;
           const payload = basePayload(sessionID, directory, "Stop");
-          if (record.failedGeneration !== record.generation) auditLifecycle(record, payload);
+          if (record.abnormalGeneration !== record.generation) auditLifecycle(record, payload);
           const result = await advisory(sessionID, "agent-hook-stop", payload);
           if (result.context) {
             record.pending.push(result.context);
@@ -1259,10 +1301,13 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
       } else if (event.type === "session.compacted") {
         observe(sessionID, "PostCompact");
       } else if (event.type === "session.error") {
-        // A provider, abort, or output-limit failure ended the turn. The
-        // shared vocabulary for that is StopFailure; the native error object
-        // says which kind it was.
-        observe(sessionID, "StopFailure", { error: event.properties.error });
+        // V1 reports a user abort through the same error event as a provider
+        // or output-limit failure. Only the error's typed name tells them
+        // apart, and only real failures are StopFailure.
+        const error = event.properties.error;
+        observe(sessionID, error?.name === "MessageAbortedError" ? "Interrupt" : "StopFailure", {
+          error,
+        });
       }
       return Promise.resolve();
     },

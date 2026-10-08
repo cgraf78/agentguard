@@ -119,6 +119,7 @@ cat >"$test_root/telemetry-fixture.mjs" <<'TELEMETRY_FIXTURE'
 
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
 
 const behaviorPath = path.join(
   process.env.AGENTGUARD_TEST_HOOK_BEHAVIOR_DIR,
@@ -127,6 +128,24 @@ const behaviorPath = path.join(
 const behavior = fs.existsSync(behaviorPath)
   ? JSON.parse(fs.readFileSync(behaviorPath, "utf8"))
   : {};
+if (behavior.grandchildDir) {
+  // A helper left in the recorder's process group, like its retention sweep.
+  // Publish the recorder's own PID only after the helper's, so a test that
+  // sees the recorder knows the helper exists too.
+  spawn(
+    process.execPath,
+    [
+      "-e",
+      'require("node:fs").writeFileSync(process.argv[1] + "/" + process.pid, String(process.pid)); setTimeout(() => {}, 60000);',
+      behavior.grandchildDir,
+    ],
+    { stdio: "ignore" },
+  );
+  const deadline = Date.now() + 5_000;
+  while (fs.readdirSync(behavior.grandchildDir).length === 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
 if (behavior.pidDir) {
   fs.writeFileSync(path.join(behavior.pidDir, String(process.pid)), String(process.pid));
 }
@@ -188,7 +207,7 @@ done
 
 cat >"$test_root/test.mjs" <<'TEST_SCRIPT'
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -2400,7 +2419,7 @@ await check("a turn failure replaces that turn's Stop record", async () => {
     const message = (text) =>
       hooks["chat.message"]({ sessionID, agent: "build" }, { message: {}, parts: [{ type: "text", text }] });
     await message("fails");
-    const error = { name: "MessageAbortedError", data: {} };
+    const error = { name: "APIError", data: { message: "overloaded" } };
     void hooks.event({ event: { type: "session.error", properties: { sessionID, error } } });
     void hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
     await message("succeeds");
@@ -2426,6 +2445,161 @@ await check("a turn failure replaces that turn's Stop record", async () => {
   } finally {
     await hooks?.dispose();
     removeRecorder();
+  }
+});
+
+await check("a V1 user abort records Interrupt in place of Stop", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin();
+    const sessionID = "audit-v1-abort";
+    const message = (text) =>
+      hooks["chat.message"]({ sessionID, agent: "build" }, { message: {}, parts: [{ type: "text", text }] });
+    await message("aborted");
+    const error = { name: "MessageAbortedError", data: { message: "aborted" } };
+    void hooks.event({ event: { type: "session.error", properties: { sessionID, error } } });
+    void hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+    // Lifecycle records are chained: once this later prompt lands, any Stop
+    // the idle event wrongly recorded has landed too.
+    await message("sentinel");
+    await waitForAudit(sessionID, "UserPromptSubmit", (payload) => payload.prompt === "sentinel");
+    const ends = audits(sessionID).filter((record) =>
+      ["Stop", "StopFailure", "Interrupt"].includes(record.payload.hook_event_name),
+    );
+    assert.deepEqual(ends.map((record) => record.payload.hook_event_name), ["Interrupt"]);
+    assert.deepEqual(ends[0].payload.error, error);
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("a V2 interrupted execution records Interrupt in place of Stop", async () => {
+  clearLog();
+  installRecorder();
+  let publish;
+  const messages = [];
+  // SessionEnd is the ordering sentinel and lands during the stream's own
+  // session dispose; scale its drain so a loaded runner cannot outlast it.
+  const normalTimeoutScale = process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE;
+  process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = "3";
+  let host;
+  try {
+    host = await v2({ event: { subscribe: ({ signal }) => ({ async *[Symbol.asyncIterator]() {
+      while (!signal.aborted) {
+        if (!messages.length) await new Promise((resolve) => { publish = resolve; signal.addEventListener("abort", resolve, { once: true }); });
+        if (messages.length) yield messages.shift();
+      }
+    } }) } });
+    const sessionID = "audit-v2-interrupt";
+    await host.registered.get("session.prompt")({ sessionID, prompt: { text: "task" } });
+    messages.push(
+      { type: "session.execution.interrupted", data: { sessionID, reason: "user" } },
+      { type: "session.idle", data: { sessionID } },
+      { type: "session.deleted", data: { sessionID } },
+    );
+    publish();
+
+    // SessionEnd is chained behind any Stop the idle event recorded.
+    await waitForAudit(sessionID, "SessionEnd");
+    const ends = audits(sessionID).filter((record) =>
+      ["Stop", "StopFailure", "Interrupt"].includes(record.payload.hook_event_name),
+    );
+    assert.deepEqual(ends.map((record) => record.payload.hook_event_name), ["Interrupt"]);
+    assert.equal(ends[0].payload.reason, "user");
+  } finally {
+    await host?.dispose();
+    process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = normalTimeoutScale;
+    removeRecorder();
+  }
+});
+
+await check("records failures from part events that carry the session only on the part", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin();
+    const call = { tool: "read", sessionID: "audit-legacy-part", callID: "audit-legacy-part-call" };
+    const input = { filePath: "missing.txt" };
+    await hooks["tool.execute.before"](call, { args: input });
+    const event = toolErrorEvent({ ...call, input, error: "File not found" });
+    delete event.properties.sessionID;
+    void hooks.event({ event });
+    const failure = await waitForAudit("audit-legacy-part", "PostToolUseFailure");
+    assert.equal(failure.payload.tool_use_id, "audit-legacy-part-call");
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("a host exiting without unload stops a hung recorder and its helpers", async () => {
+  clearLog();
+  const pidDir = fs.mkdtempSync(path.join(root, "exit-recorder-"));
+  const grandchildDir = fs.mkdtempSync(path.join(root, "exit-helper-"));
+  installRecorder({ mode: "hang", pidDir, grandchildDir });
+  const hostScript = path.join(root, "exiting-host.mjs");
+  // The host records one tool call, waits until the recorder and its helper
+  // exist, then simply returns: nothing awaits the unref'd recorder, so the
+  // event loop drains and Node exits without ever calling dispose.
+  fs.writeFileSync(
+    hostScript,
+    `import fs from "node:fs";
+import { pathToFileURL } from "node:url";
+const [pluginPath, directory, pidDir, grandchildDir] = process.argv.slice(2);
+const { AgentGuardPlugin } = await import(pathToFileURL(pluginPath).href);
+const hooks = await AgentGuardPlugin({ directory });
+await hooks["tool.execute.before"](
+  { tool: "read", sessionID: "audit-exit", callID: "audit-exit-call" },
+  { args: { filePath: "a.txt" } },
+);
+const deadline = Date.now() + 5_000;
+while (fs.readdirSync(pidDir).length === 0 || fs.readdirSync(grandchildDir).length === 0) {
+  if (Date.now() > deadline) throw new Error("recorder never started");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+`,
+  );
+  let pids = [];
+  try {
+    const host = spawn(
+      process.execPath,
+      [hostScript, pluginPath, sourceDirectory, pidDir, grandchildDir],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    let stderr = "";
+    host.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const code = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        host.kill("SIGKILL");
+        reject(new Error(`host did not exit; stderr: ${stderr}`));
+      }, 10_000);
+      host.once("exit", (status) => {
+        clearTimeout(timer);
+        resolve(status);
+      });
+    });
+    pids = [...pidsIn(pidDir), ...pidsIn(grandchildDir)];
+    assert.equal(code, 0, stderr);
+    assert.equal(pids.length, 2);
+    for (const pid of pids) await waitForProcessExit(pid, "recorder outliving its host");
+  } finally {
+    for (const pid of pids) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // The host's exit handler already stopped it.
+      }
+    }
+    removeRecorder();
+    fs.rmSync(hostScript, { force: true });
+    fs.rmSync(pidDir, { recursive: true, force: true });
+    fs.rmSync(grandchildDir, { recursive: true, force: true });
   }
 });
 

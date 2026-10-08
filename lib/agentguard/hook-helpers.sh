@@ -18,6 +18,9 @@ _HOOK_CTX=''
 _HOOK_HM_CONFIG_PATH=''
 _HOOK_INPUT_STATE_REFRESHED=''
 _HOOK_INPUT_SESSION=''
+# Set once this process has tried to read stdin, so the telemetry trap does not
+# wait on an empty or held-open pipe a second time.
+_HOOK_INPUT_ATTEMPTED=''
 _HOOK_PROMPT_SUBMITTED=''
 # Telemetry accumulators: block/warn/remind messages joined by ASCII record
 # separators so multi-line messages survive intact into the audit record.
@@ -206,8 +209,11 @@ _hook_agent_ancestor_key() {
 # user launches nested Codex, so once Codex JSON has been read its session_id is
 # the authoritative key. If Codex does not expose one, managed hooks fall back
 # to the long-lived Codex parent process instead of each short-lived hook
-# process. Grok injects GROK_SESSION_ID on hook processes; Gemini lacks a
-# durable id, so its parent CLI process remains the key. Other hook runners
+# process. Grok injects GROK_SESSION_ID on hook processes. Gemini exports its
+# durable GEMINI_SESSION_ID to hook processes only, which tool shells cannot
+# rely on, so guard state keys on the parent CLI process both sides can
+# resolve (durable telemetry records use the session id; see
+# _hook_telemetry_key). Other hook runners
 # may only provide a JSON session_id / sessionId on stdin; parsers refresh
 # after reading it. Empty or session-less JSON must still fall through to the
 # Codex process key; otherwise reading a closed stdin would downgrade an
@@ -232,7 +238,9 @@ _hook_refresh_state_dir() {
       IFS= read -r input_subagent || true
       IFS= read -r input_prompt || true
     } < <(printf '%s' "$_HOOK_INPUT" | jq -r '
-      (.session_id // .sessionId // ""),
+      # Only a string is an id; an object or number would otherwise be
+      # printed as JSON text and become a key.
+      ((.session_id // .sessionId) | if type == "string" then . else "" end),
       (.subagent_type // .subagentType // ""),
       (.prompt_id // .promptId // "")
     ' 2>/dev/null)
@@ -700,6 +708,7 @@ _hook_read_input() {
     return 0
   fi
   [ ! -t 0 ] || return 1
+  _HOOK_INPUT_ATTEMPTED=1
   local input stdin_timeout stdin_drain_timeout chunk read_rc
   stdin_timeout="${AGENTGUARD_HOOK_STDIN_TIMEOUT:-0.05}"
   stdin_drain_timeout="${AGENTGUARD_HOOK_STDIN_DRAIN_TIMEOUT:-1}"
@@ -895,14 +904,29 @@ _hook_parse_edit_files() {
 # extracted.
 _hook_parse_mcp() {
   _hook_read_input || exit 0
-  local tool_name remainder
-  tool_name=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_name // .toolName // empty')
+  local tool_name remainder context_server='' context_tool=''
+  # One jq for the name and Gemini's structured MCP identity, keeping the
+  # hook's parse budget.
+  {
+    IFS= read -r tool_name || true
+    IFS= read -r context_server || true
+    IFS= read -r context_tool || true
+  } < <(printf '%s' "$_HOOK_INPUT" | jq -r '
+    (.tool_name // .toolName // ""),
+    (.mcp_context.server_name // "" | strings),
+    (.mcp_context.tool_name // "" | strings)
+  ' 2>/dev/null)
   [ -z "$tool_name" ] && exit 0
-  if [ "${AGENTGUARD_NAME:-}" = "gemini" ] && [[ "$tool_name" == mcp_[!_]*_?* ]]; then
-    # Gemini CLI qualifies MCP tools as mcp_<server>_<tool>. Its server
-    # segment never contains `_` (Gemini's own parser splits on the first
-    # one), so split there too. Gated on the runtime because elsewhere that
-    # spelling is just a tool name.
+  if [ -n "$context_server" ] && [ -n "$context_tool" ]; then
+    # Gemini CLI sends the real server and tool names alongside its
+    # mcp_<server>_<tool> spelling. Prefer them: a server name may itself
+    # contain `_`, which no split of the qualified name can recover.
+    _HOOK_MCP_SERVER="$context_server"
+    _HOOK_MCP_TOOL_NAME="$context_tool"
+  elif [[ "$tool_name" == mcp_[!_]*_?* ]] && [ "$(_hook_agent_name)" = "gemini" ]; then
+    # Older Gemini payloads without mcp_context: split on the first `_`, as
+    # Gemini's own parseMcpToolName does. Gated on the detected runtime
+    # because elsewhere that spelling is just a tool name.
     remainder="${tool_name#mcp_}"
     _HOOK_MCP_SERVER="${remainder%%_*}"
     _HOOK_MCP_TOOL_NAME="${remainder#*_}"
@@ -927,7 +951,9 @@ _hook_parse_mcp() {
   [ -z "$_HOOK_MCP_TOOL_NAME" ] && exit 0
 
   _HOOK_MCP_TOOL="$tool_name"
-  _HOOK_MCP_FAIL_FILE="$_HOOK_STATE_DIR/mcp-failures-$_HOOK_MCP_SERVER"
+  # The server name names a state file. Gemini documents it as arbitrary
+  # user-controlled text, so a `/` must not reach the path.
+  _HOOK_MCP_FAIL_FILE="$_HOOK_STATE_DIR/mcp-failures-${_HOOK_MCP_SERVER//\//_}"
 }
 
 # Uses the command classifier to change into a leading `cd` target. Used by
@@ -1431,12 +1457,25 @@ _hook_hm_stop() {
 
 # Append message $2 to the accumulator named by $1 (record-separator joined).
 _hook_telemetry_note() {
-  local current="${!1}"
+  local current="${!1}" message
+  _hook_telemetry_field message "$2"
   if [ -n "$current" ]; then
-    printf -v "$1" '%s\x1e%s' "$current" "$2"
+    printf -v "$1" '%s\x1e%s' "$current" "$message"
   else
-    printf -v "$1" '%s' "$2"
+    printf -v "$1" '%s' "$message"
   fi
+}
+
+# Store $2 into the variable named by $1 with the record's ASCII separators
+# (unit \x1f between fields, record \x1e between list items) replaced by their
+# visible Unicode symbols. Messages, commands, and file names can carry
+# agent-controlled bytes; a raw separator would shift every later field and
+# let the model forge or hide parts of the audit record.
+_hook_telemetry_field() {
+  local value="$2"
+  value="${value//$'\x1f'/␟}"
+  value="${value//$'\x1e'/␞}"
+  printf -v "$1" '%s' "$value"
 }
 
 # jq program that turns the unit-separated field stream written by
@@ -1462,7 +1501,7 @@ _HOOK_TELEMETRY_JQ='
       agent: $agent,
       session_key: $key,
       state_key: (if $state_key == $key then null else $state_key end),
-      session_id: ($p.session_id // $p.sessionId // (if $sid == "" then null else $sid end)),
+      session_id: (($p.session_id // $p.sessionId) | if type == "string" then . else null end),
       event: ($p.hook_event_name // $p.hookEventName // (if $event == "" then null else $event end)),
       hook: $hook,
       tool_name: ($p.tool_name // $p.toolName),
@@ -1487,30 +1526,54 @@ _HOOK_TELEMETRY_JQ='
   | if $kind == "event" then . + {payload: $payload} else . end
 '
 
+# Reduce the value of the variable named by $1, in place, to a portable path
+# component for the telemetry tree: anything outside [[:alnum:]._:-] becomes
+# `_`, a leading dot is replaced (dot-directories are invisible to listing
+# globs, and `.`/`..` would escape), and the result is capped well below
+# NAME_MAX. Session ids are untrusted input (payload JSON, runtime env), and
+# the read-side CLI parses tab-separated rows and prints keys to terminals, so
+# control characters must never reach a directory name. Real runtime ids
+# (UUIDs, `ses_...`, `gemini-<pid>`) already fit and pass through unchanged.
+_hook_telemetry_component() {
+  local value="${!1}"
+  value="${value//[![:alnum:]._:-]/_}"
+  case "$value" in
+    .*) value="_${value#.}" ;;
+  esac
+  value="${value:0:128}"
+  [ -n "$value" ] || return 1
+  printf -v "$1" '%s' "$value"
+}
+
 # Store the directory key for this hook's audit records into the variable
-# named by $1 (no subshell: this runs on every hook exit). Guard state
-# keys are tuned so a tool shell and its hooks agree inside one live process,
-# which is the wrong trade-off for records kept for months:
+# named by $1, for detected agent $2 (no subshell: this runs on every hook
+# exit). Guard state keys are tuned so a tool shell and its hooks agree inside
+# one live process, which is the wrong trade-off for records kept for months:
 #   - Gemini's state key is its CLI pid. Pids recycle within the retention
 #     window, and every session `/clear` starts in one process shares it, so
 #     unrelated sessions would merge. Gemini puts its real session id in every
 #     payload (and in GEMINI_SESSION_ID), so records use that.
+#   - Muse's launcher falls back to its pid when MUSE_SESSION_ID is unset, so
+#     the payload's session id is preferred there too.
 #   - Grok suffixes subagent state keys so concurrent children keep separate
 #     circuit breakers. Claude and Muse subagent events carry the parent
 #     session id, so Grok records file under the parent too; the child key
 #     stays visible as the record's `state_key`.
-# Every other runtime's state key already is its durable session id.
+# The branch follows the detected agent rather than AGENTGUARD_NAME so a
+# hand-wired runtime (no identity prefix) is keyed the same way. Every other
+# runtime's state key already is its durable session id.
 _hook_telemetry_key() {
   local candidate=''
-  case "${AGENTGUARD_NAME:-}" in
+  case "${2:-}" in
     gemini) candidate="${_HOOK_INPUT_SESSION:-${GEMINI_SESSION_ID:-}}" ;;
+    muse) candidate="${MUSE_SESSION_ID:-$_HOOK_INPUT_SESSION}" ;;
     grok)
       candidate="${GROK_SESSION_ID:-${AGENTGUARD_SESSION_ID:-}}"
       [ -n "$candidate" ] || candidate="${_HOOK_SESSION_KEY%%:*}"
       ;;
   esac
-  _hook_session_key_safe "$candidate" || candidate="${_HOOK_SESSION_KEY:-}"
-  _hook_session_key_safe "$candidate" || return 1
+  [ -n "$candidate" ] || candidate="${_HOOK_SESSION_KEY:-}"
+  _hook_telemetry_component candidate || return 1
   printf -v "$1" '%s' "$candidate"
 }
 
@@ -1531,7 +1594,7 @@ _hook_telemetry_key() {
 # trap leaves the exit status untouched (it never calls `exit`).
 _hook_telemetry_exit() {
   local status=$? hook kind root agent key dir end_us elapsed duration
-  local stem tmp event='' raw='' truncated='' max
+  local stem tmp event='' raw='' truncated='' max ctx cmd files server
   _agentguard_telemetry_enabled || return 0
   root=$(_agentguard_telemetry_root 2>/dev/null) || return 0
   # Lifecycle hooks may never read stdin (their Hive Memory path skips the
@@ -1539,7 +1602,9 @@ _hook_telemetry_exit() {
   # payload, exactly as agent-hook-telemetry's key does; otherwise runtimes
   # whose session id lives only in JSON would file this hook's record under
   # a fallback pid directory. The read is idempotent and bounded.
-  _hook_read_input >/dev/null 2>&1 || true
+  if [ -n "${_HOOK_INPUT+x}" ] || [ -z "$_HOOK_INPUT_ATTEMPTED" ]; then
+    _hook_read_input >/dev/null 2>&1 || true
+  fi
   hook="${_HOOK_SELF:-$0}"
   hook="${hook##*/}"
   if [ "$hook" = "agent-hook-telemetry" ]; then
@@ -1562,8 +1627,8 @@ _hook_telemetry_exit() {
     esac
   fi
   agent=$(_hook_agent_name 2>/dev/null) || agent=agent
-  _hook_session_key_safe "$agent" || agent=agent
-  _hook_telemetry_key key || return 0
+  _hook_telemetry_component agent || agent=agent
+  _hook_telemetry_key key "$agent" || return 0
   dir="$root/sessions/$agent/$key"
 
   _agentguard_telemetry_now_us end_us
@@ -1574,8 +1639,12 @@ _hook_telemetry_exit() {
   raw="${_HOOK_INPUT:-}"
   max="${AGENTGUARD_TELEMETRY_MAX_PAYLOAD_CHARS:-8388608}"
   case "$max" in
-    '' | *[!0-9]*) max=8388608 ;;
+    # More than 15 digits would overflow `[ -gt ]` on some shells.
+    '' | *[!0-9]* | ????????????????*) max=8388608 ;;
   esac
+  # Force base 10: a leading zero would otherwise be octal to `${raw:0:max}`
+  # (and `08` an error) while `[ -gt ]` reads it as decimal.
+  max=$((10#$max))
   if [ "${#raw}" -gt "$max" ]; then
     # Keep a bounded prefix instead of nothing: the record still shows what
     # the call was, and the original length documents the truncation. Hook
@@ -1586,41 +1655,56 @@ _hook_telemetry_exit() {
     raw="${raw:0:max}"
   fi
 
-  # Exiting anyway, so the restrictive umask cannot leak into caller state.
-  # It keeps records (which can hold secrets from tool output) owner-only.
+  # Exiting anyway, so neither the restrictive umask nor noclobber can leak
+  # into caller state. The umask keeps records (which can hold secrets from
+  # tool output) owner-only. A root on a shared path (an override under /tmp,
+  # a shared XDG_STATE_HOME) could hold a session directory or temp file that
+  # another user pre-planted, so records are only written into a real
+  # directory this user owns, and noclobber opens the temp file O_EXCL rather
+  # than following a symlink planted at its name.
   umask 077
+  set -C
   [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || return 0
+  [ ! -L "$dir" ] && [ -O "$dir" ] || return 0
   stem="$end_us-$$-${hook#agent-hook-}"
   tmp="$dir/.$stem.tmp"
-  printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' \
-    "$_HOOK_TELEMETRY_BLOCKS" \
-    "$_HOOK_TELEMETRY_WARNINGS" \
-    "$_HOOK_TELEMETRY_REMINDERS" \
-    "$_HOOK_CTX" \
-    "${AGENTGUARD_CMD_TRIMMED:-}" \
-    "${AGENTGUARD_EDIT_FILES:-}" \
-    "${_HOOK_MCP_SERVER:-}" \
-    "$raw" |
-    jq -Rsc \
-      --arg schema "$_AGENTGUARD_TELEMETRY_SCHEMA" \
-      --arg kind "$kind" \
-      --arg sec "${end_us:0:${#end_us}-6}" \
-      --arg frac "${end_us: -6}" \
-      --arg agent "$agent" \
-      --arg key "$key" \
-      --arg state_key "$_HOOK_SESSION_KEY" \
-      --arg sid "${AGENTGUARD_SESSION_ID:-}" \
-      --arg event "$event" \
-      --arg hook "$hook" \
-      --arg pwd "$PWD" \
-      --arg host "${HOSTNAME:-}" \
-      --arg pid "$$" \
-      --arg ppid "$PPID" \
-      --arg status "$status" \
-      --arg duration "$duration" \
-      --arg truncated "$truncated" \
-      "$_HOOK_TELEMETRY_JQ" >"$tmp" 2>/dev/null &&
-    mv -f "$tmp" "$dir/$stem.json" 2>/dev/null
+  _hook_telemetry_field ctx "$_HOOK_CTX"
+  _hook_telemetry_field cmd "${AGENTGUARD_CMD_TRIMMED:-}"
+  _hook_telemetry_field files "${AGENTGUARD_EDIT_FILES:-}"
+  _hook_telemetry_field server "${_HOOK_MCP_SERVER:-}"
+  # The group's stderr redirect also covers a failed `>"$tmp"` open (an
+  # unwritable or read-only tree), whose message would otherwise reach the
+  # host beside a block reason.
+  {
+    printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' \
+      "$_HOOK_TELEMETRY_BLOCKS" \
+      "$_HOOK_TELEMETRY_WARNINGS" \
+      "$_HOOK_TELEMETRY_REMINDERS" \
+      "$ctx" \
+      "$cmd" \
+      "$files" \
+      "$server" \
+      "$raw" |
+      jq -Rsc \
+        --arg schema "$_AGENTGUARD_TELEMETRY_SCHEMA" \
+        --arg kind "$kind" \
+        --arg sec "${end_us:0:${#end_us}-6}" \
+        --arg frac "${end_us: -6}" \
+        --arg agent "$agent" \
+        --arg key "$key" \
+        --arg state_key "$_HOOK_SESSION_KEY" \
+        --arg event "$event" \
+        --arg hook "$hook" \
+        --arg pwd "${PWD:-}" \
+        --arg host "${HOSTNAME:-}" \
+        --arg pid "$$" \
+        --arg ppid "$PPID" \
+        --arg status "$status" \
+        --arg duration "$duration" \
+        --arg truncated "$truncated" \
+        "$_HOOK_TELEMETRY_JQ" >"$tmp" &&
+      mv -f "$tmp" "$dir/$stem.json"
+  } 2>/dev/null
   [ -e "$tmp" ] && rm -f "$tmp" 2>/dev/null
   return 0
 }
@@ -1797,6 +1881,13 @@ _hook_finish() {
 # agent-hook-* install the trap: non-hook launchers (agentguard-churn-bypass)
 # and test harnesses also source this library, and their exits are not hook
 # events. Extensions run inside the hook process and share its single record.
+# Parsed-command and edit-file variables are exported for extensions, so a
+# hook can inherit them from a parent hook's children (a nested agent). Clear
+# them here: every hook parses its own before use, and a record must never
+# attribute a parent's command to this hook.
 case "${_HOOK_SELF:-$0}" in
-  agent-hook-* | */agent-hook-*) trap _hook_telemetry_exit EXIT ;;
+  agent-hook-* | */agent-hook-*)
+    unset AGENTGUARD_CMD_TRIMMED AGENTGUARD_CMD_LINE1 AGENTGUARD_EDIT_FILES AGENTGUARD_EDIT_FILE
+    trap _hook_telemetry_exit EXIT
+    ;;
 esac
