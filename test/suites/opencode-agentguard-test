@@ -2694,6 +2694,7 @@ await check("V1 subagent activity is filed under its parent session", async () =
     await hooks["tool.execute.after"]({ ...call, args }, { title: "echo", output: "sub\n", metadata: { exit: 0 } });
     const shell = { env: {} };
     await hooks["shell.env"]({ sessionID: child }, shell);
+    await hooks["permission.ask"]({ id: "child-permission", sessionID: child, type: "bash", metadata: {} });
     void hooks.event({ event: { type: "session.idle", properties: { sessionID: child } } });
     void hooks.event({ event: { type: "session.deleted", properties: { info: { id: child } } } });
 
@@ -2717,7 +2718,7 @@ await check("V1 subagent activity is filed under its parent session", async () =
       audits(parent)
         .filter((record) => record.payload.agent_id === child)
         .map((record) => record.payload.hook_event_name)
-        .filter((name) => !["PreToolUse", "PostToolUse"].includes(name)),
+        .filter((name) => !["PreToolUse", "PostToolUse", "PermissionRequest"].includes(name)),
       ["SubagentStart", "SubagentStop"],
     );
     // Tool guards and the shell share the parent's session, as Claude's do.
@@ -2726,11 +2727,25 @@ await check("V1 subagent activity is filed under its parent session", async () =
     assert.equal(guard.payload.session_id, parent);
     assert.equal(guard.payload.agent_id, child);
     assert.equal(shell.env.AGENTGUARD_SESSION_ID, parent);
-    // Lifecycle guards keep the child's own session so its start and end can
-    // never initialize or clean up the parent's state.
-    assert.ok(
-      logs().some((record) => record.hook === "agent-hook-session-start" && record.session === child),
+    // Like Claude, a subagent runs no lifecycle guards, and its permission
+    // notice runs on the parent: no hook ever runs under the child's session,
+    // so no guard decision record can open a telemetry session for it.
+    assert.deepEqual(
+      logs()
+        .filter((record) => record.session === child)
+        .map((record) => record.hook),
+      [],
     );
+    assert.deepEqual(
+      logs()
+        .filter((record) => record.hook === "agent-hook-session-start")
+        .map((record) => record.session),
+      [parent],
+    );
+    const notice = logs().find((record) => record.hook === "agent-hook-notification");
+    assert.equal(notice.session, parent);
+    assert.equal(notice.payload.session_id, parent);
+    assert.equal(notice.payload.agent_id, child);
   } finally {
     await hooks?.dispose();
     removeRecorder();
@@ -2797,8 +2812,244 @@ await check("V2 subagent activity is filed under its parent session", async () =
     const guard = logs().find((record) => record.hook === "agent-hook-pre-bash");
     assert.equal(guard.payload.session_id, parent);
     assert.equal(guard.payload.agent_id, child);
+    assert.deepEqual(
+      logs()
+        .filter((record) => record.session === child)
+        .map((record) => record.hook),
+      [],
+    );
   } finally {
     await host?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("a subagent leaves one telemetry session with the real hooks", async () => {
+  // End to end through the real launchers: their EXIT traps write a decision
+  // record for whatever session they run under, which the fixture hooks
+  // above cannot show. Real hooks need jq; without it there is nothing to see.
+  const repoBin = process.env.AGENTGUARD_TEST_REPO_BIN;
+  const minimalPath = `${path.dirname(process.execPath)}:/usr/bin:/bin`;
+  if (spawnSync("jq", ["--version"], { env: { PATH: minimalPath } }).status !== 0) {
+    console.log("SKIP: real-hook subagent check (jq unavailable)");
+    return;
+  }
+  const scratch = fs.mkdtempSync(path.join(root, "real-hooks-"));
+  const realHome = path.join(scratch, "home");
+  const bin = path.join(realHome, ".local/bin");
+  fs.mkdirSync(bin, { recursive: true });
+  for (const hook of [
+    "agent-hook-session-start",
+    "agent-hook-prompt-submit",
+    "agent-hook-pre-bash",
+    "agent-hook-post-bash",
+    "agent-hook-stop",
+    "agent-hook-session-end",
+    "agent-hook-telemetry",
+  ]) {
+    fs.symlinkSync(path.join(repoBin, hook), path.join(bin, hook));
+  }
+  const telemetryDir = path.join(scratch, "telemetry");
+  const hostScript = path.join(scratch, "host.mjs");
+  fs.writeFileSync(
+    hostScript,
+    `import { pathToFileURL } from "node:url";
+const [pluginPath, directory] = process.argv.slice(2);
+const { AgentGuardPlugin } = await import(pathToFileURL(pluginPath).href);
+const hooks = await AgentGuardPlugin({ directory });
+const created = (id, parentID) =>
+  hooks.event({ event: { type: "session.created", properties: { info: { id, parentID } } } });
+await created("real-parent");
+await created("real-child", "real-parent");
+await hooks["chat.message"](
+  { sessionID: "real-child", agent: "general" },
+  { message: {}, parts: [{ type: "text", text: "subtask" }] },
+);
+const call = { tool: "bash", sessionID: "real-child", callID: "real-child-call" };
+await hooks["tool.execute.before"](call, { args: { command: "echo sub" } });
+await hooks["tool.execute.after"](
+  { ...call, args: { command: "echo sub" } },
+  { title: "echo", output: "sub\\n", metadata: { exit: 0 } },
+);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "real-child" } } });
+await hooks.event({ event: { type: "session.deleted", properties: { info: { id: "real-child" } } } });
+await hooks.dispose();
+`,
+  );
+  try {
+    // A fresh session without a controlling terminal, and only scratch state
+    // roots: real hooks can neither ring the developer's terminal nor touch
+    // their runtime, state, or memory stores (hm is off this PATH).
+    const host = spawn(process.execPath, [hostScript, pluginPath, sourceDirectory], {
+      detached: true,
+      stdio: ["ignore", "ignore", "pipe"],
+      env: {
+        HOME: realHome,
+        PATH: minimalPath,
+        XDG_RUNTIME_DIR: path.join(scratch, "run"),
+        XDG_STATE_HOME: path.join(scratch, "state"),
+        XDG_CONFIG_HOME: path.join(scratch, "config"),
+        XDG_CACHE_HOME: path.join(scratch, "cache"),
+        AGENTGUARD_TELEMETRY: "1",
+        AGENTGUARD_TELEMETRY_DIR: telemetryDir,
+      },
+    });
+    let stderr = "";
+    host.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const code = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        host.kill("SIGKILL");
+        reject(new Error(`real-hook host did not exit; stderr: ${stderr}`));
+      }, 60_000);
+      host.once("exit", (status) => {
+        clearTimeout(timer);
+        resolve(status);
+      });
+    });
+    assert.equal(code, 0, stderr);
+    const sessionsDir = path.join(telemetryDir, "sessions/opencode");
+    assert.deepEqual(fs.readdirSync(sessionsDir), ["real-parent"]);
+    const records = fs
+      .readdirSync(path.join(sessionsDir, "real-parent"))
+      .map((name) => JSON.parse(fs.readFileSync(path.join(sessionsDir, "real-parent", name), "utf8")));
+    const events = records.map((record) => `${record.kind}:${record.event}`);
+    for (const expected of [
+      "event:SubagentStart",
+      "event:PreToolUse",
+      "hook:PreToolUse",
+      "event:SubagentStop",
+    ]) {
+      assert.ok(events.includes(expected), `${expected} missing from ${JSON.stringify(events)}`);
+    }
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+});
+
+await check("V1 resumed subagent learns its parent from the session API", async () => {
+  clearLog();
+  installRecorder();
+  const parent = "audit-resume-parent";
+  const child = "audit-resume-child";
+  const lookups = [];
+  let hooks;
+  try {
+    // No session.created: the task tool resumed an existing child, or the
+    // plugin loaded after the child was created.
+    hooks = await plugin(
+      {},
+      {
+        session: {
+          get: async ({ path: { id } }) => {
+            lookups.push(id);
+            return { data: id === child ? { id, parentID: parent } : { id } };
+          },
+        },
+      },
+    );
+    await hooks["chat.message"]({ sessionID: child, agent: "general" }, say("resumed"));
+    const start = await waitForAudit(parent, "SubagentStart");
+    assert.equal(start.payload.agent_id, child);
+    assert.deepEqual(lookups, [child]);
+    assert.deepEqual(audits(child), []);
+    assert.deepEqual(
+      logs()
+        .filter((record) => record.session === child)
+        .map((record) => record.hook),
+      [],
+    );
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("V1 parent lookup that never answers fails open to a top-level session", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin({}, { session: { get: () => new Promise(() => {}) } });
+    // Bounded by the lookup timeout; a hung API would otherwise hold the prompt.
+    await hooks["chat.message"]({ sessionID: "audit-lookup-hang", agent: "build" }, say("hello"));
+    const start = await waitForAudit("audit-lookup-hang", "SessionStart");
+    assert.equal(start.payload.agent_id, undefined);
+    assert.ok(
+      logs().some(
+        (record) => record.hook === "agent-hook-session-start" && record.session === "audit-lookup-hang",
+      ),
+    );
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("V1 unload records SubagentStop before the parent's SessionEnd", async () => {
+  clearLog();
+  // A slow SubagentStop would land after a concurrently ended parent.
+  installRecorder({ delayFor: { SubagentStop: 300 } });
+  const normalTimeoutScale = process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE;
+  process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = "3";
+  let hooks;
+  try {
+    hooks = await plugin();
+    const parent = "audit-unload-parent";
+    void hooks.event({ event: { type: "session.created", properties: { info: { id: parent } } } });
+    void hooks.event({
+      event: { type: "session.created", properties: { info: { id: "audit-unload-child", parentID: parent } } },
+    });
+    await hooks["chat.message"]({ sessionID: parent, agent: "build" }, say("delegate"));
+    await hooks["chat.message"]({ sessionID: "audit-unload-child", agent: "general" }, say("open turn"));
+    await hooks.dispose();
+    hooks = undefined;
+    const names = audits(parent).map((record) => record.payload.hook_event_name);
+    assert.ok(names.includes("SessionEnd"), JSON.stringify(names));
+    assert.ok(names.indexOf("SubagentStop") >= 0, JSON.stringify(names));
+    assert.ok(names.indexOf("SubagentStop") < names.indexOf("SessionEnd"), JSON.stringify(names));
+  } finally {
+    await hooks?.dispose();
+    process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = normalTimeoutScale;
+    removeRecorder();
+  }
+});
+
+await check("V2 unload records SubagentStop before the parent's SessionEnd", async () => {
+  clearLog();
+  installRecorder({ delayFor: { SubagentStop: 300 } });
+  const normalTimeoutScale = process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE;
+  process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = "3";
+  const parent = "audit-v2-unload-parent";
+  const child = "audit-v2-unload-child";
+  const callbacks = new Map();
+  let host;
+  try {
+    host = await v2({
+      session: {
+        hook: async (name, callback) => {
+          callbacks.set(name, callback);
+          return { dispose: async () => {} };
+        },
+        get: async ({ sessionID }) => ({
+          agent: sessionID === child ? "general" : "build",
+          location: { directory: sourceDirectory },
+          ...(sessionID === child ? { parentID: parent } : {}),
+        }),
+      },
+    });
+    await callbacks.get("prompt")({ sessionID: parent, prompt: { text: "delegate" } });
+    await callbacks.get("prompt")({ sessionID: child, prompt: { text: "open turn" } });
+    await host.dispose();
+    host = undefined;
+    const names = audits(parent).map((record) => record.payload.hook_event_name);
+    assert.ok(names.includes("SessionEnd"), JSON.stringify(names));
+    assert.ok(names.indexOf("SubagentStop") >= 0, JSON.stringify(names));
+    assert.ok(names.indexOf("SubagentStop") < names.indexOf("SessionEnd"), JSON.stringify(names));
+  } finally {
+    await host?.dispose();
+    process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = normalTimeoutScale;
     removeRecorder();
   }
 });
@@ -3363,6 +3614,7 @@ mkdir -p "$test_root/workspace"
     AGENTGUARD_TEST_HOOK_LOG="$hook_log" \
     AGENTGUARD_TEST_HOOK_BEHAVIOR_DIR="$behavior_dir" \
     AGENTGUARD_TEST_TELEMETRY_LOG="$telemetry_log" \
+    AGENTGUARD_TEST_REPO_BIN="$root/bin" \
     node "$test_root/test.mjs"
 ) || exit 1
 

@@ -859,6 +859,7 @@ _event_name_for() {
     # shellcheck source=../../lib/agentguard/hook-helpers.sh
     . "$BIN_DIR/../lib/agentguard/hook-helpers.sh" </dev/null >/dev/null 2>&1
     _HOOK_INPUT="$2"
+    _hook_refresh_state_dir
     _hook_event_name
   )
 }
@@ -919,5 +920,47 @@ _assert_eq "codex subagent: launcher key recorded" "thread-child" \
 _run_cli_as "CODEX_THREAD_ID=thread-child" path current
 _assert_eq "current: codex subagent shell resolves the root session" \
   "$AGENTGUARD_TELEMETRY_DIR/sessions/codex/root-sess" "$CLI_OUT"
+
+_assert_eq "event name: nested failure name in tool input is not the event" "PostToolUse" \
+  "$(_event_name_for post-mcp '{"session_id":"s","hook_event_name":"PostToolUse","tool_input":{"payload":{"hook_event_name":"PostToolUseFailure"}}}')"
+
+# A user interrupt says nothing about the server: no count, no reset.
+_fresh_root
+for i in 1 2 3; do
+  _run_hook_as claude "AGENTGUARD_SESSION_ID=int-claude" "$POST_MCP_HOOK" \
+    '{"session_id":"int-claude","hook_event_name":"PostToolUseFailure","tool_name":"mcp__slow__q","error":"Interrupted by user","is_interrupt":true}'
+done
+_run_hook_as claude "AGENTGUARD_SESSION_ID=int-claude" "$PRE_MCP" \
+  '{"session_id":"int-claude","hook_event_name":"PreToolUse","tool_name":"mcp__slow__q","tool_input":{}}'
+_assert_eq "mcp breaker: user interrupts do not trip it" "0" "$HOOK_EXIT"
+# A malformed event name must not reset an accumulating failure count.
+_fresh_root
+for i in 1 2; do
+  _run_hook_as codex "AGENTGUARD_SESSION_ID=jq-codex" "$POST_MCP_HOOK" \
+    '{"session_id":"jq-codex","hook_event_name":"PostToolUse","tool_name":"mcp__down__q","tool_response":{"isError":true}}'
+done
+_run_hook_as codex "AGENTGUARD_SESSION_ID=jq-codex" "$POST_MCP_HOOK" \
+  '{"session_id":"jq-codex","hook_event_name":5,"tool_name":"mcp__down__q","isError":true}'
+_run_hook_as codex "AGENTGUARD_SESSION_ID=jq-codex" "$PRE_MCP" \
+  '{"session_id":"jq-codex","hook_event_name":"PreToolUse","tool_name":"mcp__down__q","tool_input":{}}'
+_assert_eq "mcp breaker: odd event name still counts the failure" "2" "$HOOK_EXIT"
+
+# Nothing is created through a symlinked sessions directory.
+_fresh_root
+link_target="$(_tmpdir)"
+mkdir -p "$AGENTGUARD_TELEMETRY_DIR"
+ln -s "$link_target" "$AGENTGUARD_TELEMETRY_DIR/sessions"
+_run_hook "$TELEMETRY_HOOK" "$PRE_TOOL"
+_assert_eq "symlinked sessions dir: nothing created through the link" "0" \
+  "$(_entries "$link_target" | wc -l | tr -d ' ')"
+
+# The sessions table keeps its columns aligned for every agent name.
+_fresh_root
+_run_hook_as claude "AGENTGUARD_SESSION_ID=col-c" "$TELEMETRY_HOOK" "$PRE_TOOL"
+_run_hook_as opencode "AGENTGUARD_SESSION_ID=col-o" "$TELEMETRY_HOOK" "$PRE_TOOL"
+_run_cli sessions
+header_col=$(printf '%s\n' "$CLI_OUT" | head -n 1 | awk '{print index($0, "SESSION")}')
+row_cols=$(printf '%s\n' "$CLI_OUT" | tail -n +2 | awk '{print index($0, "col-")}' | sort -u | paste -sd ' ' -)
+_assert_eq "sessions table: session column aligned" "$header_col" "$row_cols"
 
 _test_summary

@@ -54,6 +54,9 @@ const CALL_TTL = 6 * 60 * 60 * 1_000;
 const MAX_CALLS = 1_024;
 const MCP_STATUS_TTL = 5_000;
 const MCP_STATUS_TIMEOUT = 1_000;
+// Bounds the one V1 parent lookup per session; past it the session stays
+// top-level rather than delaying its first prompt.
+const SESSION_LOOKUP_TIMEOUT = 1_000;
 const CONTEXT_HEADING = "AgentGuard context";
 // Cleanup executes only after this adapter has declared a hook transaction
 // unsafe. Never resolve its interpreter or process enumerator through a
@@ -695,6 +698,16 @@ function spawnRecorder(command, body, directory, sessionID, runtimeName) {
 // very old subagent's late records file under its own session again.
 const MAX_LINEAGE = 4_096;
 
+// Waits for `promises` to settle, but never longer than `milliseconds`.
+async function settleWithin(promises, milliseconds) {
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(resolve, milliseconds);
+  });
+  await Promise.race([Promise.allSettled(promises), deadline]);
+  clearTimeout(timer);
+}
+
 function link(lineage, sessionID, parentID) {
   if (typeof sessionID !== "string" || !sessionID) return;
   if (typeof parentID !== "string" || !parentID || parentID === sessionID) return;
@@ -912,6 +925,7 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
   // Returns this record's own completion so later records can order behind it.
   // A subagent's records are filed under its top-level session.
   function audit(sessionID, build, after) {
+    let root;
     // Build and serialize now, inside this guard. Building reads arbitrary
     // tool arguments, and a malformed one must not throw into a callback whose
     // guard decision is still pending. Callers also keep mutating OpenCode's
@@ -920,6 +934,9 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
     let body;
     try {
       body = `${JSON.stringify(asRoot(sessionID, build()))}\n`;
+      // Resolve the recorder's session now, with the payload: the subagent's
+      // link is removed when it ends, possibly before this record spawns.
+      root = rootOf(sessionID);
     } catch {
       return after;
     }
@@ -943,7 +960,7 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
         // The record takes its cwd from the payload, so the recorder always
         // starts in the plugin directory: a Bash call naming a missing workdir
         // must still leave its audit record, even though its guard cannot run.
-        const child = spawnRecorder(command, body, directory, rootOf(sessionID), runtimeName);
+        const child = spawnRecorder(command, body, directory, root, runtimeName);
         entry.terminate = child.terminate;
         return child.done;
       })
@@ -964,12 +981,10 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
     // written just before it can land. Stragglers are owned children and are
     // stopped rather than left to outlive the plugin.
     if (recorders.size === 0) return;
-    let timer;
-    const deadline = new Promise((resolve) => {
-      timer = setTimeout(resolve, scaled(RECORDER_DRAIN));
-    });
-    await Promise.race([Promise.allSettled([...recorders].map((entry) => entry.done)), deadline]);
-    clearTimeout(timer);
+    await settleWithin(
+      [...recorders].map((entry) => entry.done),
+      scaled(RECORDER_DRAIN),
+    );
     for (const entry of recorders) entry.terminate();
   }
 
@@ -1002,26 +1017,52 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
     // for the first real message is what lets internal maintenance agents stay
     // outside AgentGuard without racing duplicate starts.
     if (!record.start) {
-      // The recorder's SessionStart record also triggers its retention prune,
-      // so it shares the guard lifecycle's lazy, deduplicated start point. A
-      // subagent is not a session of its own in the trail: its turns record
-      // SubagentStart and SubagentStop on the parent instead.
-      const payload = basePayload(record.id, directory, "SessionStart");
-      if (!isSubagent(record.id)) auditLifecycle(record, payload);
-      record.start = invoke(record.id, "agent-hook-session-start", payload)
-        .then((result) => {
-          if (result.context) {
-            record.pending.push(result.context);
-            onContext?.(record.id, [result.context]);
-          }
-          return result;
-        })
-        .catch((error) => {
-          log(error);
-          return { missing: false, context: "" };
-        });
+      // Assign synchronously so concurrent callbacks share one start.
+      record.start = (async () => {
+        await resolveParent(record.id);
+        // Like Claude, run no lifecycle hooks for a subagent. Its turns record
+        // SubagentStart and SubagentStop on the parent instead; a session of
+        // its own, even just a guard's decision records, would split the trail.
+        if (isSubagent(record.id)) return { missing: false, context: "" };
+        // The recorder's SessionStart record also triggers its retention prune,
+        // so it shares the guard lifecycle's lazy, deduplicated start point.
+        const payload = basePayload(record.id, directory, "SessionStart");
+        auditLifecycle(record, payload);
+        const result = await invoke(record.id, "agent-hook-session-start", payload);
+        if (result.context) {
+          record.pending.push(result.context);
+          onContext?.(record.id, [result.context]);
+        }
+        return result;
+      })().catch((error) => {
+        log(error);
+        return { missing: false, context: "" };
+      });
     }
     return record.start;
+  }
+
+  async function resolveParent(sessionID) {
+    // V1 announces a child only in session.created, which a resumed subagent,
+    // or a plugin loaded after the child existed, never sees. Ask once before
+    // the first parent-dependent decision; a slow or failing lookup fails open
+    // to a top-level session. V2 resolves parents in its own session lookup.
+    if (lineage.has(sessionID) || typeof client?.session?.get !== "function") return;
+    let timer;
+    try {
+      const deadline = new Promise((resolve) => {
+        timer = setTimeout(resolve, scaled(SESSION_LOOKUP_TIMEOUT));
+      });
+      const response = await Promise.race([
+        Promise.resolve().then(() => client.session.get({ path: { id: sessionID } })),
+        deadline,
+      ]);
+      link(lineage, sessionID, response?.data?.parentID);
+    } catch {
+      // Unknown parentage stays top-level.
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   function removeCalls(sessionID) {
@@ -1132,18 +1173,20 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
     record.ended = true;
     record.end = queue(record, async () => {
       await record.start;
-      if (record.start) {
-        const payload = basePayload(record.id, directory, "SessionEnd");
-        if (!isSubagent(record.id)) {
-          auditLifecycle(record, payload);
-        } else if (record.stoppedGeneration !== record.generation) {
+      if (record.start && isSubagent(record.id)) {
+        if (record.stoppedGeneration !== record.generation) {
           // A subagent deleted mid-turn still closes its SubagentStart.
           record.stoppedGeneration = record.generation;
           auditLifecycle(record, subagentStop(record));
         }
+      } else if (record.start) {
+        const payload = basePayload(record.id, directory, "SessionEnd");
+        auditLifecycle(record, payload);
         await advisory(record.id, "agent-hook-session-end", payload);
       }
       removeCalls(record.id);
+      // Drop the ended session's link so the cap only ever evicts dead ones.
+      lineage.delete(record.id);
       if (sessions.get(record.id) === record) sessions.delete(record.id);
     });
     return record.end;
@@ -1217,7 +1260,8 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
           ...basePayload(input.sessionID, directory, "UserPromptSubmit"),
           prompt,
         };
-        if (isSubagent(input.sessionID)) {
+        const subagent = isSubagent(input.sessionID);
+        if (subagent) {
           // The parent agent, not the user, wrote this prompt. Each subagent
           // turn is one SubagentStart/SubagentStop pair carrying its task.
           record.agentType = input.agent;
@@ -1229,7 +1273,9 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
         } else {
           auditLifecycle(record, payload);
         }
-        const result = await advisory(input.sessionID, "agent-hook-prompt-submit", payload);
+        const result = subagent
+          ? { context: "" }
+          : await advisory(input.sessionID, "agent-hook-prompt-submit", payload);
         // Stop can arrive through the unawaited event channel between prompts.
         // Drain its queued context together with startup and this prompt so no
         // lifecycle guidance is lost or attached to the wrong generation.
@@ -1247,7 +1293,13 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
         permission: input,
       };
       audit(input.sessionID, () => payload);
-      await advisory(input.sessionID, "agent-hook-notification", payload);
+      // A subagent's request notifies on its top-level session, so no guard
+      // record opens a session of its own for the child.
+      await advisory(
+        rootOf(input.sessionID),
+        "agent-hook-notification",
+        asRoot(input.sessionID, payload),
+      );
     },
 
     "tool.execute.before": async (input, output) => {
@@ -1379,14 +1431,17 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
           // Stop exactly once without suppressing it after the next message.
           if (!record.start || record.stoppedGeneration === record.generation) return;
           record.stoppedGeneration = record.generation;
-          const subagent = isSubagent(sessionID);
-          // SubagentStop closes the turn's SubagentStart however it ended.
-          if (subagent) auditLifecycle(record, subagentStop(record));
+          // SubagentStop closes the turn's SubagentStart however it ended, and
+          // a subagent runs no stop guard, as in Claude.
+          if (isSubagent(sessionID)) {
+            auditLifecycle(record, subagentStop(record));
+            return;
+          }
           // Like Claude, run no Stop hooks for a turn that failed or was
           // interrupted: its StopFailure or Interrupt record already ended it.
           if (record.abnormalGeneration === record.generation) return;
           const payload = basePayload(sessionID, directory, "Stop");
-          if (!subagent) auditLifecycle(record, payload);
+          auditLifecycle(record, payload);
           const result = await advisory(sessionID, "agent-hook-stop", payload);
           if (result.context) {
             record.pending.push(result.context);
@@ -1418,7 +1473,17 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
     [OBSERVE]: observe,
 
     dispose: async () => {
-      await Promise.all([...sessions.values()].map(finalize));
+      // End subagents first and let their SubagentStop records land, briefly
+      // bounded, before any parent's SessionEnd: a parent's trail must not
+      // close while a delegated turn still appears open.
+      const all = [...sessions.values()];
+      const subagents = all.filter((record) => isSubagent(record.id));
+      await Promise.all(subagents.map(finalize));
+      await settleWithin(
+        subagents.map((record) => record.audited),
+        scaled(RECORDER_DRAIN),
+      );
+      await Promise.all(all.filter((record) => !subagents.includes(record)).map(finalize));
       await drainRecorders();
     },
   };
@@ -1486,9 +1551,14 @@ export default {
       // Dispose explicitly before draining children, including partially failed
       // setup. A retained callback may not recreate a finalized session.
       await Promise.allSettled(registrations.map((registration) => registration.dispose()));
-      await Promise.allSettled(
-        [...sessions.values()].map(async (record) => (await record).hooks.dispose()),
-      );
+      // Each core drains its own records on dispose, so ending subagent cores
+      // first lands their SubagentStop before any parent's SessionEnd.
+      const entries = [...sessions.entries()];
+      const subagent = ([sessionID]) => rootSession(lineage, sessionID) !== sessionID;
+      const disposeAll = (list) =>
+        Promise.allSettled(list.map(async ([, record]) => (await record).hooks.dispose()));
+      await disposeAll(entries.filter(subagent));
+      await disposeAll(entries.filter((entry) => !subagent(entry)));
       sessions.clear();
     }
     try {

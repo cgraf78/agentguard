@@ -45,22 +45,36 @@ _hook_parse_mcp
 #   - Gemini's ToolResult `error` object in tool_response. Only Gemini's
 #     response shape is AgentGuard-owned there; elsewhere tool_response is the
 #     server's arbitrary JSON, so an `error` key in it is not a signal.
-is_error=$(printf '%s' "$_HOOK_INPUT" | jq -r --arg agent "$(_hook_agent_name)" '
+# A user interrupt (Claude `is_interrupt`) says nothing about the server, so
+# it neither counts nor resets. Output is `interrupt`, `true`, or `false`; a
+# jq failure leaves the counter untouched rather than resetting it.
+agent="${AGENTGUARD_NAME:-}"
+[ -n "$agent" ] || agent=$(_hook_agent_name)
+if verdict=$(printf '%s' "$_HOOK_INPUT" | jq -r --arg agent "$agent" '
   def flag: . == true or . == "true";
   (.tool_response // .toolResponse) as $r
-  | ((.hook_event_name // .hookEventName // "") | test("^(PostToolUseFailure|post_tool_use_failure)$"))
-    or ((.tool_result_is_error // .isError) | flag)
-    or (($r | type) == "object" and (($r.isError | flag)
-      or ($agent == "gemini" and (($r.error | type) == "object" or (($r.error | type) == "string" and $r.error != "")))))
-' 2>/dev/null) || is_error=false
-
-if [ "$is_error" = "true" ]; then
-  _hook_counter_increment "$_HOOK_MCP_FAIL_FILE"
+  | if (.is_interrupt // .isInterrupt) == true then "interrupt"
+    elif ((.hook_event_name // .hookEventName // "") | tostring | test("^(PostToolUseFailure|post_tool_use_failure)$"))
+      or ((.tool_result_is_error // .isError) | flag)
+      or (($r | type) == "object" and (($r.isError | flag)
+        or ($agent == "gemini" and (($r.error | type) == "object" or (($r.error | type) == "string" and $r.error != "")))))
+    then "true" else "false" end
+' 2>/dev/null); then
+  case "$verdict" in
+    true) _hook_counter_increment "$_HOOK_MCP_FAIL_FILE" ;;
+    false) _hook_counter_reset "$_HOOK_MCP_FAIL_FILE" ;;
+  esac
 else
-  _hook_counter_reset "$_HOOK_MCP_FAIL_FILE"
+  verdict=''
 fi
 
 # MCP success/failure is another tool boundary; `hm` owns any memory refresh.
-_hook_hm_tool_complete
+# Hand `hm` the failure verdict computed above; its generic status reader
+# does not know the runtime-specific failure shapes.
+case "$verdict" in
+  true) _hook_hm_tool_complete 1 ;;
+  false) _hook_hm_tool_complete 0 ;;
+  *) _hook_hm_tool_complete ;;
+esac
 _hook_source_extensions
 _hook_finish

@@ -39,7 +39,7 @@ one timeline and can be matched to the runtime's own transcript:
 | Gemini CLI | `session_id` from the payload (`GEMINI_SESSION_ID`) | `payload.transcript_path` |
 | Grok | `GROK_SESSION_ID`, which Grok exports to hooks; subagent events stay under the parent session | the runtime's session store |
 | Muse | `MUSE_SESSION_ID` (the top-level chat id), else the payload's `session_id` | the runtime's session store |
-| OpenCode | The plugin's `sessionID` | the runtime's session store |
+| OpenCode | The plugin's top-level `sessionID`; subagent sessions stay under it with `agent_id` | the runtime's session store |
 
 AgentGuard's guard state is keyed per live process instead (Gemini by its CLI
 pid, Grok subagents by a per-child key), which is right for state wiped at

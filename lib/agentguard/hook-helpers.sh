@@ -18,6 +18,7 @@ _HOOK_CTX=''
 _HOOK_HM_CONFIG_PATH=''
 _HOOK_INPUT_STATE_REFRESHED=''
 _HOOK_INPUT_SESSION=''
+_HOOK_INPUT_EVENT=''
 # Set once this process has tried to read stdin, so the telemetry trap does not
 # wait on an empty or held-open pipe a second time.
 _HOOK_INPUT_ATTEMPTED=''
@@ -227,7 +228,7 @@ _hook_agent_ancestor_key() {
 # circuit-breaker or Hive Memory markers with the parent. Parent SessionStart
 # and Stop omit subagentType and keep the unsuffixed key.
 _hook_refresh_state_dir() {
-  local session_key='' input_session='' input_subagent='' input_prompt='' codex_key='' ancestor=''
+  local session_key='' input_session='' input_subagent='' input_prompt='' input_event='' codex_key='' ancestor=''
   if [ -n "${_HOOK_INPUT+x}" ]; then
     # Grok's hook envelope is camelCase (sessionId, subagentType); Claude/Codex
     # remain snake_case. Prefer snake_case so an existing runtime stays
@@ -237,12 +238,14 @@ _hook_refresh_state_dir() {
       IFS= read -r input_session || true
       IFS= read -r input_subagent || true
       IFS= read -r input_prompt || true
+      IFS= read -r input_event || true
     } < <(printf '%s' "$_HOOK_INPUT" | jq -r '
       # Only a string is an id; an object or number would otherwise be
       # printed as JSON text and become a key.
       ((.session_id // .sessionId) | if type == "string" then . else "" end),
       (.subagent_type // .subagentType // ""),
-      (.prompt_id // .promptId // "")
+      (.prompt_id // .promptId // ""),
+      ((.hook_event_name // .hookEventName) | if type == "string" then . else "" end)
     ' 2>/dev/null)
   fi
 
@@ -340,6 +343,7 @@ _hook_refresh_state_dir() {
   # Kept for telemetry, which keys durable records by the payload's own id
   # where the state key is process-scoped (see _hook_telemetry_key).
   _HOOK_INPUT_SESSION="$input_session"
+  _HOOK_INPUT_EVENT="${input_event//[$'\n\r']/}"
   _HOOK_SESSION_KEY="$session_key"
   _HOOK_STATE_DIR="$(_hook_state_root)/$_HOOK_SESSION_KEY"
   if [ -n "${_HOOK_INPUT+x}" ]; then
@@ -1445,8 +1449,10 @@ _hook_hm_prompt_submit() {
   _hook_hm_event prompt-submit --text "$prompt"
 }
 
+# Optional $1 overrides the derived status, for hooks that already know
+# whether the tool call failed in a runtime-specific shape.
 _hook_hm_tool_complete() {
-  _hook_hm_event tool-complete --status "$(_hook_hm_tool_status)"
+  _hook_hm_event tool-complete --status "${1:-$(_hook_hm_tool_status)}"
 }
 
 _hook_hm_stop() {
@@ -1632,8 +1638,10 @@ _hook_telemetry_exit() {
     esac
   fi
   agent=$(_hook_agent_name 2>/dev/null) || agent=agent
-  _hook_telemetry_component agent || agent=agent
-  _hook_telemetry_key key "$agent" || return 0
+  # stderr: restoring an uninstalled caller LC_ALL after the helpers' local
+  # C locale makes bash print setlocale warnings.
+  _hook_telemetry_component agent 2>/dev/null || agent=agent
+  _hook_telemetry_key key "$agent" 2>/dev/null || return 0
   dir="$root/sessions/$agent/$key"
 
   _agentguard_telemetry_now_us end_us
@@ -1672,8 +1680,9 @@ _hook_telemetry_exit() {
   # Check every directory AgentGuard owns below the root before creating
   # anything inside it (the root itself may legitimately be reached through a
   # user's own symlinked state dir).
-  [ -d "$root/sessions/$agent" ] || mkdir -p "$root/sessions/$agent" 2>/dev/null || return 0
+  [ -d "$root/sessions" ] || mkdir -p "$root/sessions" 2>/dev/null || [ -d "$root/sessions" ] || return 0
   [ ! -L "$root/sessions" ] && [ -O "$root/sessions" ] || return 0
+  [ -d "$root/sessions/$agent" ] || mkdir "$root/sessions/$agent" 2>/dev/null || [ -d "$root/sessions/$agent" ] || return 0
   [ ! -L "$root/sessions/$agent" ] && [ -O "$root/sessions/$agent" ] || return 0
   [ -d "$dir" ] || mkdir "$dir" 2>/dev/null || [ -d "$dir" ] || return 0
   [ ! -L "$dir" ] && [ -O "$dir" ] || return 0
@@ -1777,10 +1786,10 @@ _hook_event_name() {
     agent-hook-pre-*) echo "PreToolUse" ;;
     agent-hook-post-*)
       # Post hooks also serve failed tool calls (PostToolUseFailure), and a
-      # strict runner rejects a response naming a different event. A string
-      # match keeps this jq-free; the payload is already cached when a
-      # response is built.
-      if [[ "${_HOOK_INPUT:-}" =~ \"hook_event_name\"[[:space:]]*:[[:space:]]*\"PostToolUseFailure\" ]]; then
+      # strict runner rejects a response naming a different event. The
+      # payload's top-level event name is cached by the state refresh's jq
+      # (a string match could hit a nested object in tool input).
+      if [ "$_HOOK_INPUT_EVENT" = "PostToolUseFailure" ]; then
         echo "PostToolUseFailure"
       else
         echo "PostToolUse"

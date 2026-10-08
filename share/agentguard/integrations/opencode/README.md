@@ -134,11 +134,17 @@ records `SubagentStart` (with `agent_type` and its task prompt) and
 `SubagentStop` instead of the child's own session, prompt, and stop records,
 and its tool records carry `agent_id`. Tool guards and the subagent's shell
 also use the top-level session, as Claude's subagent tool hooks do, so guard
-state such as edit churn is shared with the delegating agent. The child's
-lifecycle guards (session start and end, prompt, stop) keep running under its
-own session ID so they can never initialize or clean up the parent's state.
-Links come from V1 `session.created` and V2 `session.get` or
-`session.created`.
+state such as edit churn is shared with the delegating agent. Like Claude, a
+subagent runs no lifecycle guards (session start and end, prompt, stop), and
+its permission notice runs on the top-level session with `agent_id`, so no
+hook ever runs under the child's own ID and no guard record opens a separate
+telemetry session for it. Links come from V1 `session.created` and V2
+`session.get` or `session.created`. A V1 child seen without `session.created`
+(a resumed subagent, or a plugin loaded after the child existed) is looked up
+once through the session API before its first prompt; a lookup that fails or
+takes over a second leaves it top-level. A link is dropped when its session
+ends. At unload, subagents end first, so their `SubagentStop` lands before the
+parent's `SessionEnd`.
 
 Each record is a separate recorder process, stamped when it finishes, so the
 timeline guarantees only two orderings: a call's post or failure record lands
@@ -155,8 +161,11 @@ so the final `SessionEnd` lands, then stop or cancel the rest. A host that
 exits without unloading the plugin stops, from its exit handler, any recorder
 that has been running for over a second, with its process group. Younger
 recorders are left to finish on their own, detached in their own process
-group, so a host that exits right after a tool call still leaves that call's
-record. The trade-off is that a recorder which wedges within its first second
+group. That rescues only recorders already started: one whose executable
+lookup is still pending at exit never starts, and a call's `PostToolUse`
+recorder starts only after its `PreToolUse` recorder exits, so a host that
+exits immediately after a tool call can lose either record. The trade-off for
+sparing young recorders is that one which wedges within its first second
 before such an exit lingers until it ends by itself.
 
 ## OpenCode V2
