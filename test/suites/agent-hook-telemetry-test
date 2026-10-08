@@ -262,9 +262,68 @@ done
 _assert_eq "session start: background prune removed idle session" "false" \
   "$([ -d "$old" ] && echo "true (still present after 10s)" || echo false)"
 
+# The host reads hook stdout until EOF, so the background prune must not
+# inherit it. A deliberately slow `find` makes a held pipe obvious.
+slow_bin="$(_tmpdir)"
+printf '#!/bin/sh\nsleep 3\n' >"$slow_bin/find"
+chmod +x "$slow_bin/find"
+start=$SECONDS
+printf '%s' '{"hook_event_name":"SessionStart","session_id":"s"}' |
+  PATH="$slow_bin:$PATH" AGENTGUARD_SESSION_ID="$TEST_SID" AGENTGUARD_NAME=agent \
+    "$TELEMETRY_HOOK" | cat >/dev/null
+elapsed=$((SECONDS - start))
+_assert_eq "session start: background prune does not hold the host pipe" "true" \
+  "$([ "$elapsed" -lt 2 ] && echo true || echo "false (${elapsed}s)")"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== lifecycle hooks key records by the payload session ==="
+
+# Lifecycle hooks may never read stdin themselves; their record must still
+# land beside the event record keyed by the payload's session id.
+_fresh_root
+printf '%s' '{"hook_event_name":"Stop","session_id":"payload-only-sid"}' |
+  env -u AGENTGUARD_SESSION_ID AGENTGUARD_NAME=agent "$BIN_DIR/agent-hook-stop" >/dev/null 2>&1
+_assert_eq "stop hook: recorded under the payload session id" "true" \
+  "$(compgen -G "$AGENTGUARD_TELEMETRY_DIR/sessions/agent/payload-only-sid/*-stop.json" >/dev/null && echo true || echo false)"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== agentguard-telemetry CLI ==="
+
+# An explicit root is exclusive: readers and prune never reach the state home.
+_fresh_root
+iso_home="$(_tmpdir)"
+real_like="$iso_home/.local/state/agentguard/telemetry/sessions/agent/home-session"
+mkdir -p "$real_like"
+printf '%s\n' '{"schema":"agentguard.telemetry.v1","kind":"event","ts":"2020-01-01T00:00:00.000000Z"}' \
+  >"$real_like/1577836800000000-1-telemetry.json"
+touch -t 202001010000 "$real_like"
+_run_hook "$TELEMETRY_HOOK" "$PRE_TOOL"
+CLI_EXIT=0
+CLI_OUT=$(env -u XDG_STATE_HOME HOME="$iso_home" "$TELEMETRY_CLI" sessions --json 2>/dev/null) || CLI_EXIT=$?
+_assert_eq "override: state home sessions not listed" "" \
+  "$(printf '%s\n' "$CLI_OUT" | jq -r 'select(.session_key == "home-session") | .session_key')"
+env -u XDG_STATE_HOME HOME="$iso_home" "$TELEMETRY_CLI" prune --days 1 >/dev/null 2>&1
+_assert_eq "override: prune leaves the state home alone" "true" "$([ -d "$real_like" ] && echo true || echo false)"
+
+# A host may send a non-object JSON payload; it must not break the timeline.
+_fresh_root
+_run_hook "$TELEMETRY_HOOK" '"just a string"'
+_run_hook "$TELEMETRY_HOOK" "$PRE_TOOL"
+_run_cli show "$TEST_SID"
+_assert_eq "non-object payload: show succeeds" "0" "$CLI_EXIT"
+_assert_eq "non-object payload: every record rendered" "2" "$(printf '%s\n' "$CLI_OUT" | grep -c '^[0-9]')"
+
+# Agent-controlled text must not reach the terminal as control sequences.
+_fresh_root
+_run_hook "$TELEMETRY_HOOK" '{"hook_event_name":"UserPromptSubmit","prompt":"a\u001b[2Jb\u0007c\u009bd"}'
+_run_cli show "$TEST_SID"
+_assert_eq "escapes: no control characters in timeline" "0" \
+  "$(printf '%s' "$CLI_OUT" | LC_ALL=C tr -d '\n' | LC_ALL=C grep -c '[[:cntrl:]]' || true)"
+_run_cli sessions
+_assert_eq "escapes: no control characters in session table" "0" \
+  "$(printf '%s' "$CLI_OUT" | LC_ALL=C tr -d '\n' | LC_ALL=C grep -c '[[:cntrl:]]' || true)"
 
 _fresh_root
 _run_cli show

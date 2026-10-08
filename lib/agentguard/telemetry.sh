@@ -58,9 +58,17 @@ _agentguard_telemetry_root() {
 # Every root a reader should search, primary first, without duplicates. Some
 # runtimes scrub XDG_* from hook environments while an interactive shell keeps
 # it, so hooks and the CLI can disagree about the primary root; readers merge
-# the plausible tiers instead of silently missing sessions.
+# the plausible tiers instead of silently missing sessions. An explicit
+# absolute override is exclusive: it is how tests and sandboxes isolate
+# themselves, and `prune` must never reach past it into the real state home.
 _agentguard_telemetry_roots() {
   local candidate seen=''
+  case "${AGENTGUARD_TELEMETRY_DIR:-}" in
+    /*)
+      printf '%s\n' "${AGENTGUARD_TELEMETRY_DIR%/}"
+      return 0
+      ;;
+  esac
   for candidate in \
     "$(_agentguard_telemetry_root 2>/dev/null)" \
     "${XDG_STATE_HOME:+${XDG_STATE_HOME%/}/agentguard/telemetry}" \
@@ -86,7 +94,8 @@ $candidate"
 # named by $1. Bash 5's EPOCHREALTIME needs no fork, which matters because
 # every hook calls this twice; its decimal separator follows LC_NUMERIC, hence
 # the `[.,]`. Older shells fall back to whole seconds, which keeps filenames
-# fixed-width and sortable at reduced resolution.
+# fixed-width and sortable, but records within one second then order by pid
+# rather than by time.
 _agentguard_telemetry_now_us() {
   local now="${EPOCHREALTIME:-}" seconds
   if [[ "$now" =~ ^([0-9]+)[.,]([0-9]{6})$ ]]; then

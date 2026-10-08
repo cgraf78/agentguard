@@ -1465,7 +1465,7 @@ _HOOK_TELEMETRY_JQ='
       command: $f[4],
       edit_files: ($f[5] | split("\n") | map(select(. != ""))),
       mcp_server: $f[6],
-      payload_truncated_chars: (if $truncated == "" then null else ($truncated | tonumber) end)
+      payload_truncated_chars: (if $truncated == "" or $kind != "event" then null else ($truncated | tonumber) end)
     }
   | with_entries(select(.value | nonempty))
   | if $kind == "event" then . + {payload: $payload} else . end
@@ -1491,6 +1491,12 @@ _hook_telemetry_exit() {
   local stem tmp event='' raw='' truncated='' max
   _agentguard_telemetry_enabled || return 0
   root=$(_agentguard_telemetry_root 2>/dev/null) || return 0
+  # Lifecycle hooks may never read stdin (their Hive Memory path skips the
+  # read when `hm` is absent). Read it now so the session key comes from the
+  # payload, exactly as agent-hook-telemetry's key does; otherwise runtimes
+  # whose session id lives only in JSON would file this hook's record under
+  # a fallback pid directory. The read is idempotent and bounded.
+  _hook_read_input >/dev/null 2>&1 || true
   hook="${_HOOK_SELF:-$0}"
   hook="${hook##*/}"
   if [ "$hook" = "agent-hook-telemetry" ]; then
@@ -1514,9 +1520,12 @@ _hook_telemetry_exit() {
   case "$max" in
     '' | *[!0-9]*) max=8388608 ;;
   esac
-  if [ "$kind" = event ] && [ "${#raw}" -gt "$max" ]; then
+  if [ "${#raw}" -gt "$max" ]; then
     # Keep a bounded prefix instead of nothing: the record still shows what
-    # the call was, and the original length documents the truncation.
+    # the call was, and the original length documents the truncation. Hook
+    # records only read identity fields from the payload, so the same cap
+    # bounds their jq work; a truncated payload no longer parses, which
+    # leaves those fields to the event record.
     truncated="${#raw}"
     raw="${raw:0:max}"
   fi

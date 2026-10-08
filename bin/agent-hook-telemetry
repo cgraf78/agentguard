@@ -44,15 +44,23 @@ _agentguard_telemetry_enabled || {
 # the trap still records that, so fall through rather than exiting early.
 _hook_read_input || true
 
-# Retention runs at session start only and in the background: a full-tree
+# Retention runs around session start and in the background: a full-tree
 # scan must never delay the host's first turn, and once per session is
-# frequent enough for a window measured in days. The detached child holds no
-# host pipe open, so the runner sees EOF as soon as this hook exits.
+# frequent enough for a window measured in days. The substring prefilter
+# avoids a jq parse on every tool call; a false positive (a command that
+# merely mentions SessionStart) only costs one idempotent prune.
+#
+# The redirections apply to the whole background job, not just an inner
+# subshell: hosts read hook stdout until EOF, so any background process still
+# holding the hook's stdout or stderr would stall the session start for the
+# length of the scan.
 case "${_HOOK_INPUT:-}" in
   *SessionStart* | *sessionStart* | *session_start*)
-    _telemetry_root=$(_agentguard_telemetry_root 2>/dev/null) &&
-      (_agentguard_telemetry_prune "$_telemetry_root" \
-        "$(_agentguard_telemetry_retention_days)") </dev/null >/dev/null 2>&1 &
+    if _telemetry_root=$(_agentguard_telemetry_root 2>/dev/null); then
+      _telemetry_days=$(_agentguard_telemetry_retention_days)
+      _agentguard_telemetry_prune "$_telemetry_root" "$_telemetry_days" \
+        </dev/null >/dev/null 2>&1 &
+    fi
     ;;
 esac
 

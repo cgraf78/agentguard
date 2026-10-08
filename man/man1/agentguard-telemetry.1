@@ -72,9 +72,12 @@ or
 a unique key prefix, or a session directory path. For Claude Code the key
 is the session UUID that also names its transcript.
 .PP
-Readers search the override root, the
+When
+.B AGENTGUARD_TELEMETRY_DIR
+is an absolute path, it is the only root searched or pruned. Otherwise
+readers merge the
 .B XDG_STATE_HOME
-root, and
+root and
 .IR ~/.local/state ,
 because some runtimes scrub
 .B XDG_*

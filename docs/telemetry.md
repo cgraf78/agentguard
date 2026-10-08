@@ -18,7 +18,10 @@ ${XDG_STATE_HOME:-~/.local/state}/agentguard/telemetry/
 ```
 
 `agentguard-telemetry dir` prints the root on the current machine. Set
-`AGENTGUARD_TELEMETRY_DIR` to an absolute path to relocate it.
+`AGENTGUARD_TELEMETRY_DIR` to an absolute path to relocate it; an override is
+exclusive, so the CLI then reads and prunes only that root. Without one, the
+CLI merges the `XDG_STATE_HOME` and `~/.local/state` roots, because some
+runtimes scrub `XDG_*` from hook environments.
 
 The location follows the [XDG Base Directory specification][xdg], which
 reserves `XDG_STATE_HOME` for "actions history (logs, history, recently used

@@ -201,7 +201,11 @@ _telemetry_cmd_sessions() {
   while IFS=$'\t' read -r last agent key dir; do
     records=("$dir"/*.json)
     first="${records[0]}"
-    prompt_file=$(grep -l -m 1 -E '"(prompt|userPrompt)":' "${records[@]}" 2>/dev/null | head -n 1)
+    # Match the prompt event by its top-level field rather than any nested
+    # "prompt" key. Paths stream through xargs: a long session can exceed the
+    # platform's argument-length limit.
+    prompt_file=$(printf '%s\0' "${records[@]}" |
+      xargs -0 grep -l -E '"event":"(UserPromptSubmit|BeforeAgent)"' 2>/dev/null | head -n 1)
     summary=$(jq -nc \
       --arg agent "$agent" --arg key "$key" --arg dir "$dir" \
       --arg last "$last" --argjson count "${#records[@]}" \
@@ -216,7 +220,7 @@ _telemetry_cmd_sessions() {
           started: ($first[0].ts // null),
           last_activity: iso_us($last),
           cwd: ($first[0].cwd // null),
-          first_prompt: (($prompt[0].payload // {}) | (.prompt // .userPrompt // null))
+          first_prompt: ($prompt[0].payload | if type == "object" then (.prompt // .userPrompt) else null end)
         }' 2>/dev/null) || continue
     if $json; then
       printf '%s\n' "$summary"
@@ -227,8 +231,8 @@ _telemetry_cmd_sessions() {
           .session_key,
           (.records | tostring),
           ((.cwd // "-") | if length > 24 then "…" + .[-23:] else . end),
-          ((.first_prompt // "-") | gsub("[\r\n\t]+"; " ") | if length > 60 then .[:59] + "…" else . end)
-        ] | "\(.[0] | . + " " * (26 - length)) \(.[1] | . + " " * ([7 - length, 0] | max)) \(.[2] | . + " " * ([38 - length, 0] | max)) \(.[3] | " " * ([6 - length, 0] | max) + .)  \(.[4] | . + " " * ([24 - length, 0] | max)) \(.[5])"'
+          ((.first_prompt // "-") | gsub("[\u0000-\u001f\u007f-\u009f]+"; " ") | if length > 60 then .[:59] + "…" else . end)
+        ] | map(gsub("[\u0000-\u001f\u007f-\u009f]+"; " ")) | "\(.[0] | . + " " * (26 - length)) \(.[1] | . + " " * ([7 - length, 0] | max)) \(.[2] | . + " " * ([38 - length, 0] | max)) \(.[3] | " " * ([6 - length, 0] | max) + .)  \(.[4] | . + " " * ([24 - length, 0] | max)) \(.[5])"'
     fi
   done <<<"$rows"
 }
@@ -237,7 +241,10 @@ _telemetry_cmd_sessions() {
 # scans for (the prompt, command, file, or guard message) over raw JSON.
 # shellcheck disable=SC2016 # jq program, not shell expansions.
 _TELEMETRY_TIMELINE_JQ='
-  def oneline: gsub("[\r\n\t]+"; " ");
+  # Records hold agent-controlled text (prompts, commands, tool output).
+  # Replace every C0/C1 control character, not only newlines, so an embedded
+  # ANSI escape sequence cannot rewrite the auditor'\''s terminal.
+  def clean: gsub("[\u0000-\u001f\u007f-\u009f]+"; " ");
   def clip($n): if length > $n then .[:$n - 1] + "…" else . end;
   def pad($n): . + " " * ([$n - length, 0] | max);
   def input_summary:
@@ -247,7 +254,7 @@ _TELEMETRY_TIMELINE_JQ='
           // (if . == {} then "" else tojson end)) | tostring
     end;
   def summary:
-    (.payload // {}) as $p
+    (.payload | if type == "object" then . else {} end) as $p
     | if .kind == "hook" then
         ([(.blocked // [])[] | "BLOCKED: " + .]
          + [(.warnings // [])[] | "WARN: " + .]
@@ -266,9 +273,16 @@ _TELEMETRY_TIMELINE_JQ='
     ((.event // "-") | pad(18)),
     ((if .kind == "hook" then .hook | sub("^agent-hook-"; "") else (.tool_name // "") end) | clip(22) | pad(22)),
     ((.outcome // "-") | pad(7)),
-    (summary | oneline | clip(160))
-  ] | join(" ")
+    (summary | clean | clip(160))
+  ] | join(" ") | clean
 '
+
+# Concatenate a session's records in chronological order. Paths stream through
+# xargs because a long session's record list can exceed the platform's
+# argument-length limit (256 KiB on macOS).
+_telemetry_cat() {
+  printf '%s\0' "$1"/*.json | xargs -0 cat
+}
 
 _telemetry_cmd_show() {
   local want='' json=false dir
@@ -293,10 +307,11 @@ _telemetry_cmd_show() {
   if $json; then
     # Each record file is one line, so concatenation is valid JSONL; `jq -c`
     # also normalizes any record written by a future schema with whitespace.
-    jq -c . "${records[@]}"
+    _telemetry_cat "$dir" | jq -c .
   else
-    printf '# %s\n' "$dir"
-    jq -r "$_TELEMETRY_TIMELINE_JQ" "${records[@]}"
+    # The directory name embeds an untrusted session id.
+    printf '# %s\n' "${dir//[[:cntrl:]]/?}"
+    _telemetry_cat "$dir" | jq -r "$_TELEMETRY_TIMELINE_JQ"
   fi
 }
 
