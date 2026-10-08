@@ -36,16 +36,47 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
 _hook_parse_mcp
 
 # Track consecutive failures per server so the pre-mcp circuit breaker
-# can block calls to a down server. Reset on any success.
-is_error=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_result_is_error // .isError // false')
-
-if [ "$is_error" = "true" ]; then
-  _hook_counter_increment "$_HOOK_MCP_FAIL_FILE"
+# can block calls to a down server. Reset on any success. Runtimes report a
+# failed MCP call differently:
+#   - a failure event (Claude/Muse PostToolUseFailure, Grok
+#     post_tool_use_failure) is itself the signal;
+#   - a top-level flag (OpenCode adapter, Grok `isError`);
+#   - the MCP CallToolResult's own `isError` in tool_response (Codex);
+#   - Gemini's ToolResult `error` object in tool_response. Only Gemini's
+#     response shape is AgentGuard-owned there; elsewhere tool_response is the
+#     server's arbitrary JSON, so an `error` key in it is not a signal.
+# A user interrupt (Claude `is_interrupt`) says nothing about the server, so
+# it neither counts nor resets. Output is `interrupt`, `true`, or `false`; a
+# jq failure leaves the counter untouched rather than resetting it.
+agent="${AGENTGUARD_NAME:-}"
+[ -n "$agent" ] || agent=$(_hook_agent_name)
+if verdict=$(printf '%s' "$_HOOK_INPUT" | jq -r --arg agent "$agent" '
+  def flag: . == true or . == "true";
+  (.tool_response // .toolResponse) as $r
+  | if (.is_interrupt // .isInterrupt) == true then "interrupt"
+    elif ((.hook_event_name // .hookEventName // "") | tostring | test("^(PostToolUseFailure|post_tool_use_failure)$"))
+      or ((.tool_result_is_error // .isError) | flag)
+      or (($r | type) == "object" and (($r.isError | flag)
+        or ($agent == "gemini" and (($r.error | type) == "object" or (($r.error | type) == "string" and $r.error != "")))))
+    then "true" else "false" end
+' 2>/dev/null); then
+  case "$verdict" in
+    true) _hook_counter_increment "$_HOOK_MCP_FAIL_FILE" ;;
+    false) _hook_counter_reset "$_HOOK_MCP_FAIL_FILE" ;;
+  esac
 else
-  _hook_counter_reset "$_HOOK_MCP_FAIL_FILE"
+  verdict=''
 fi
 
 # MCP success/failure is another tool boundary; `hm` owns any memory refresh.
-_hook_hm_tool_complete
+# Hand `hm` the failure verdict computed above; its generic status reader
+# does not know the runtime-specific failure shapes.
+# An interrupted call did not succeed either, so it must not refresh state
+# the way a success does.
+case "$verdict" in
+  true | interrupt) _hook_hm_tool_complete 1 ;;
+  false) _hook_hm_tool_complete 0 ;;
+  *) _hook_hm_tool_complete ;;
+esac
 _hook_source_extensions
 _hook_finish

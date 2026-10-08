@@ -17,7 +17,17 @@ _HOOK_BLOCKED=''
 _HOOK_CTX=''
 _HOOK_HM_CONFIG_PATH=''
 _HOOK_INPUT_STATE_REFRESHED=''
+_HOOK_INPUT_SESSION=''
+_HOOK_INPUT_EVENT=''
+# Set once this process has tried to read stdin, so the telemetry trap does not
+# wait on an empty or held-open pipe a second time.
+_HOOK_INPUT_ATTEMPTED=''
 _HOOK_PROMPT_SUBMITTED=''
+# Telemetry accumulators: block/warn/remind messages joined by ASCII record
+# separators so multi-line messages survive intact into the audit record.
+_HOOK_TELEMETRY_BLOCKS=''
+_HOOK_TELEMETRY_WARNINGS=''
+_HOOK_TELEMETRY_REMINDERS=''
 
 # General non-interactive shells get env.d through BASH_ENV/.zshenv. This is a
 # hook-local fallback for launchers that invoke hook scripts by absolute path
@@ -52,6 +62,12 @@ unset _agentguard_lib_source
 # shellcheck source=detect.sh
 # shellcheck disable=SC1091 # sibling module resolved from this file's dir.
 source "$_AGENTGUARD_LIB_DIR/detect.sh"
+# shellcheck source=telemetry.sh
+# shellcheck disable=SC1091 # sibling module resolved from this file's dir.
+source "$_AGENTGUARD_LIB_DIR/telemetry.sh"
+# Captured as early as possible so a record's duration covers session
+# resolution and payload parsing, not just the hook's policy logic.
+_agentguard_telemetry_now_us _HOOK_TELEMETRY_START_US
 
 # Return a stable Codex session key when Codex does not hand hooks a runtime
 # session id. Codex launches hook scripts as short-lived child processes, so $$
@@ -194,8 +210,11 @@ _hook_agent_ancestor_key() {
 # user launches nested Codex, so once Codex JSON has been read its session_id is
 # the authoritative key. If Codex does not expose one, managed hooks fall back
 # to the long-lived Codex parent process instead of each short-lived hook
-# process. Grok injects GROK_SESSION_ID on hook processes; Gemini lacks a
-# durable id, so its parent CLI process remains the key. Other hook runners
+# process. Grok injects GROK_SESSION_ID on hook processes. Gemini exports its
+# durable GEMINI_SESSION_ID to hook processes only, which tool shells cannot
+# rely on, so guard state keys on the parent CLI process both sides can
+# resolve (durable telemetry records use the session id; see
+# _hook_telemetry_key). Other hook runners
 # may only provide a JSON session_id / sessionId on stdin; parsers refresh
 # after reading it. Empty or session-less JSON must still fall through to the
 # Codex process key; otherwise reading a closed stdin would downgrade an
@@ -209,7 +228,7 @@ _hook_agent_ancestor_key() {
 # circuit-breaker or Hive Memory markers with the parent. Parent SessionStart
 # and Stop omit subagentType and keep the unsuffixed key.
 _hook_refresh_state_dir() {
-  local session_key='' input_session='' input_subagent='' input_prompt='' codex_key='' ancestor=''
+  local session_key='' input_session='' input_subagent='' input_prompt='' input_event='' codex_key='' ancestor=''
   if [ -n "${_HOOK_INPUT+x}" ]; then
     # Grok's hook envelope is camelCase (sessionId, subagentType); Claude/Codex
     # remain snake_case. Prefer snake_case so an existing runtime stays
@@ -219,10 +238,20 @@ _hook_refresh_state_dir() {
       IFS= read -r input_session || true
       IFS= read -r input_subagent || true
       IFS= read -r input_prompt || true
+      IFS= read -r input_event || true
     } < <(printf '%s' "$_HOOK_INPUT" | jq -r '
-      (.session_id // .sessionId // ""),
-      (.subagent_type // .subagentType // ""),
-      (.prompt_id // .promptId // "")
+      # One output line per field: strings (and numbers, as before) count, an
+      # object or array would print as multi-line JSON so it does not, and
+      # CR/LF are removed so a value can never shift the fields after it.
+      # split/join rather than gsub: jq 1.6 regex costs ~1 ms on this hot path.
+      def line:
+        if type == "string" then split("\n") | join("") | split("\r") | join("")
+        elif type == "number" then tostring
+        else "" end;
+      ((.session_id // .sessionId) | line),
+      ((.subagent_type // .subagentType) | line),
+      ((.prompt_id // .promptId) | line),
+      ((.hook_event_name // .hookEventName) | line)
     ' 2>/dev/null)
   fi
 
@@ -317,6 +346,10 @@ _hook_refresh_state_dir() {
   # hook process instead of being trusted structurally anywhere downstream.
   _hook_session_key_safe "$session_key" || session_key="$$"
 
+  # Kept for telemetry, which keys durable records by the payload's own id
+  # where the state key is process-scoped (see _hook_telemetry_key).
+  _HOOK_INPUT_SESSION="$input_session"
+  _HOOK_INPUT_EVENT="$input_event"
   _HOOK_SESSION_KEY="$session_key"
   _HOOK_STATE_DIR="$(_hook_state_root)/$_HOOK_SESSION_KEY"
   if [ -n "${_HOOK_INPUT+x}" ]; then
@@ -326,17 +359,17 @@ _hook_refresh_state_dir() {
   fi
 }
 
-# String prefilter: does this payload mention any session field the state
-# refresh reads (`session_id`/`sessionId`, `subagent_type`/`subagentType`,
-# `prompt_id`/`promptId`)? The refresh extracts those three fields and nothing
-# else from hook JSON, so a payload mentioning none of them re-resolves the
+# String prefilter: does this payload mention any field the state refresh
+# reads (`session_id`/`sessionId`, `subagent_type`/`subagentType`,
+# `prompt_id`/`promptId`), or a failure event whose name post hooks must echo
+# (`_HOOK_INPUT_EVENT`)? A payload mentioning none of them re-resolves the
 # exact key the source-time refresh already computed. False positives (a
 # command containing the word "session") just take the slow path. Any
 # `\uXXXX` escape also takes the slow path, so JSON-escaped key spellings
 # (e.g. `ses\u0073ion_id`) cannot false-negative.
 _hook_input_has_session_fields() {
   case "${1:-}" in
-    *session* | *subagent* | *prompt* | *\\u*) return 0 ;;
+    *session* | *subagent* | *prompt* | *PostToolUseFailure* | *\\u*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -359,11 +392,13 @@ _hook_refresh_state_dir
 
 _hook_block() {
   _HOOK_BLOCKED=1
+  _hook_telemetry_note _HOOK_TELEMETRY_BLOCKS "$1"
   printf 'BLOCKED: %s\n' "$1" >&2
 }
 
 _hook_warn() {
   local message="$1"
+  _hook_telemetry_note _HOOK_TELEMETRY_WARNINGS "$message"
   printf 'WARNING: %s\n' "$message" >&2
   # Successful hook stderr is not a reliable model-visible channel across
   # agents. Warnings are behavioral steer, so carry them through the protocol
@@ -373,6 +408,7 @@ _hook_warn() {
 
 _hook_remind() {
   local message="$1"
+  _hook_telemetry_note _HOOK_TELEMETRY_REMINDERS "$message"
   printf 'REMINDER: %s\n' "$message" >&2
   # Same rationale as _hook_warn: reminders should affect the next model turn,
   # not depend on whether a client happens to surface successful-hook stderr.
@@ -682,6 +718,7 @@ _hook_read_input() {
     return 0
   fi
   [ ! -t 0 ] || return 1
+  _HOOK_INPUT_ATTEMPTED=1
   local input stdin_timeout stdin_drain_timeout chunk read_rc
   stdin_timeout="${AGENTGUARD_HOOK_STDIN_TIMEOUT:-0.05}"
   stdin_drain_timeout="${AGENTGUARD_HOOK_STDIN_DRAIN_TIMEOUT:-1}"
@@ -838,8 +875,9 @@ _hook_tool_stdout() {
 }
 
 # Parses edited file paths from hook JSON input. Edit/Write style tools pass a
-# single file_path; Codex API apply_patch passes a patch body, so extract the
-# file headers from that structured patch format.
+# single file_path; Codex API apply_patch passes a patch body (in Codex hook
+# payloads, as tool_input.command), so extract the file headers from that
+# structured patch format.
 _hook_parse_edit_files() {
   if ! _hook_read_input; then
     AGENTGUARD_EDIT_FILES=''
@@ -853,7 +891,7 @@ _hook_parse_edit_files() {
     def patch_text:
       if (tool_payload | type) == "string" then tool_payload
       elif (tool_payload | type) == "object" then
-        (tool_payload.patch // tool_payload.input // tool_payload.diff // empty)
+        (tool_payload.patch // tool_payload.input // tool_payload.diff // tool_payload.command // empty)
       else empty end;
     def first_seen:
       reduce .[] as $item ([]; if index($item) then . else . + [$item] end);
@@ -876,29 +914,56 @@ _hook_parse_edit_files() {
 # extracted.
 _hook_parse_mcp() {
   _hook_read_input || exit 0
-  local tool_name remainder
-  tool_name=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_name // .toolName // empty')
+  local tool_name remainder context_server='' context_tool=''
+  # One jq for the name and Gemini's structured MCP identity, keeping the
+  # hook's parse budget.
+  {
+    IFS= read -r tool_name || true
+    IFS= read -r context_server || true
+    IFS= read -r context_tool || true
+  } < <(printf '%s' "$_HOOK_INPUT" | jq -r '
+    (.tool_name // .toolName // ""),
+    (.mcp_context.server_name // "" | strings),
+    (.mcp_context.tool_name // "" | strings)
+  ' 2>/dev/null)
   [ -z "$tool_name" ] && exit 0
-  case "$tool_name" in
-    mcp__*__*)
-      remainder="${tool_name#mcp__}"
-      _HOOK_MCP_SERVER="${remainder%__*}"
-      _HOOK_MCP_TOOL_NAME="${remainder##*__}"
-      ;;
-    *__*)
-      # Grok (and Cursor-compat) MCP calls arrive as qualified server__tool
-      # names, not Claude's mcp__server__tool prefix. Split on the first
-      # separator so a tool name that itself contains __ stays intact.
-      _HOOK_MCP_SERVER="${tool_name%%__*}"
-      _HOOK_MCP_TOOL_NAME="${tool_name#*__}"
-      ;;
-    *) exit 0 ;;
-  esac
+  if [ -n "$context_server" ] && [ -n "$context_tool" ]; then
+    # Gemini CLI sends the real server and tool names alongside its
+    # mcp_<server>_<tool> spelling. Prefer them: a server name may itself
+    # contain `_`, which no split of the qualified name can recover.
+    _HOOK_MCP_SERVER="$context_server"
+    _HOOK_MCP_TOOL_NAME="$context_tool"
+  elif [[ "$tool_name" == mcp_[!_]*_?* ]] && [ "$(_hook_agent_name)" = "gemini" ]; then
+    # Older Gemini payloads without mcp_context: split on the first `_`, as
+    # Gemini's own parseMcpToolName does. Gated on the detected runtime
+    # because elsewhere that spelling is just a tool name.
+    remainder="${tool_name#mcp_}"
+    _HOOK_MCP_SERVER="${remainder%%_*}"
+    _HOOK_MCP_TOOL_NAME="${remainder#*_}"
+  else
+    case "$tool_name" in
+      mcp__*__*)
+        remainder="${tool_name#mcp__}"
+        _HOOK_MCP_SERVER="${remainder%__*}"
+        _HOOK_MCP_TOOL_NAME="${remainder##*__}"
+        ;;
+      *__*)
+        # Grok (and Cursor-compat) MCP calls arrive as qualified server__tool
+        # names, not Claude's mcp__server__tool prefix. Split on the first
+        # separator so a tool name that itself contains __ stays intact.
+        _HOOK_MCP_SERVER="${tool_name%%__*}"
+        _HOOK_MCP_TOOL_NAME="${tool_name#*__}"
+        ;;
+      *) exit 0 ;;
+    esac
+  fi
   [ -z "$_HOOK_MCP_SERVER" ] && exit 0
   [ -z "$_HOOK_MCP_TOOL_NAME" ] && exit 0
 
   _HOOK_MCP_TOOL="$tool_name"
-  _HOOK_MCP_FAIL_FILE="$_HOOK_STATE_DIR/mcp-failures-$_HOOK_MCP_SERVER"
+  # The server name names a state file. Gemini documents it as arbitrary
+  # user-controlled text, so a `/` must not reach the path.
+  _HOOK_MCP_FAIL_FILE="$_HOOK_STATE_DIR/mcp-failures-${_HOOK_MCP_SERVER//\//_}"
 }
 
 # Uses the command classifier to change into a leading `cd` target. Used by
@@ -1390,12 +1455,285 @@ _hook_hm_prompt_submit() {
   _hook_hm_event prompt-submit --text "$prompt"
 }
 
+# Optional $1 overrides the derived status, for hooks that already know
+# whether the tool call failed in a runtime-specific shape.
 _hook_hm_tool_complete() {
-  _hook_hm_event tool-complete --status "$(_hook_hm_tool_status)"
+  _hook_hm_event tool-complete --status "${1:-$(_hook_hm_tool_status)}"
 }
 
 _hook_hm_stop() {
   _hook_hm_event stop
+}
+
+# --- Telemetry ---
+
+# Append message $2 to the accumulator named by $1 (record-separator joined).
+_hook_telemetry_note() {
+  local current="${!1}" message
+  _hook_telemetry_field message "$2"
+  if [ -n "$current" ]; then
+    printf -v "$1" '%s\x1e%s' "$current" "$message"
+  else
+    printf -v "$1" '%s' "$message"
+  fi
+}
+
+# Store $2 into the variable named by $1 with the record's ASCII separators
+# (unit \x1f between fields, record \x1e between list items) replaced by their
+# visible Unicode symbols. Messages, commands, and file names can carry
+# agent-controlled bytes; a raw separator would shift every later field and
+# let the model forge or hide parts of the audit record.
+_hook_telemetry_field() {
+  local value="$2"
+  value="${value//$'\x1f'/␟}"
+  value="${value//$'\x1e'/␞}"
+  printf -v "$1" '%s' "$value"
+}
+
+# jq program that turns the unit-separated field stream written by
+# _hook_telemetry_exit into one schema v1 record. The payload is the last
+# field and is re-joined, so a stray separator inside it cannot shift columns.
+# Raw payload text travels through stdin, never argv or the environment:
+# Linux caps a single argument or variable at 128 KiB, which a PostToolUse
+# payload carrying full command output easily exceeds.
+# shellcheck disable=SC2016 # jq variables, not shell expansions.
+_HOOK_TELEMETRY_JQ='
+  def nonempty: select(. != null and . != "" and . != []);
+  def list: if . == "" then [] else split("\u001e") end;
+  split("\u001f") as $f
+  | ($f[7:] | join("\u001f")) as $raw
+  | (if $raw == "" then null
+     else ($raw | try fromjson catch {unparsed: $raw}) end) as $payload
+  | ($payload | if type == "object" then . else {} end) as $p
+  | ($sec | tonumber | todate | sub("Z$"; ".\($frac)Z")) as $ts
+  | {
+      schema: $schema,
+      kind: $kind,
+      ts: $ts,
+      agent: $agent,
+      session_key: $key,
+      state_key: (if $state_key == $key then null else $state_key end),
+      launcher_key: (if $launcher == "" or $launcher == $key or $launcher == $state_key then null else $launcher end),
+      session_id: (($p.session_id // $p.sessionId) | if type == "string" then . else null end),
+      event: ($p.hook_event_name // $p.hookEventName // (if $event == "" then null else $event end)),
+      hook: $hook,
+      tool_name: ($p.tool_name // $p.toolName),
+      tool_use_id: ($p.tool_use_id // $p.toolUseId // $p.tool_call_id // $p.toolCallId // $p.call_id // $p.callId),
+      cwd: ($p.cwd // $pwd),
+      host: $host,
+      pid: ($pid | tonumber),
+      ppid: ($ppid | tonumber),
+      exit_status: ($status | tonumber),
+      outcome: (if $status == "0" then "ok" elif $status == "2" then "blocked" else "error" end),
+      duration_ms: ($duration | tonumber),
+      blocked: ($f[0] | list),
+      warnings: ($f[1] | list),
+      reminders: ($f[2] | list),
+      context: $f[3],
+      command: $f[4],
+      edit_files: ($f[5] | split("\n") | map(select(. != ""))),
+      mcp_server: $f[6],
+      payload_truncated_chars: (if $truncated == "" or $kind != "event" then null else ($truncated | tonumber) end)
+    }
+  | with_entries(select(.value | nonempty))
+  | if $kind == "event" then . + {payload: $payload} else . end
+'
+
+# Reduce the value of the variable named by $1, in place, to a portable path
+# component for the telemetry tree: anything outside [[:alnum:]._:-] becomes
+# `_`, a leading dot is replaced (dot-directories are invisible to listing
+# globs, and `.`/`..` would escape), and the result is capped well below
+# NAME_MAX. Session ids are untrusted input (payload JSON, runtime env), and
+# the read-side CLI parses tab-separated rows and prints keys to terminals, so
+# control characters must never reach a directory name. Real runtime ids
+# (UUIDs, `ses_...`, `gemini-<pid>`) already fit and pass through unchanged.
+_hook_telemetry_component() {
+  # C locale: [[:alnum:]] is ASCII-only and the length cap counts bytes, so
+  # the result is the same everywhere and always fits NAME_MAX (a UTF-8
+  # locale would keep multibyte letters and could exceed 255 bytes).
+  local LC_ALL=C
+  local value="${!1}"
+  value="${value//[![:alnum:]._:-]/_}"
+  case "$value" in
+    .*) value="_${value#.}" ;;
+  esac
+  value="${value:0:128}"
+  [ -n "$value" ] || return 1
+  printf -v "$1" '%s' "$value"
+}
+
+# Store the directory key for this hook's audit records into the variable
+# named by $1, for detected agent $2 (no subshell: this runs on every hook
+# exit). Guard state keys are tuned so a tool shell and its hooks agree inside
+# one live process, which is the wrong trade-off for records kept for months:
+#   - Gemini's state key is its CLI pid. Pids recycle within the retention
+#     window, and every session `/clear` starts in one process shares it, so
+#     unrelated sessions would merge. Gemini puts its real session id in every
+#     payload (and in GEMINI_SESSION_ID), so records use that.
+#   - Muse's launcher falls back to its pid when MUSE_SESSION_ID is unset, so
+#     the payload's session id is preferred there too.
+#   - Grok suffixes subagent state keys so concurrent children keep separate
+#     circuit breakers. Claude and Muse subagent events carry the parent
+#     session id, so Grok records file under the parent too; the child key
+#     stays visible as the record's `state_key`.
+# The branch follows the detected agent rather than AGENTGUARD_NAME so a
+# hand-wired runtime (no identity prefix) is keyed the same way. Every other
+# runtime's state key already is its durable session id.
+_hook_telemetry_key() {
+  local candidate=''
+  case "${2:-}" in
+    gemini) candidate="${_HOOK_INPUT_SESSION:-${GEMINI_SESSION_ID:-}}" ;;
+    muse) candidate="${MUSE_SESSION_ID:-$_HOOK_INPUT_SESSION}" ;;
+    grok)
+      candidate="${GROK_SESSION_ID:-${AGENTGUARD_SESSION_ID:-}}"
+      [ -n "$candidate" ] || candidate="${_HOOK_SESSION_KEY%%:*}"
+      ;;
+  esac
+  [ -n "$candidate" ] || candidate="${_HOOK_SESSION_KEY:-}"
+  _hook_telemetry_component candidate || return 1
+  printf -v "$1" '%s' "$candidate"
+}
+
+# EXIT trap for hook entry points: write one audit record for this hook
+# invocation. Running from the trap rather than _hook_finish covers every exit
+# path, including early no-op exits and fail-closed parse errors, and observes
+# the real exit status the host receives.
+#
+# Record kinds:
+#   event — written by agent-hook-telemetry; carries the full host payload.
+#   hook  — written by every other hook; carries the decision (exit status,
+#           block/warn/remind messages, injected context, parsed command or
+#           edit files) but not the payload, which the matching event record
+#           already holds. Storing it twice would double the disk cost of
+#           large tool outputs.
+#
+# Telemetry must never change hook behavior: every failure is silent, and the
+# trap leaves the exit status untouched (it never calls `exit`).
+_hook_telemetry_exit() {
+  local status=$? hook kind root agent key dir end_us elapsed duration
+  local stem tmp event='' raw='' truncated='' max ctx cmd files server
+  _agentguard_telemetry_enabled || return 0
+  root=$(_agentguard_telemetry_root 2>/dev/null) || return 0
+  # Lifecycle hooks may never read stdin (their Hive Memory path skips the
+  # read when `hm` is absent). Read it now so the session key comes from the
+  # payload, exactly as agent-hook-telemetry's key does; otherwise runtimes
+  # whose session id lives only in JSON would file this hook's record under
+  # a fallback pid directory. The read is idempotent and bounded.
+  if [ -n "${_HOOK_INPUT+x}" ] || [ -z "$_HOOK_INPUT_ATTEMPTED" ]; then
+    _hook_read_input >/dev/null 2>&1 || true
+  fi
+  hook="${_HOOK_SELF:-$0}"
+  hook="${hook##*/}"
+  if [ "$hook" = "agent-hook-telemetry" ]; then
+    kind=event
+  else
+    kind=hook
+    # Fallback only, for hooks that received no payload (the payload's own
+    # event name wins in the jq program). _hook_event_name maps to response
+    # schema names and defaults unknown hooks to UserPromptSubmit, which would
+    # mislabel session-end and notification records, so map explicitly and
+    # leave anything unrecognized unnamed.
+    case "${hook#agent-hook-}" in
+      pre-*) event=PreToolUse ;;
+      post-*) event=PostToolUse ;;
+      session-start*) event=SessionStart ;;
+      session-end*) event=SessionEnd ;;
+      prompt-submit*) event=UserPromptSubmit ;;
+      stop*) event=Stop ;;
+      notification*) event=Notification ;;
+    esac
+  fi
+  agent=$(_hook_agent_name 2>/dev/null) || agent=agent
+  # stderr: restoring an uninstalled caller LC_ALL after the helpers' local
+  # C locale makes bash print setlocale warnings.
+  _hook_telemetry_component agent 2>/dev/null || agent=agent
+  _hook_telemetry_key key "$agent" 2>/dev/null || return 0
+  dir="$root/sessions/$agent/$key"
+
+  _agentguard_telemetry_now_us end_us
+  elapsed=$((end_us - ${_HOOK_TELEMETRY_START_US:-$end_us}))
+  [ "$elapsed" -ge 0 ] || elapsed=0
+  printf -v duration '%d.%03d' "$((elapsed / 1000))" "$((elapsed % 1000))"
+
+  raw="${_HOOK_INPUT:-}"
+  max="${AGENTGUARD_TELEMETRY_MAX_PAYLOAD_CHARS:-8388608}"
+  case "$max" in
+    # More than 15 digits would overflow `[ -gt ]` on some shells.
+    '' | *[!0-9]* | ????????????????*) max=8388608 ;;
+  esac
+  # Force base 10: a leading zero would otherwise be octal to `${raw:0:max}`
+  # (and `08` an error) while `[ -gt ]` reads it as decimal.
+  max=$((10#$max))
+  if [ "${#raw}" -gt "$max" ]; then
+    # Keep a bounded prefix instead of nothing: the record still shows what
+    # the call was, and the original length documents the truncation. Hook
+    # records only read identity fields from the payload, so the same cap
+    # bounds their jq work; a truncated payload no longer parses, which
+    # leaves those fields to the event record.
+    truncated="${#raw}"
+    raw="${raw:0:max}"
+  fi
+
+  # Exiting anyway, so neither the restrictive umask nor noclobber can leak
+  # into caller state. The umask keeps records (which can hold secrets from
+  # tool output) owner-only. A root on a shared path (an override under /tmp,
+  # a shared XDG_STATE_HOME) could hold a session directory or temp file that
+  # another user pre-planted, so records are only written into a real
+  # directory this user owns, and noclobber opens the temp file O_EXCL rather
+  # than following a symlink planted at its name.
+  umask 077
+  set -C
+  # Check every directory AgentGuard owns below the root before creating
+  # anything inside it (the root itself may legitimately be reached through a
+  # user's own symlinked state dir).
+  [ -d "$root/sessions" ] || mkdir -p "$root/sessions" 2>/dev/null || [ -d "$root/sessions" ] || return 0
+  [ ! -L "$root/sessions" ] && [ -O "$root/sessions" ] || return 0
+  [ -d "$root/sessions/$agent" ] || mkdir "$root/sessions/$agent" 2>/dev/null || [ -d "$root/sessions/$agent" ] || return 0
+  [ ! -L "$root/sessions/$agent" ] && [ -O "$root/sessions/$agent" ] || return 0
+  [ -d "$dir" ] || mkdir "$dir" 2>/dev/null || [ -d "$dir" ] || return 0
+  [ ! -L "$dir" ] && [ -O "$dir" ] || return 0
+  stem="$end_us-$$-${hook#agent-hook-}"
+  tmp="$dir/.$stem.tmp"
+  _hook_telemetry_field ctx "$_HOOK_CTX"
+  _hook_telemetry_field cmd "${AGENTGUARD_CMD_TRIMMED:-}"
+  _hook_telemetry_field files "${AGENTGUARD_EDIT_FILES:-}"
+  _hook_telemetry_field server "${_HOOK_MCP_SERVER:-}"
+  # The group's stderr redirect also covers a failed `>"$tmp"` open (an
+  # unwritable or read-only tree), whose message would otherwise reach the
+  # host beside a block reason.
+  {
+    printf '%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s\x1f%s' \
+      "$_HOOK_TELEMETRY_BLOCKS" \
+      "$_HOOK_TELEMETRY_WARNINGS" \
+      "$_HOOK_TELEMETRY_REMINDERS" \
+      "$ctx" \
+      "$cmd" \
+      "$files" \
+      "$server" \
+      "$raw" |
+      jq -Rsc \
+        --arg schema "$_AGENTGUARD_TELEMETRY_SCHEMA" \
+        --arg kind "$kind" \
+        --arg sec "${end_us:0:${#end_us}-6}" \
+        --arg frac "${end_us: -6}" \
+        --arg agent "$agent" \
+        --arg key "$key" \
+        --arg state_key "$_HOOK_SESSION_KEY" \
+        --arg launcher "${AGENTGUARD_SESSION_ID:-}" \
+        --arg event "$event" \
+        --arg hook "$hook" \
+        --arg pwd "${PWD:-}" \
+        --arg host "${HOSTNAME:-}" \
+        --arg pid "$$" \
+        --arg ppid "$PPID" \
+        --arg status "$status" \
+        --arg duration "$duration" \
+        --arg truncated "$truncated" \
+        "$_HOOK_TELEMETRY_JQ" >"$tmp" &&
+      mv -f "$tmp" "$dir/$stem.json"
+  } 2>/dev/null
+  [ -e "$tmp" ] && rm -f "$tmp" 2>/dev/null
+  return 0
 }
 
 # --- Agent identification ---
@@ -1452,7 +1790,17 @@ _hook_event_name() {
     agent-hook-session-start*) echo "SessionStart" ;;
     agent-hook-prompt-submit*) echo "UserPromptSubmit" ;;
     agent-hook-pre-*) echo "PreToolUse" ;;
-    agent-hook-post-*) echo "PostToolUse" ;;
+    agent-hook-post-*)
+      # Post hooks also serve failed tool calls (PostToolUseFailure), and a
+      # strict runner rejects a response naming a different event. The
+      # payload's top-level event name is cached by the state refresh's jq
+      # (a string match could hit a nested object in tool input).
+      if [ "$_HOOK_INPUT_EVENT" = "PostToolUseFailure" ]; then
+        echo "PostToolUseFailure"
+      else
+        echo "PostToolUse"
+      fi
+      ;;
     agent-hook-stop*) echo "Stop" ;;
     agent-hook-notification*) echo "PermissionRequest" ;;
     *) echo "UserPromptSubmit" ;;
@@ -1565,3 +1913,18 @@ _hook_finish() {
   [ -n "$_HOOK_BLOCKED" ] && exit 2
   exit 0
 }
+
+# Record every hook entry point's invocation. Only executables named
+# agent-hook-* install the trap: non-hook launchers (agentguard-churn-bypass)
+# and test harnesses also source this library, and their exits are not hook
+# events. Extensions run inside the hook process and share its single record.
+# Parsed-command and edit-file variables are exported for extensions, so a
+# hook can inherit them from a parent hook's children (a nested agent). Clear
+# them here: every hook parses its own before use, and a record must never
+# attribute a parent's command to this hook.
+case "${_HOOK_SELF:-$0}" in
+  agent-hook-* | */agent-hook-*)
+    unset AGENTGUARD_CMD_TRIMMED AGENTGUARD_CMD_LINE1 AGENTGUARD_EDIT_FILES AGENTGUARD_EDIT_FILE
+    trap _hook_telemetry_exit EXIT
+    ;;
+esac

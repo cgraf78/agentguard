@@ -10,5 +10,7 @@ hook bin/agent-hook-prompt-submit
 hook bin/agent-hook-session-end
 hook bin/agent-hook-session-start
 hook bin/agent-hook-stop
+hook bin/agent-hook-telemetry
 secure-classifier bin/agentguard-classify-command
 hook bin/agentguard-churn-bypass
+classifier bin/agentguard-telemetry

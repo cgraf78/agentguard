@@ -19,6 +19,7 @@ consumer:
 - protected pre-hook denial and protocol-failure behavior
 - advisory handling for post-tool and lifecycle failures
 - per-call state for concurrent tools and bounded cleanup for abandoned state
+- audit events for every tool, prompt, permission request, and lifecycle event
 
 It does not own permissions, OpenCode configuration beyond registering the
 plugin, Hive Memory configuration, shell startup files, or machine policy.
@@ -84,6 +85,91 @@ known server still receives its normal guard, while an otherwise unmatched
 canonical/resource identity or flattened `<server>_<tool>` identity fails
 closed. A cold status failure therefore cannot turn a runtime-added MCP tool
 into an unguarded call merely because it was absent from startup configuration.
+
+## Audit Telemetry
+
+The adapter sends each event to `agent-hook-telemetry` (see
+`docs/telemetry.md`), the passive recorder the declarative fragments register
+for every hook. Records use the guard hooks' snake_case envelope, with
+`tool_use_id` taken from the OpenCode call ID on pre, post, and guard payloads
+alike. A guarded tool keeps the canonical name and input its guard sees;
+unguarded tools such as `read` and `grep`, and MCP helpers that fan out to
+several servers, keep OpenCode's native name and arguments. Every call is
+recorded before any guard runs, so a denied request still has its `PreToolUse`
+record, and post records carry the full tool output, subject to the
+recorder's payload cap.
+
+| OpenCode source | Recorded event |
+| --- | --- |
+| first prompt of a session (lazy start) | `SessionStart` |
+| `chat.message` / V2 `session.prompt` | `UserPromptSubmit` |
+| `tool.execute.before` / `after` | `PreToolUse` / `PostToolUse` |
+| tool error part / V2 `execute.after` error | `PostToolUseFailure` |
+| `permission.ask` / V2 `permission.evaluate` ask | `PermissionRequest` |
+| `experimental.session.compacting` / V2 `session.compaction.started` | `PreCompact` |
+| `session.compacted` / V2 `session.compaction.ended` | `PostCompact` |
+| `session.error` / V2 `session.execution.failed` | `StopFailure` |
+| `session.error` with `MessageAbortedError` / V2 `session.execution.interrupted` | `Interrupt` |
+| `session.idle` | `Stop`, unless that turn already recorded `StopFailure` or `Interrupt` |
+| `session.deleted` or unload | `SessionEnd` |
+| subagent prompt (child session) | `SubagentStart` on the parent |
+| subagent `session.idle`, or deletion mid-turn | `SubagentStop` on the parent |
+
+Lifecycle records follow the guard lifecycle, so internal title, summary, and
+compaction sessions record no prompts or lifecycle events. An interrupted turn
+is an `Interrupt`, not a failure, matching the runtimes that expose that event
+natively; it keeps the V1 native error or the V2 `reason`. `StopFailure` and
+`Interrupt` each end their turn in place of its `Stop` record, and, as in
+Claude Code, the stop guard does not run for that turn. A V2 `superseded`
+interruption names no turn and its turn never goes idle, so it is recorded
+without suppressing the replacing turn's `Stop`. A failed MCP call reaches its
+post guard as `PostToolUseFailure`, matching its audit record, with the
+explicit error flag as well. A V2 background shell admitted as `running`
+records only its `PreToolUse`, matching the post-hook exception below.
+
+A task subagent runs in a child session that names its parent. As in the
+other runtimes, its activity is filed under the top-level session (following
+nested parents) with the child session ID as `agent_id`: each subagent turn
+records `SubagentStart` (with `agent_type` and its task prompt) and
+`SubagentStop` instead of the child's own session, prompt, and stop records,
+and its tool records carry `agent_id`. Tool guards and the subagent's shell
+also use the top-level session, as Claude's subagent tool hooks do, so guard
+state such as edit churn is shared with the delegating agent. Like Claude, a
+subagent runs no lifecycle guards (session start and end, prompt, stop), and
+its permission notice runs on the top-level session with `agent_id`, so no
+hook ever runs under the child's own ID and no guard record opens a separate
+telemetry session for it. Links come from V1 `session.created` and V2
+`session.get` or `session.created`. A V1 session seen without
+`session.created` (a resumed subagent, or a plugin loaded after the child
+existed) is looked up once through the session API before its first prompt; a
+lookup that fails or takes over a second leaves it top-level. Sessions whose
+`session.created` was seen, with or without a parent, are never looked up. A
+link is dropped when its session ends, unless a still-running nested subagent
+resolves through it; it is then dropped with its last descendant. At unload,
+the deepest subagents end first, one level at a time, so each `SubagentStop`
+lands before its parent's `SubagentStop` or `SessionEnd`.
+
+Each record is a separate recorder process, stamped when it finishes, so the
+timeline guarantees only two orderings: a call's post or failure record lands
+after its own `PreToolUse`, and a session's lifecycle records land in dispatch
+order. Tool records are not ordered against lifecycle records or against other
+calls; a `PreToolUse` can be stamped before the prompt that led to it. Join
+records on `tool_use_id` rather than relying on position.
+
+The recorder never affects a tool result or guard decision: it is spawned
+fire-and-forget, its output is discarded, and a missing, failing, or hung
+recorder is silent. A recorder still running after 10 seconds is stopped.
+Unload, and V2 session deletion, wait up to two seconds for in-flight records
+so the final `SessionEnd` lands, then stop or cancel the rest. A host that
+exits without unloading the plugin stops, from its exit handler, any recorder
+that has been running for over a second, with its process group. Younger
+recorders are left to finish on their own, detached in their own process
+group. That rescues only recorders already started: one whose executable
+lookup is still pending at exit never starts, and a call's `PostToolUse`
+recorder starts only after its `PreToolUse` recorder exits, so a host that
+exits immediately after a tool call can lose either record. The trade-off for
+sparing young recorders is that one which wedges within its first second
+before such an exit lingers until it ends by itself.
 
 ## OpenCode V2
 

@@ -14,8 +14,10 @@ program	bin/agent-hook-session-end-claude
 program	bin/agent-hook-session-start
 program	bin/agent-hook-session-start-claude
 program	bin/agent-hook-stop
+program	bin/agent-hook-telemetry
 program	bin/agentguard-churn-bypass
 program	bin/agentguard-classify-command
+program	bin/agentguard-telemetry
 program	bin/claude-session-name
 program	examples/hooks/agent-hook-pre-bash-work
 program	install.sh
@@ -25,6 +27,7 @@ program	lib/agentguard/agentguard.sh
 program	lib/agentguard/detect.sh
 program	lib/agentguard/hook-command-classifier.sh
 program	lib/agentguard/hook-helpers.sh
+program	lib/agentguard/telemetry.sh
 program	share/agentguard/shell.sh
 program	support/script-resolver.sh.template
 program	support/secure-launcher.sh.template
@@ -61,6 +64,7 @@ program	test/suites/agent-hook-perf-regression-test
 program	test/suites/agent-hook-performance-test
 program	test/suites/agent-hook-session-test
 program	test/suites/agent-hook-search-test
+program	test/suites/agent-hook-telemetry-test
 program	test/suites/agentguard-api-test
 program	test/suites/bootstrap-test
 program	test/suites/examples-test

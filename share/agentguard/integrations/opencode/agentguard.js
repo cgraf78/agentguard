@@ -12,6 +12,10 @@ import path from "node:path";
 // Private core barrier: V1 events remain fire-and-forget, while V2 model
 // context must await error/lifecycle guidance before its next request.
 const DRAIN = Symbol("agentguard.drain");
+// Private core entry for audit-only lifecycle events. V2 delivers compaction
+// and failure notices on its own event stream, while the core owns which
+// sessions are started and therefore eligible for a record.
+const OBSERVE = Symbol("agentguard.observe");
 
 const INTERNAL_AGENTS = new Set(["title", "summary", "compaction"]);
 
@@ -37,10 +41,22 @@ const TIMEOUTS = new Map([
   ["agent-hook-session-end", 30_000],
 ]);
 const DEFAULT_TIMEOUT = 10_000;
+// The passive audit recorder normally finishes in milliseconds. Nothing waits
+// for it during a session; this bound only lets unload give a final SessionEnd
+// record time to land before stopping recorders that are still running.
+const RECORDER = "agent-hook-telemetry";
+const RECORDER_DRAIN = 2_000;
+// At host exit only recorders older than this are treated as hung and killed.
+// A healthy recorder finishes in milliseconds and, detached in its own process
+// group, completes its record after the host is gone.
+const RECORDER_EXIT_GRACE = 1_000;
 const CALL_TTL = 6 * 60 * 60 * 1_000;
 const MAX_CALLS = 1_024;
 const MCP_STATUS_TTL = 5_000;
 const MCP_STATUS_TIMEOUT = 1_000;
+// Bounds the one V1 parent lookup per session; past it the session stays
+// top-level rather than delaying its first prompt.
+const SESSION_LOOKUP_TIMEOUT = 1_000;
 const CONTEXT_HEADING = "AgentGuard context";
 // Cleanup executes only after this adapter has declared a hook transaction
 // unsafe. Never resolve its interpreter or process enumerator through a
@@ -65,6 +81,23 @@ const UNSAFE_SHELL_STARTUP_ENV = new Set([
   "FUNCNEST",
   "POSIXLY_CORRECT",
 ]);
+// V2 publishes compaction and turn failures only on its event stream. Map the
+// ones other runtimes also record to the shared event names; the payload keeps
+// each event's native detail.
+const V2_AUDIT_EVENTS = new Map([
+  ["session.compaction.started", (data) => ["PreCompact", { trigger: data.reason }]],
+  [
+    "session.compaction.ended",
+    (data) => ["PostCompact", { trigger: data.reason, compact_summary: data.text }],
+  ],
+  ["session.execution.failed", (data) => ["StopFailure", { error: data.error }]],
+  // An interrupted turn did not fail. Codex and Muse expose this natively as
+  // Interrupt, and Claude reports no StopFailure for it, so keep the two apart.
+  ["session.execution.interrupted", (data) => ["Interrupt", { reason: data.reason }]],
+]);
+// Either event ends its turn abnormally and takes the place of that turn's
+// Stop record, on V1 and V2 alike.
+const ABNORMAL_TURN_ENDS = new Set(["StopFailure", "Interrupt"]);
 const PERMISSION_FAILURE_PREFIXES = [
   "The user rejected permission to use this specific tool call.",
   "The user rejected permission to use this specific tool call with the following feedback:",
@@ -128,10 +161,14 @@ for _ in range(2):
 // Long-running Bash checks need the same practical budget as the Claude and
 // Codex integrations. Tests scale these values instead of weakening production
 // behavior.
-function timeoutFor(hook) {
+function scaled(milliseconds) {
   const scale = Number.parseFloat(process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE ?? "1");
   const safeScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
-  return Math.max(1, Math.round((TIMEOUTS.get(hook) ?? DEFAULT_TIMEOUT) * safeScale));
+  return Math.max(1, Math.round(milliseconds * safeScale));
+}
+
+function timeoutFor(hook) {
+  return scaled(TIMEOUTS.get(hook) ?? DEFAULT_TIMEOUT);
 }
 
 function sanitizeMcpName(value) {
@@ -316,6 +353,23 @@ function couldBeDynamicMcpTool(tool) {
   return RESOURCE_TOOLS.has(tool) || tool.startsWith("mcp__") || tool.includes("_");
 }
 
+function auditTarget(tool, args, targets, directory) {
+  // The audit trail holds one event per OpenCode call, not one per guard. A
+  // single guarded identity keeps the canonical name its guard records carry;
+  // unguarded tools and multi-server fan-out keep OpenCode's native name.
+  if (targets?.length === 1) return targets[0];
+  let direct;
+  try {
+    direct = directTarget(tool, args ?? {});
+  } catch {
+    // Arguments too malformed to normalize are kept verbatim: the request
+    // still belongs in the trail even though its guard will refuse it.
+  }
+  return direct
+    ? { ...direct, cwd: targetCwd(direct, directory) }
+    : { kind: targets?.[0]?.kind, name: tool, input: args, cwd: directory };
+}
+
 function targetCwd(target, directory) {
   // This mirrors OpenCode's current Bash contract: absolute workdirs win and
   // ordinary relative values resolve from the plugin's project directory.
@@ -338,12 +392,15 @@ function basePayload(sessionID, directory, eventName) {
   };
 }
 
-function toolPayload(sessionID, directory, eventName, target, output) {
+// The call ID is AgentGuard's tool_use_id: the documented key that joins a
+// guard's decision record to the recorder's pre and post events for one call.
+function toolPayload(sessionID, directory, eventName, target, callID, output) {
   const response = output === undefined ? undefined : toolResponse(target, output);
   return {
     ...basePayload(sessionID, directory, eventName),
     tool_name: target.name,
     tool_input: target.input,
+    ...(callID === undefined ? {} : { tool_use_id: callID }),
     ...(response === undefined ? {} : { tool_response: response }),
     ...(target.kind === "mcp" && typeof output?.isError === "boolean"
       ? { tool_result_is_error: output.isError }
@@ -536,12 +593,216 @@ function spawnHook(command, hook, payload, directory, sessionID, runtimeName) {
   });
 }
 
-export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
+// Recorders whose leader is still running, mapped to their start time. Their
+// children and watchdogs are unref'd so they never hold the host open; without
+// this a wedged recorder, with its process group, would outlive a host that
+// exits without unloading the plugin. The listener exists only while one is
+// live.
+const liveRecorders = new Map();
+
+function stopLiveRecorders() {
+  // Exit handlers run synchronously and must never throw: each stop is a
+  // non-blocking SIGKILL that already swallows a lost race. Young recorders
+  // are spared: a host that exits right after a tool call must still leave
+  // that call's record, which an orphaned recorder finishes on its own.
+  const cutoff = Date.now() - scaled(RECORDER_EXIT_GRACE);
+  for (const [terminate, started] of liveRecorders) {
+    if (started > cutoff) continue;
+    try {
+      terminate();
+    } catch {
+      // Keep stopping the rest.
+    }
+  }
+  liveRecorders.clear();
+}
+
+function trackRecorder(terminate) {
+  if (liveRecorders.size === 0) process.on("exit", stopLiveRecorders);
+  liveRecorders.set(terminate, Date.now());
+}
+
+function untrackRecorder(terminate) {
+  if (liveRecorders.delete(terminate) && liveRecorders.size === 0) {
+    process.removeListener("exit", stopLiveRecorders);
+  }
+}
+
+// The recorder only observes, so none of its outcomes may reach OpenCode: it
+// bypasses invoke()'s fail-closed protocol, its output is discarded, and every
+// failure is silent. It still gets the guard hooks' sanitized environment and
+// private process group so a wedged recorder can be stopped with its helpers.
+function spawnRecorder(command, body, directory, sessionID, runtimeName) {
+  const grouped = process.platform !== "win32";
+  let child;
+  try {
+    child = spawn(command, [], {
+      cwd: directory,
+      detached: grouped,
+      env: hookEnvironment({
+        AGENTGUARD_NAME: runtimeName,
+        AGENTGUARD_SESSION_ID: sessionID,
+      }),
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+  } catch {
+    return { done: Promise.resolve(), terminate() {} };
+  }
+  let exited = false;
+  let timer;
+
+  function terminate() {
+    // Only a leader that is still running is stopped. Once it exits, its
+    // detached retention sweep must be allowed to finish on its own.
+    if (exited) return;
+    try {
+      if (grouped && child.pid) {
+        process.kill(-child.pid, "SIGKILL");
+      } else {
+        child.kill("SIGKILL");
+      }
+    } catch {
+      // It exited between the check and the signal.
+    }
+  }
+
+  const done = new Promise((resolve) => {
+    child.once("error", resolve);
+    child.once("exit", resolve);
+  }).then(() => {
+    exited = true;
+    clearTimeout(timer);
+    untrackRecorder(terminate);
+  });
+  trackRecorder(terminate);
+  // A wedged recorder gets the ordinary hook budget, then stops, so repeated
+  // stalls cannot accumulate processes over a long session.
+  timer = setTimeout(terminate, timeoutFor(RECORDER));
+  // Fire-and-forget must also hold at host shutdown: neither the child, its
+  // watchdog, nor a large payload still queued for a slow reader may keep
+  // OpenCode's event loop alive.
+  timer.unref?.();
+  child.unref();
+  child.stdin.unref?.();
+  // A recorder that exits without draining a large payload raises EPIPE here;
+  // unhandled, that error would terminate OpenCode itself.
+  child.stdin.on("error", () => {});
+  child.stdin.end(body);
+  return { done, terminate };
+}
+
+// OpenCode runs a task subagent in a child session that names its parent.
+// Every other runtime files subagent activity under the session that spawned
+// it, so the adapter keeps child -> parent links and resolves the top-level
+// session. Entries are bounded like call records; an evicted one only means a
+// very old subagent's late records file under its own session again.
+const MAX_LINEAGE = 4_096;
+
+// Waits for `promises` to settle, but never longer than `milliseconds`.
+async function settleWithin(promises, milliseconds) {
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(resolve, milliseconds);
+  });
+  await Promise.race([Promise.allSettled(promises), deadline]);
+  clearTimeout(timer);
+}
+
+// Groups items by subagent depth, deepest first. Unload ends one level at a
+// time: a session ending before its own subagents would release the link they
+// resolve through and strand their final records under it.
+function byDepth(items, depthOf) {
+  const levels = new Map();
+  for (const item of items) {
+    const depth = depthOf(item);
+    levels.set(depth, [...(levels.get(depth) ?? []), item]);
+  }
+  return [...levels.entries()]
+    .sort(([a], [b]) => b - a)
+    .map(([depth, level]) => ({ depth, level }));
+}
+
+function createLineage() {
+  // Session -> parent ID, or null for a session known to be top-level, so a
+  // session whose parentage is already known is never looked up again.
+  const parents = new Map();
+  // Ended sessions kept only because a live descendant still routes through
+  // them: dropping a middle link early would re-root its subagents onto it.
+  const ended = new Set();
+
+  function routesThrough(sessionID) {
+    for (const parentID of parents.values()) if (parentID === sessionID) return true;
+    return false;
+  }
+
+  function ancestors(sessionID) {
+    // Follow nested subagents to the top. The visited set makes a malformed
+    // cycle terminate instead of hanging a tool callback.
+    const chain = [sessionID];
+    const visited = new Set(chain);
+    let parentID = parents.get(sessionID);
+    while (parentID && !visited.has(parentID)) {
+      chain.push(parentID);
+      visited.add(parentID);
+      parentID = parents.get(parentID);
+    }
+    return chain;
+  }
+
+  return {
+    known: (sessionID) => parents.has(sessionID),
+    root: (sessionID) => ancestors(sessionID).at(-1),
+    depth: (sessionID) => ancestors(sessionID).length - 1,
+
+    learn(sessionID, parentID) {
+      if (typeof sessionID !== "string" || !sessionID) return;
+      if (typeof parentID === "string" && parentID && parentID !== sessionID) {
+        parents.delete(sessionID);
+        parents.set(sessionID, parentID);
+      } else if (!parents.has(sessionID)) {
+        parents.set(sessionID, null);
+      }
+      while (parents.size > MAX_LINEAGE) {
+        const oldest = parents.keys().next().value;
+        parents.delete(oldest);
+        ended.delete(oldest);
+      }
+    },
+
+    // A session that is active again (a late event re-created its record)
+    // is live, so a descendant ending must not drop its link.
+    revive(sessionID) {
+      ended.delete(sessionID);
+    },
+
+    end(sessionID) {
+      if (!parents.has(sessionID)) return;
+      ended.add(sessionID);
+      // Drop ended sessions bottom-up once no live descendant needs them.
+      let current = sessionID;
+      while (current && ended.has(current) && !routesThrough(current)) {
+        const parentID = parents.get(current);
+        parents.delete(current);
+        ended.delete(current);
+        current = parentID;
+      }
+    },
+  };
+}
+
+export const AgentGuardPlugin = async ({
+  directory,
+  client,
+  onContext,
+  lineage = createLineage(),
+}) => {
   // Session records serialize lifecycle events that OpenCode intentionally
   // dispatches without awaiting. Call records are separate because concurrent
   // tools need their own pre-hook context and cleanup boundary.
   const sessions = new Map();
   const calls = new Map();
+  // In-flight recorder children, drained with a bound at unload.
+  const recorders = new Set();
   const runtimeName = agentName();
   let configState;
   let runtimeMcpServers;
@@ -563,9 +824,12 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
         ended: false,
         end: undefined,
         missing: new Set(),
+        audited: undefined,
+        abnormalGeneration: -1,
         touched: Date.now(),
       };
       sessions.set(sessionID, record);
+      lineage.revive(sessionID);
     }
     record.touched = Date.now();
     return record;
@@ -710,6 +974,103 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
     });
   }
 
+  function rootOf(sessionID) {
+    return lineage.root(sessionID);
+  }
+
+  function isSubagent(sessionID) {
+    return rootOf(sessionID) !== sessionID;
+  }
+
+  function asRoot(sessionID, payload) {
+    // Claude names a subagent's own identity `agent_id` on the parent's
+    // session; tool records and guard payloads use the same pair here.
+    const root = rootOf(sessionID);
+    return root === sessionID ? payload : { ...payload, session_id: root, agent_id: sessionID };
+  }
+
+  // `build` returns the payload and `after` is an earlier record's promise.
+  // Returns this record's own completion so later records can order behind it.
+  // A subagent's records are filed under its top-level session.
+  function audit(sessionID, build, after) {
+    let root;
+    // Build and serialize now, inside this guard. Building reads arbitrary
+    // tool arguments, and a malformed one must not throw into a callback whose
+    // guard decision is still pending. Callers also keep mutating OpenCode's
+    // objects after this returns (context appends, V2 result rewrites), and
+    // the trail must hold what the tool produced, not what the model later saw.
+    let body;
+    try {
+      body = `${JSON.stringify(asRoot(sessionID, build()))}\n`;
+      // Resolve the recorder's session now, with the payload: the subagent's
+      // link is removed when it ends, possibly before this record spawns.
+      root = rootOf(sessionID);
+    } catch {
+      return after;
+    }
+    // Nothing awaits this work, so a slow or hung recorder cannot delay a
+    // callback. Resolution matches the guard hooks, and absence is silent:
+    // unlike a guard, a missing recorder changes nothing the user relies on.
+    // Until the child exists, stopping the entry cancels the spawn, so unload
+    // cannot leave behind a recorder that resolved its path just afterwards.
+    const entry = {
+      terminate() {
+        entry.cancelled = true;
+      },
+    };
+    // Records are stamped when their recorder finishes, so a record spawned
+    // behind `after` cannot land before it: a fast tool's PostToolUse would
+    // otherwise often precede its own PreToolUse in the timeline.
+    entry.done = Promise.resolve(after)
+      .then(() => executable(RECORDER))
+      .then((command) => {
+        if (!command || entry.cancelled) return;
+        // The record takes its cwd from the payload, so the recorder always
+        // starts in the plugin directory: a Bash call naming a missing workdir
+        // must still leave its audit record, even though its guard cannot run.
+        const child = spawnRecorder(command, body, directory, root, runtimeName);
+        entry.terminate = child.terminate;
+        return child.done;
+      })
+      .catch(() => {})
+      .finally(() => recorders.delete(entry));
+    recorders.add(entry);
+    return entry.done;
+  }
+
+  function auditLifecycle(session, payload) {
+    // A session's lifecycle records keep their dispatch order, as they would
+    // with any runtime that runs one lifecycle hook to completion at a time.
+    session.audited = audit(session.id, () => payload, session.audited);
+  }
+
+  async function drainRecorders() {
+    // Unload is the one point that waits, briefly, so a SessionEnd record
+    // written just before it can land. Stragglers are owned children and are
+    // stopped rather than left to outlive the plugin.
+    if (recorders.size === 0) return;
+    await settleWithin(
+      [...recorders].map((entry) => entry.done),
+      scaled(RECORDER_DRAIN),
+    );
+    for (const entry of recorders) entry.terminate();
+  }
+
+  function observe(sessionID, eventName, fields = {}) {
+    // Audit-only lifecycle events follow the same ownership as the guard
+    // lifecycle: internal maintenance sessions never start, so they record
+    // nothing, and a finalized session cannot gain events after SessionEnd.
+    const session = sessions.get(sessionID);
+    if (!session?.start || session.ended) return;
+    auditLifecycle(session, { ...basePayload(sessionID, directory, eventName), ...fields });
+    // A superseded turn is replaced by the next prompt and never goes idle, so
+    // it has no Stop to replace. Its event names no turn either, and arriving
+    // after the new prompt it would otherwise suppress the new turn's Stop.
+    if (ABNORMAL_TURN_ENDS.has(eventName) && fields.reason !== "superseded") {
+      session.abnormalGeneration = session.generation;
+    }
+  }
+
   function queue(record, work) {
     // Store the continuation synchronously before returning. That synchronous
     // write is the barrier that makes later awaited callbacks observe work from
@@ -724,24 +1085,53 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
     // for the first real message is what lets internal maintenance agents stay
     // outside AgentGuard without racing duplicate starts.
     if (!record.start) {
-      record.start = invoke(
-        record.id,
-        "agent-hook-session-start",
-        basePayload(record.id, directory, "SessionStart"),
-      )
-        .then((result) => {
-          if (result.context) {
-            record.pending.push(result.context);
-            onContext?.(record.id, [result.context]);
-          }
-          return result;
-        })
-        .catch((error) => {
-          log(error);
-          return { missing: false, context: "" };
-        });
+      // Assign synchronously so concurrent callbacks share one start.
+      record.start = (async () => {
+        await resolveParent(record.id);
+        // Like Claude, run no lifecycle hooks for a subagent. Its turns record
+        // SubagentStart and SubagentStop on the parent instead; a session of
+        // its own, even just a guard's decision records, would split the trail.
+        if (isSubagent(record.id)) return { missing: false, context: "" };
+        // The recorder's SessionStart record also triggers its retention prune,
+        // so it shares the guard lifecycle's lazy, deduplicated start point.
+        const payload = basePayload(record.id, directory, "SessionStart");
+        auditLifecycle(record, payload);
+        const result = await invoke(record.id, "agent-hook-session-start", payload);
+        if (result.context) {
+          record.pending.push(result.context);
+          onContext?.(record.id, [result.context]);
+        }
+        return result;
+      })().catch((error) => {
+        log(error);
+        return { missing: false, context: "" };
+      });
     }
     return record.start;
+  }
+
+  async function resolveParent(sessionID) {
+    // V1 announces a child only in session.created, which a resumed subagent,
+    // or a plugin loaded after the child existed, never sees. Ask once before
+    // the first parent-dependent decision; a slow or failing lookup fails open
+    // to a top-level session. A session whose session.created was seen is
+    // already known, parent or not. V2 resolves parents in its own lookup.
+    if (lineage.known(sessionID) || typeof client?.session?.get !== "function") return;
+    let timer;
+    try {
+      const deadline = new Promise((resolve) => {
+        timer = setTimeout(resolve, scaled(SESSION_LOOKUP_TIMEOUT));
+      });
+      const response = await Promise.race([
+        Promise.resolve().then(() => client.session.get({ path: { id: sessionID } })),
+        deadline,
+      ]);
+      if (response?.data) lineage.learn(sessionID, response.data.parentID);
+    } catch {
+      // Unknown parentage stays top-level.
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   function removeCalls(sessionID) {
@@ -757,13 +1147,19 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
     return call;
   }
 
-  async function runPostHooks(sessionID, call, output) {
+  // Tool guards run on the top-level session, as Claude's subagent tool hooks
+  // carry the parent's session: guard state such as edit churn is shared with
+  // the agent that delegated the work.
+  async function runPostHooks(sessionID, call, output, eventName = "PostToolUse") {
     const contexts = [...call.contexts];
     for (const target of call.targets) {
       const result = await advisory(
-        sessionID,
+        rootOf(sessionID),
         hookFor(target.kind, "post"),
-        toolPayload(sessionID, target.cwd, "PostToolUse", target, output),
+        asRoot(
+          sessionID,
+          toolPayload(sessionID, target.cwd, eventName, target, call.callID, output),
+        ),
         target.cwd,
       );
       if (result.context) contexts.push(result.context);
@@ -802,6 +1198,20 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
     // non-execution outcomes still retire their otherwise orphaned records.
     const call = claimCall(part.callID, sessionID);
     if (!call) return true;
+    // Audit every failed call, including denials and cancellations that the
+    // post-hook deliberately skips: the trail records what happened, while
+    // the post-hook only reports work that actually executed.
+    audit(
+      sessionID,
+      () => ({
+        ...basePayload(sessionID, call.audit.cwd, "PostToolUseFailure"),
+        tool_name: call.audit.name,
+        tool_input: call.audit.input,
+        tool_use_id: call.callID,
+        error: part.state.error,
+      }),
+      call.preAudit,
+    );
     if (isNonExecutionFailure(part.state)) return true;
     if (call.targets.length === 0 || call.targets.some((target) => target.kind !== "mcp")) {
       return true;
@@ -815,7 +1225,9 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
       isError: true,
     };
     queue(record, async () => {
-      const contexts = await runPostHooks(sessionID, call, output);
+      // Name the failure as the audit record does; post-mcp treats the event
+      // as a failure in addition to the explicit error flag.
+      const contexts = await runPostHooks(sessionID, call, output, "PostToolUseFailure");
       record.pending.push(...contexts);
       onContext?.(sessionID, contexts);
     });
@@ -830,17 +1242,28 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
     record.ended = true;
     record.end = queue(record, async () => {
       await record.start;
-      if (record.start) {
-        await advisory(
-          record.id,
-          "agent-hook-session-end",
-          basePayload(record.id, directory, "SessionEnd"),
-        );
+      if (record.start && isSubagent(record.id)) {
+        if (record.stoppedGeneration !== record.generation) {
+          // A subagent deleted mid-turn still closes its SubagentStart.
+          record.stoppedGeneration = record.generation;
+          auditLifecycle(record, subagentStop(record));
+        }
+      } else if (record.start) {
+        const payload = basePayload(record.id, directory, "SessionEnd");
+        auditLifecycle(record, payload);
+        await advisory(record.id, "agent-hook-session-end", payload);
       }
       removeCalls(record.id);
+      // Release the ended session's link so the cap only evicts dead ones; it
+      // stays while a live nested subagent still resolves through it.
+      lineage.end(record.id);
       if (sessions.get(record.id) === record) sessions.delete(record.id);
     });
     return record.end;
+  }
+
+  function subagentStop(record) {
+    return { ...basePayload(record.id, directory, "SubagentStop"), agent_type: record.agentType };
   }
 
   function prune() {
@@ -855,7 +1278,10 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
   }
 
   function sessionIDFromEvent(event) {
-    return event.properties?.sessionID ?? event.properties?.info?.id;
+    // Older message.part.updated shapes carry the session only on the part.
+    return (
+      event.properties?.sessionID ?? event.properties?.info?.id ?? event.properties?.part?.sessionID
+    );
   }
 
   return {
@@ -876,7 +1302,8 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
       // out of the adapter; launchers remain responsible for any translation.
       output.env.AGENTGUARD_NAME = runtimeName;
       if (input.sessionID) {
-        output.env.AGENTGUARD_SESSION_ID = input.sessionID;
+        // A subagent's shell belongs to the session that holds its records.
+        output.env.AGENTGUARD_SESSION_ID = rootOf(input.sessionID);
       } else {
         // OpenCode overlays these entries on process.env after this callback,
         // so deleting the key here would let an outer Claude/Codex session leak
@@ -899,10 +1326,26 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
           .filter((part) => part.type === "text" && typeof part.text === "string")
           .map((part) => part.text)
           .join("\n");
-        const result = await advisory(input.sessionID, "agent-hook-prompt-submit", {
+        const payload = {
           ...basePayload(input.sessionID, directory, "UserPromptSubmit"),
           prompt,
-        });
+        };
+        const subagent = isSubagent(input.sessionID);
+        if (subagent) {
+          // The parent agent, not the user, wrote this prompt. Each subagent
+          // turn is one SubagentStart/SubagentStop pair carrying its task.
+          record.agentType = input.agent;
+          auditLifecycle(record, {
+            ...basePayload(input.sessionID, directory, "SubagentStart"),
+            agent_type: input.agent,
+            prompt,
+          });
+        } else {
+          auditLifecycle(record, payload);
+        }
+        const result = subagent
+          ? { context: "" }
+          : await advisory(input.sessionID, "agent-hook-prompt-submit", payload);
         // Stop can arrive through the unawaited event channel between prompts.
         // Drain its queued context together with startup and this prompt so no
         // lifecycle guidance is lost or attached to the wrong generation.
@@ -915,15 +1358,25 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
     "permission.ask": async (input) => {
       // OpenCode has a first-class permission callback, so notification hooks
       // do not need brittle matching against generic event display strings.
-      await advisory(input.sessionID, "agent-hook-notification", {
+      const payload = {
         ...basePayload(input.sessionID, directory, "PermissionRequest"),
         permission: input,
-      });
+      };
+      audit(input.sessionID, () => payload);
+      // A subagent's request notifies on its top-level session, so no guard
+      // record opens a session of its own for the child.
+      await advisory(
+        rootOf(input.sessionID),
+        "agent-hook-notification",
+        asRoot(input.sessionID, payload),
+      );
     },
 
     "tool.execute.before": async (input, output) => {
       prune();
       let targets;
+      let identity;
+      let preAudit;
       const contexts = [];
       try {
         // Direct tools never need a status round trip. Every other tool may be
@@ -947,34 +1400,53 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
           ...target,
           cwd: targetCwd(target, directory),
         }));
-        if (targets.length === 0) {
-          if (!inventory.complete && couldBeDynamicMcpTool(input.tool)) {
-            throw new Error(`MCP inventory unavailable; refusing dynamic tool ${input.tool}`);
-          }
-          return;
+        // Record before any guard runs and for every tool, guarded or not, so
+        // the trail holds the request even when a guard then denies it.
+        identity = auditTarget(input.tool, output.args, targets, directory);
+        preAudit = audit(input.sessionID, () =>
+          toolPayload(input.sessionID, identity.cwd, "PreToolUse", identity, input.callID),
+        );
+        if (targets.length === 0 && !inventory.complete && couldBeDynamicMcpTool(input.tool)) {
+          throw new Error(`MCP inventory unavailable; refusing dynamic tool ${input.tool}`);
         }
 
         for (const target of targets) {
           const result = await invoke(
-            input.sessionID,
+            rootOf(input.sessionID),
             hookFor(target.kind, "pre"),
-            toolPayload(input.sessionID, target.cwd, "PreToolUse", target),
+            asRoot(
+              input.sessionID,
+              toolPayload(input.sessionID, target.cwd, "PreToolUse", target, input.callID),
+            ),
             true,
             target.cwd,
           );
           if (result.context) contexts.push(result.context);
         }
       } catch (error) {
+        if (!identity) {
+          // Identity resolution itself refused the call (an ambiguous or
+          // unverifiable MCP name). Audit the request under its native name.
+          audit(input.sessionID, () => {
+            const native = auditTarget(input.tool, output.args, undefined, directory);
+            return toolPayload(input.sessionID, native.cwd, "PreToolUse", native, input.callID);
+          });
+        }
         // OpenCode blocks on the rejected callback. Compatible runtimes can
         // additionally consume the structured decision from the same failure.
         output.decision = "deny";
         output.reason = error instanceof Error ? error.message : String(error);
         throw error;
       }
+      // Unguarded calls are tracked too, with no targets, so their post and
+      // failure events reuse the identity captured here and retire exactly once.
       calls.set(input.callID, {
         sessionID: input.sessionID,
+        callID: input.callID,
         targets,
         contexts,
+        audit: identity,
+        preAudit,
         touched: Date.now(),
       });
       prune();
@@ -984,6 +1456,23 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
       // Use identities captured before execution. Re-resolving MCP state here
       // could route the post-hook differently if a server disconnects mid-call.
       const call = claimCall(input.callID, input.sessionID);
+      // Record every completion, even one whose pre-call state is gone (pruned,
+      // already claimed by a terminal event, or never seen), before returning.
+      audit(
+        input.sessionID,
+        () => {
+          const identity = call?.audit ?? auditTarget(input.tool, input.args, undefined, directory);
+          return toolPayload(
+            input.sessionID,
+            identity.cwd,
+            "PostToolUse",
+            identity,
+            input.callID,
+            output,
+          );
+        },
+        call?.preAudit,
+      );
       if (!call) return;
       const contexts = await runPostHooks(input.sessionID, call, output);
       appendOutputContext(output, contexts);
@@ -998,6 +1487,7 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
       if (handleTerminalToolError(event, sessionID)) return Promise.resolve();
 
       if (event.type === "session.created") {
+        lineage.learn(sessionID, event.properties?.info?.parentID);
         state(sessionID);
         return Promise.resolve();
       }
@@ -1011,11 +1501,18 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
           // Stop exactly once without suppressing it after the next message.
           if (!record.start || record.stoppedGeneration === record.generation) return;
           record.stoppedGeneration = record.generation;
-          const result = await advisory(
-            sessionID,
-            "agent-hook-stop",
-            basePayload(sessionID, directory, "Stop"),
-          );
+          // SubagentStop closes the turn's SubagentStart however it ended, and
+          // a subagent runs no stop guard, as in Claude.
+          if (isSubagent(sessionID)) {
+            auditLifecycle(record, subagentStop(record));
+            return;
+          }
+          // Like Claude, run no Stop hooks for a turn that failed or was
+          // interrupted: its StopFailure or Interrupt record already ended it.
+          if (record.abnormalGeneration === record.generation) return;
+          const payload = basePayload(sessionID, directory, "Stop");
+          auditLifecycle(record, payload);
+          const result = await advisory(sessionID, "agent-hook-stop", payload);
           if (result.context) {
             record.pending.push(result.context);
             onContext?.(record.id, [result.context]);
@@ -1023,12 +1520,44 @@ export const AgentGuardPlugin = async ({ directory, client, onContext }) => {
         });
       } else if (event.type === "session.deleted") {
         void finalize(record);
+      } else if (event.type === "session.compacted") {
+        observe(sessionID, "PostCompact");
+      } else if (event.type === "session.error") {
+        // V1 reports a user abort through the same error event as a provider
+        // or output-limit failure. Only the error's typed name tells them
+        // apart, and only real failures are StopFailure.
+        const error = event.properties.error;
+        observe(sessionID, error?.name === "MessageAbortedError" ? "Interrupt" : "StopFailure", {
+          error,
+        });
       }
       return Promise.resolve();
     },
 
+    // V1 1.18 exposes compaction start only as this experimental hook. Observe
+    // it without touching the output, which customizes the compaction prompt.
+    "experimental.session.compacting": async (input) => {
+      observe(input.sessionID, "PreCompact");
+    },
+
+    [OBSERVE]: observe,
+
     dispose: async () => {
-      await Promise.all([...sessions.values()].map(finalize));
+      // End the deepest subagents first and let each level's SubagentStop
+      // records land, briefly bounded, before its parents end: a trail must
+      // not close while a delegated turn still appears open.
+      for (const { depth, level } of byDepth(sessions.values(), (record) =>
+        lineage.depth(record.id),
+      )) {
+        await Promise.all(level.map(finalize));
+        if (depth > 0) {
+          await settleWithin(
+            level.map((record) => record.audited),
+            scaled(RECORDER_DRAIN),
+          );
+        }
+      }
+      await drainRecorders();
     },
   };
 };
@@ -1044,6 +1573,9 @@ export default {
     const sessions = new Map();
     const registrations = [];
     const controller = new AbortController();
+    // V2 gives each session its own core, so subagent links live here, shared
+    // by every core, where a child's core can resolve its parent's session.
+    const lineage = createLineage();
     let disposed = false;
     const client = {
       mcp: {
@@ -1064,11 +1596,13 @@ export default {
         // Resolve once per session, not per tool, and share its core across calls.
         record = (async () => {
           const info = await ctx.session.get({ sessionID });
+          lineage.learn(sessionID, info.parentID);
           const directory = path.resolve(info.location.directory, info.subpath ?? ".");
           const record = { context: "" };
           record.hooks = await AgentGuardPlugin({
             directory,
             client,
+            lineage,
             onContext: (_id, contexts) => {
               record.context = appendContext(record.context, contexts);
             },
@@ -1090,9 +1624,13 @@ export default {
       // Dispose explicitly before draining children, including partially failed
       // setup. A retained callback may not recreate a finalized session.
       await Promise.allSettled(registrations.map((registration) => registration.dispose()));
-      await Promise.allSettled(
-        [...sessions.values()].map(async (record) => (await record).hooks.dispose()),
-      );
+      // Each core drains its own records on dispose, so ending the deepest
+      // subagent cores first lands their SubagentStop before their parents end.
+      for (const { level } of byDepth(sessions.entries(), ([sessionID]) =>
+        lineage.depth(sessionID),
+      )) {
+        await Promise.allSettled(level.map(async ([, record]) => (await record).hooks.dispose()));
+      }
       sessions.clear();
     }
     try {
@@ -1114,7 +1652,8 @@ export default {
         await ctx.shell.hook("create.before", (event) => {
           if (disposed) throw new Error("AgentGuard plugin is unloaded");
           event.env.AGENTGUARD_NAME = agentName();
-          event.env.AGENTGUARD_SESSION_ID = execution.getStore()?.sessionID ?? "";
+          const sessionID = execution.getStore()?.sessionID;
+          event.env.AGENTGUARD_SESSION_ID = sessionID ? lineage.root(sessionID) : "";
         }),
       );
       registrations.push(
@@ -1222,9 +1761,14 @@ export default {
           if (event.location?.directory && event.location.directory !== ctx.location.directory)
             continue;
           const sessionID = event.data?.sessionID;
+          // Learn subagent links even for sessions no callback has touched yet,
+          // so a child's first prompt already resolves to its parent.
+          if (event.type === "session.created") lineage.learn(sessionID, event.data?.parentID);
+          const translate = V2_AUDIT_EVENTS.get(event.type);
           if (
             !sessionID ||
-            !["session.created", "session.idle", "session.deleted"].includes(event.type)
+            (!translate &&
+              !["session.created", "session.idle", "session.deleted"].includes(event.type))
           )
             continue;
           // Do not lazily start lifecycles for unrelated sessions merely because
@@ -1233,6 +1777,10 @@ export default {
           if (!pending) continue;
           const record = await pending;
           if (disposed) break;
+          if (translate) {
+            record.hooks[OBSERVE](sessionID, ...translate(event.data));
+            continue;
+          }
           await record.hooks.event({ event: { type: event.type, properties: { sessionID } } });
           if (event.type === "session.deleted") {
             await record.hooks.dispose();

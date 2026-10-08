@@ -1,0 +1,54 @@
+.TH AGENT-HOOK-TELEMETRY 1 "2026-10-07" "agentguard" "User Commands"
+.SH NAME
+agent-hook-telemetry \- record an agent hook event in the audit trail
+.SH SYNOPSIS
+.B agent-hook-telemetry
+.SH DESCRIPTION
+.B agent-hook-telemetry
+reads any hook JSON payload from standard input and records its complete
+content (re-serialized compactly; non-JSON input is kept as text) as an
+.B event
+record in the session's audit directory under
+.IR ${XDG_STATE_HOME:-~/.local/state}/agentguard/telemetry/sessions/ .
+It always prints an empty JSON response and exits 0: it never blocks, warns,
+or injects context, so it is safe to register beside any guard hook.
+.PP
+AgentGuard's native integrations register it for every wired event with a
+match-all tool matcher, so prompts, tool inputs, tool outputs, and lifecycle
+events are captured, including tools no guard inspects. The wired events per
+runtime are listed in
+.IR docs/telemetry.md .
+Every other
+.B agent-hook-*
+entry point writes a companion
+.B hook
+record with its decision (exit status, block and warning messages, injected
+context) but not the payload.
+.PP
+When the payload looks like a session start, a background pass deletes
+sessions idle for longer than
+.B AGENTGUARD_TELEMETRY_RETENTION_DAYS
+days.
+.SH ENVIRONMENT
+.TP
+.B AGENTGUARD_TELEMETRY
+Set to 0, false, no, or off to disable recording.
+.TP
+.B AGENTGUARD_TELEMETRY_DIR
+Absolute path of the telemetry root; relative values are ignored.
+.TP
+.B AGENTGUARD_TELEMETRY_RETENTION_DAYS
+Retention window in days (default 90); 0 keeps every session.
+.TP
+.B AGENTGUARD_TELEMETRY_MAX_PAYLOAD_CHARS
+Payload length above which only a prefix is kept (default 8388608).
+.SH FILES
+.TP
+.I ${XDG_STATE_HOME:-~/.local/state}/agentguard/telemetry/sessions/AGENT/SESSION/*.json
+One JSON record per hook invocation, owner-only. The schema is documented in
+.I docs/telemetry.md
+in the AgentGuard checkout.
+.SH EXIT STATUS
+Always 0.
+.SH SEE ALSO
+.BR agentguard-telemetry (1)

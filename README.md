@@ -47,6 +47,9 @@ assets through shdeps, or use their absolute paths in this checkout.
 - `bin/agent-hook-*` files are the PATH-visible hook entry points.
 - `bin/agentguard-classify-command` emits JSON command facts for non-hook
   policy audits that need AgentGuard's conservative shell command-word model.
+- `bin/agent-hook-telemetry` records each hook payload in the per-session
+  audit trail, and `bin/agentguard-telemetry` lists, shows, and prunes those
+  records. See [Audit Telemetry](#audit-telemetry).
 - `bin/claude-session-name` names Claude transcript sessions for
   `agent-hook-session-end-claude` and for manual transcript backfills.
 - `lib/agentguard/agentguard.sh` is the sourceable detection API for non-hook
@@ -97,6 +100,30 @@ runtime-specific fallbacks still win. With neither a detected runtime nor a
 caller namespace, an ordinary human shell returns status 1 and prints nothing.
 Hook entry points additionally have JSON payloads and therefore use their
 JSON-aware session-state layer in `hook-helpers.sh`.
+
+## Audit Telemetry
+
+Every hook invocation is recorded, so you can audit exactly what an agent
+session did: each prompt, every tool call with its full input and output,
+every guard decision, and session lifecycle events. Records are owner-only
+JSON files, one per hook invocation, under:
+
+```text
+${XDG_STATE_HOME:-~/.local/state}/agentguard/telemetry/sessions/<agent>/<session-key>/
+```
+
+```bash
+agentguard-telemetry sessions       # recent sessions across all agents
+agentguard-telemetry show           # timeline of the latest session
+agentguard-telemetry show current   # the session running this command
+agentguard-telemetry show <key> --json | jq ...
+```
+
+`agent-hook-telemetry` is the passive recorder that the native integrations
+register for every event and tool; the other hooks add decision records.
+Set `AGENTGUARD_TELEMETRY=0` to disable recording. Location, schema, retention,
+runtime coverage, and audit recipes are in
+[`docs/telemetry.md`](docs/telemetry.md).
 
 ## Native Agent Integrations
 

@@ -35,8 +35,10 @@ commands=(
   agent-hook-session-start
   agent-hook-session-start-claude
   agent-hook-stop
+  agent-hook-telemetry
   agentguard-churn-bypass
   agentguard-classify-command
+  agentguard-telemetry
   claude-session-name
 )
 
