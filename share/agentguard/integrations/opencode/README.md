@@ -112,15 +112,33 @@ recorder's payload cap.
 | `session.error` with `MessageAbortedError` / V2 `session.execution.interrupted` | `Interrupt` |
 | `session.idle` | `Stop`, unless that turn already recorded `StopFailure` or `Interrupt` |
 | `session.deleted` or unload | `SessionEnd` |
+| subagent prompt (child session) | `SubagentStart` on the parent |
+| subagent `session.idle`, or deletion mid-turn | `SubagentStop` on the parent |
 
 Lifecycle records follow the guard lifecycle, so internal title, summary, and
 compaction sessions record no prompts or lifecycle events. An interrupted turn
 is an `Interrupt`, not a failure, matching the runtimes that expose that event
 natively; it keeps the V1 native error or the V2 `reason`. `StopFailure` and
-`Interrupt` each end their turn in place of its `Stop` record. The stop guard
-itself still runs once per turn. A V2 background
-shell admitted as `running` records only its `PreToolUse`, matching the
-post-hook exception below.
+`Interrupt` each end their turn in place of its `Stop` record, and, as in
+Claude Code, the stop guard does not run for that turn. A V2 `superseded`
+interruption names no turn and its turn never goes idle, so it is recorded
+without suppressing the replacing turn's `Stop`. A failed MCP call reaches its
+post guard as `PostToolUseFailure`, matching its audit record, with the
+explicit error flag as well. A V2 background shell admitted as `running`
+records only its `PreToolUse`, matching the post-hook exception below.
+
+A task subagent runs in a child session that names its parent. As in the
+other runtimes, its activity is filed under the top-level session (following
+nested parents) with the child session ID as `agent_id`: each subagent turn
+records `SubagentStart` (with `agent_type` and its task prompt) and
+`SubagentStop` instead of the child's own session, prompt, and stop records,
+and its tool records carry `agent_id`. Tool guards and the subagent's shell
+also use the top-level session, as Claude's subagent tool hooks do, so guard
+state such as edit churn is shared with the delegating agent. The child's
+lifecycle guards (session start and end, prompt, stop) keep running under its
+own session ID so they can never initialize or clean up the parent's state.
+Links come from V1 `session.created` and V2 `session.get` or
+`session.created`.
 
 Each record is a separate recorder process, stamped when it finishes, so the
 timeline guarantees only two orderings: a call's post or failure record lands
@@ -134,8 +152,12 @@ fire-and-forget, its output is discarded, and a missing, failing, or hung
 recorder is silent. A recorder still running after 10 seconds is stopped.
 Unload, and V2 session deletion, wait up to two seconds for in-flight records
 so the final `SessionEnd` lands, then stop or cancel the rest. A host that
-exits without unloading the plugin stops any recorder still running, with its
-process group, from its exit handler.
+exits without unloading the plugin stops, from its exit handler, any recorder
+that has been running for over a second, with its process group. Younger
+recorders are left to finish on their own, detached in their own process
+group, so a host that exits right after a tool call still leaves that call's
+record. The trade-off is that a recorder which wedges within its first second
+before such an exit lingers until it ends by itself.
 
 ## OpenCode V2
 

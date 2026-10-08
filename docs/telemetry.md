@@ -43,13 +43,14 @@ one timeline and can be matched to the runtime's own transcript:
 
 AgentGuard's guard state is keyed per live process instead (Gemini by its CLI
 pid, Grok subagents by a per-child key), which is right for state wiped at
-logout but would merge or split sessions over a 90-day retention window.
-Where the two differ, each record carries the guard key as `state_key`. A
-record only falls back to the guard key when the runtime supplies no id at
-all (for example a Gemini hook that received no payload). Session ids are
-untrusted input, so characters outside `[A-Za-z0-9._:-]` (and a leading dot)
-become `_` in directory names, which are capped at 128 characters; the
-record's `session_id` field keeps the original.
+logout but would merge or split sessions over a 90-day retention window. Where
+the two differ, each record carries the guard key as `state_key`, and a
+launcher id that differs from both (a Codex subagent's thread id) as
+`launcher_key`. A record only falls back to the guard key when the runtime
+supplies no id at all (for example a Gemini hook that received no payload).
+Session ids are untrusted input, so characters outside `[A-Za-z0-9._:-]` (and
+a leading dot) become `_` in directory names, which are capped at 128
+characters; the record's `session_id` field keeps the original.
 
 [xdg]: https://specifications.freedesktop.org/basedir-spec/latest/
 
@@ -69,10 +70,12 @@ agentguard-telemetry show all --json        # every session, for cross-session a
 way AgentGuard's tool-shell helpers do (`GEMINI_SESSION_ID` where present,
 then `AGENTGUARD_SESSION_ID`, Muse, Codex, Grok, and Claude ids, then the
 nearest agent process for runtimes that export none). It picks the most
-recently active session whose key, or whose newest record's `state_key`,
-matches any of them. Recency is what keeps a stale directory from a recycled
-pid from winning, and what makes a nested agent (Gemini run from Claude)
-resolve to itself: its hook recorded the very tool call running the command.
+recently active session whose key, or whose newest record's `state_key` or
+`launcher_key`, matches any of them. Recency is what keeps a stale directory
+from a recycled pid from winning, and what makes a nested agent (Gemini run
+from Claude) resolve to itself: its hook recorded the very tool call running
+the command. A Grok tool shell that does not see `GROK_SESSION_ID` has no id
+that any record carries; use `latest` or a key from `sessions` there.
 
 Common audits with `jq` (each record file is one line, so `show --json`
 prints valid JSONL). The top-level record fields (`event`, `tool_name`,
@@ -94,9 +97,10 @@ runtime. The rest use Claude Code's names; substitute from the table.
 ```bash
 s=<key>   # or: latest, current, a unique prefix
 
-# Every shell command the agent ran, in order (any runtime)
+# Every shell command the agent attempted, with AgentGuard's verdict (any runtime)
 agentguard-telemetry show "$s" --json |
-  jq -r 'select(.kind=="hook" and .hook=="agent-hook-pre-bash") | .command // empty'
+  jq -r 'select(.kind=="hook" and .hook=="agent-hook-pre-bash" and .command)
+    | "\(.outcome)\t\(.command)"'
 
 # Every file the agent wrote or edited (any runtime)
 agentguard-telemetry show "$s" --json |
@@ -156,6 +160,7 @@ normal finish path.
 | `agent` | all | Runtime identity (`AGENTGUARD_NAME` or detection). |
 | `session_key` | all | The durable session key; the directory name. |
 | `state_key` | all | AgentGuard's guard-state key, only when it differs from `session_key` (Gemini, Grok subagents). |
+| `launcher_key` | all | The launcher-provided id (`AGENTGUARD_SESSION_ID`), only when it differs from both keys (a Codex subagent's own thread id). |
 | `session_id` | all | The payload's own session id (a string) when it has one; never a launcher fallback. |
 | `event` | all | The payload's native event name (`PreToolUse`, `BeforeTool`, ...); for a hook that received no payload, AgentGuard's canonical name for that hook. |
 | `hook` | all | Executable that wrote the record. |
@@ -199,8 +204,8 @@ not its start.
 Records contain everything the agent saw and did, including file contents and
 command output that may hold secrets. Directories AgentGuard creates are
 `0700` and record files `0600`; records are never written through a
-symlinked session directory or into one owned by another user, and temp
-files are opened exclusively. Records never leave the machine. Treat the tree
+symlinked `sessions`, agent, or session directory, or into one owned by
+another user, and temp files are opened exclusively. Records never leave the machine. Treat the tree
 like shell history: do not commit, sync, or share it without review.
 
 The trail records what an agent did; it is not tamper-proof against that
@@ -217,7 +222,7 @@ nested agent can disable recording for it.
 | Gemini CLI | All tools; agent turns (prompt and response), compression, notifications, session start/end | yes |
 | Grok | All tools; prompts, tool failures, subagents, notifications, stop, session start/end | yes |
 | Muse | All tools; prompts, permission requests, tool failures, subagents, compaction, notifications, interrupts, stop, stop failures, session start/end | yes |
-| OpenCode | All tools; prompts, permission requests, tool failures, compaction, interrupts, turn failures (`StopFailure`), stop, session start/end | yes |
+| OpenCode | All tools; prompts, permission requests, tool failures, subagents, compaction, interrupts, turn failures (`StopFailure`), stop, session start/end | yes |
 
 Every runtime records the same core set wherever it exposes the event:
 prompts, every tool call before and after (with failures), permission
@@ -247,6 +252,12 @@ empty, including for headless `codex exec`. Approve the AgentGuard handlers
 when Codex asks to review new hooks, or let the configuration manager that
 installs the fragment record their trust. Every new or changed handler needs
 approval once, including each event added to the fragment.
+
+Shutdown budgets are runtime-owned: Codex caps `SessionEnd` and `Interrupt`
+hooks at 3 s, and Muse gives all `SessionEnd` handlers one shared allowance of
+at most 500 ms regardless of their declared timeouts. Handlers run
+concurrently and the recorder needs a few tens of milliseconds, so session-end
+records land within both.
 
 Consumers that merge the integration fragments pick up the recorder
 automatically. A consumer that wires hooks by hand should register

@@ -633,7 +633,11 @@ await check("does not run inherited shell startup code before a hook", async () 
   fs.rmSync(hookPath);
   fs.writeFileSync(
     hookPath,
+    // Drain stdin first: a hook that exits before the adapter's write lands
+    // makes that write fail with EPIPE, which the adapter (correctly) treats
+    // as a failed hook, and the race made this test flaky.
     "#!/usr/bin/env bash\n" +
+      "cat >/dev/null\n" +
       "if declare -F agentguard_test >/dev/null; then agentguard_test; fi\n" +
       "printf '{}\\n'\n",
     { mode: 0o755 },
@@ -2434,14 +2438,6 @@ await check("a turn failure replaces that turn's Stop record", async () => {
         .filter((name) => name === "Stop" || name === "StopFailure"),
       ["StopFailure", "Stop"],
     );
-    // Only the audit record is replaced; the stop guard still runs per turn.
-    await hooks.dispose();
-    hooks = undefined;
-    assert.equal(
-      logs().filter((record) => record.hook === "agent-hook-stop" && record.session === sessionID)
-        .length,
-      2,
-    );
   } finally {
     await hooks?.dispose();
     removeRecorder();
@@ -2509,6 +2505,9 @@ await check("a V2 interrupted execution records Interrupt in place of Stop", asy
     );
     assert.deepEqual(ends.map((record) => record.payload.hook_event_name), ["Interrupt"]);
     assert.equal(ends[0].payload.reason, "user");
+    assert.ok(
+      !logs().some((record) => record.hook === "agent-hook-stop" && record.session === sessionID),
+    );
   } finally {
     await host?.dispose();
     process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = normalTimeoutScale;
@@ -2536,38 +2535,41 @@ await check("records failures from part events that carry the session only on th
   }
 });
 
-await check("a host exiting without unload stops a hung recorder and its helpers", async () => {
-  clearLog();
-  const pidDir = fs.mkdtempSync(path.join(root, "exit-recorder-"));
-  const grandchildDir = fs.mkdtempSync(path.join(root, "exit-helper-"));
-  installRecorder({ mode: "hang", pidDir, grandchildDir });
+// A separate host process that records one tool call and then simply returns:
+// nothing awaits the unref'd recorder, so its event loop drains and it exits
+// without ever calling dispose. With a hold, it first waits until the recorder
+// and its helper exist and the recorder is older than the exit grace (500ms
+// at the suite's timeout scale), as a hung recorder would be.
+async function runExitingHost(sessionID, { holdMs = 0, pidDir, grandchildDir } = {}) {
   const hostScript = path.join(root, "exiting-host.mjs");
-  // The host records one tool call, waits until the recorder and its helper
-  // exist, then simply returns: nothing awaits the unref'd recorder, so the
-  // event loop drains and Node exits without ever calling dispose.
   fs.writeFileSync(
     hostScript,
     `import fs from "node:fs";
 import { pathToFileURL } from "node:url";
-const [pluginPath, directory, pidDir, grandchildDir] = process.argv.slice(2);
+const [pluginPath, directory, sessionID, holdMs, pidDir, grandchildDir] = process.argv.slice(2);
+const started = Date.now();
 const { AgentGuardPlugin } = await import(pathToFileURL(pluginPath).href);
 const hooks = await AgentGuardPlugin({ directory });
 await hooks["tool.execute.before"](
-  { tool: "read", sessionID: "audit-exit", callID: "audit-exit-call" },
+  { tool: "read", sessionID, callID: sessionID + "-call" },
   { args: { filePath: "a.txt" } },
 );
-const deadline = Date.now() + 5_000;
-while (fs.readdirSync(pidDir).length === 0 || fs.readdirSync(grandchildDir).length === 0) {
-  if (Date.now() > deadline) throw new Error("recorder never started");
-  await new Promise((resolve) => setTimeout(resolve, 10));
+if (Number(holdMs) > 0) {
+  const deadline = Date.now() + 5_000;
+  while (fs.readdirSync(pidDir).length === 0 || fs.readdirSync(grandchildDir).length === 0) {
+    if (Date.now() > deadline) throw new Error("recorder never started");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  while (Date.now() - started < Number(holdMs)) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 `,
   );
-  let pids = [];
   try {
     const host = spawn(
       process.execPath,
-      [hostScript, pluginPath, sourceDirectory, pidDir, grandchildDir],
+      [hostScript, pluginPath, sourceDirectory, sessionID, String(holdMs), pidDir ?? "", grandchildDir ?? ""],
       { stdio: ["ignore", "ignore", "pipe"] },
     );
     let stderr = "";
@@ -2584,8 +2586,22 @@ while (fs.readdirSync(pidDir).length === 0 || fs.readdirSync(grandchildDir).leng
         resolve(status);
       });
     });
-    pids = [...pidsIn(pidDir), ...pidsIn(grandchildDir)];
     assert.equal(code, 0, stderr);
+  } finally {
+    fs.rmSync(hostScript, { force: true });
+  }
+}
+
+await check("a host exiting without unload stops a hung recorder and its helpers", async () => {
+  clearLog();
+  const pidDir = fs.mkdtempSync(path.join(root, "exit-recorder-"));
+  const grandchildDir = fs.mkdtempSync(path.join(root, "exit-helper-"));
+  installRecorder({ mode: "hang", pidDir, grandchildDir });
+  let pids = [];
+  try {
+    // The hold puts the recorder past the exit grace with a wide margin.
+    await runExitingHost("audit-exit", { holdMs: 1_500, pidDir, grandchildDir });
+    pids = [...pidsIn(pidDir), ...pidsIn(grandchildDir)];
     assert.equal(pids.length, 2);
     for (const pid of pids) await waitForProcessExit(pid, "recorder outliving its host");
   } finally {
@@ -2597,9 +2613,294 @@ while (fs.readdirSync(pidDir).length === 0 || fs.readdirSync(grandchildDir).leng
       }
     }
     removeRecorder();
-    fs.rmSync(hostScript, { force: true });
     fs.rmSync(pidDir, { recursive: true, force: true });
     fs.rmSync(grandchildDir, { recursive: true, force: true });
+  }
+});
+
+await check("a host exiting right after a tool call still leaves its record", async () => {
+  clearLog();
+  installRecorder();
+  try {
+    // The recorder is younger than the exit grace when the host exits, so it
+    // is left to finish, orphaned in its own process group.
+    await runExitingHost("audit-exit-young");
+    const pre = await waitForAudit("audit-exit-young", "PreToolUse");
+    assert.equal(pre.payload.tool_use_id, "audit-exit-young-call");
+  } finally {
+    removeRecorder();
+  }
+});
+
+await check("a V2 superseded turn does not suppress the next turn's Stop", async () => {
+  clearLog();
+  installRecorder();
+  let publish;
+  const messages = [];
+  // SessionEnd lands during the stream's own session dispose; scale its drain
+  // so a loaded runner cannot outlast it.
+  const normalTimeoutScale = process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE;
+  process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = "3";
+  let host;
+  try {
+    host = await v2({ event: { subscribe: ({ signal }) => ({ async *[Symbol.asyncIterator]() {
+      while (!signal.aborted) {
+        if (!messages.length) await new Promise((resolve) => { publish = resolve; signal.addEventListener("abort", resolve, { once: true }); });
+        if (messages.length) yield messages.shift();
+      }
+    } }) } });
+    const sessionID = "audit-v2-superseded";
+    await host.registered.get("session.prompt")({ sessionID, prompt: { text: "first" } });
+    // The replacing prompt is handled before the old turn's interruption
+    // arrives on the stream, the order that exposed the race.
+    await host.registered.get("session.prompt")({ sessionID, prompt: { text: "second" } });
+    messages.push(
+      { type: "session.execution.interrupted", data: { sessionID, reason: "superseded" } },
+      { type: "session.idle", data: { sessionID } },
+      { type: "session.deleted", data: { sessionID } },
+    );
+    publish();
+    await waitForAudit(sessionID, "SessionEnd");
+    const interrupt = await waitForAudit(sessionID, "Interrupt");
+    assert.equal(interrupt.payload.reason, "superseded");
+    await waitForAudit(sessionID, "Stop");
+    assert.ok(logs().some((record) => record.hook === "agent-hook-stop" && record.session === sessionID));
+  } finally {
+    await host?.dispose();
+    process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = normalTimeoutScale;
+    removeRecorder();
+  }
+});
+
+const say = (text) => ({ message: {}, parts: [{ type: "text", text }] });
+
+await check("V1 subagent activity is filed under its parent session", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin();
+    const parent = "audit-parent";
+    const child = "audit-child";
+    void hooks.event({ event: { type: "session.created", properties: { info: { id: parent } } } });
+    await hooks["chat.message"]({ sessionID: parent, agent: "build" }, say("delegate"));
+    void hooks.event({
+      event: { type: "session.created", properties: { info: { id: child, parentID: parent } } },
+    });
+    await hooks["chat.message"]({ sessionID: child, agent: "general" }, say("do the task"));
+    const call = { tool: "bash", sessionID: child, callID: "audit-child-call" };
+    const args = { command: "echo sub" };
+    await hooks["tool.execute.before"](call, { args });
+    await hooks["tool.execute.after"]({ ...call, args }, { title: "echo", output: "sub\n", metadata: { exit: 0 } });
+    const shell = { env: {} };
+    await hooks["shell.env"]({ sessionID: child }, shell);
+    void hooks.event({ event: { type: "session.idle", properties: { sessionID: child } } });
+    void hooks.event({ event: { type: "session.deleted", properties: { info: { id: child } } } });
+
+    const start = await waitForAudit(parent, "SubagentStart");
+    assert.equal(start.payload.agent_id, child);
+    assert.equal(start.payload.agent_type, "general");
+    assert.equal(start.payload.prompt, "do the task");
+    assert.equal(start.session, parent);
+    const pre = await waitForAudit(parent, "PreToolUse", (payload) => payload.agent_id === child);
+    assert.equal(pre.payload.tool_use_id, "audit-child-call");
+    assert.equal(pre.session, parent);
+    await waitForAudit(parent, "PostToolUse", (payload) => payload.agent_id === child);
+    const stop = await waitForAudit(parent, "SubagentStop");
+    assert.equal(stop.payload.agent_id, child);
+    await hooks.dispose();
+    hooks = undefined;
+
+    // The child is never a session of its own in the trail.
+    assert.deepEqual(audits(child), []);
+    assert.deepEqual(
+      audits(parent)
+        .filter((record) => record.payload.agent_id === child)
+        .map((record) => record.payload.hook_event_name)
+        .filter((name) => !["PreToolUse", "PostToolUse"].includes(name)),
+      ["SubagentStart", "SubagentStop"],
+    );
+    // Tool guards and the shell share the parent's session, as Claude's do.
+    const guard = logs().find((record) => record.hook === "agent-hook-pre-bash");
+    assert.equal(guard.session, parent);
+    assert.equal(guard.payload.session_id, parent);
+    assert.equal(guard.payload.agent_id, child);
+    assert.equal(shell.env.AGENTGUARD_SESSION_ID, parent);
+    // Lifecycle guards keep the child's own session so its start and end can
+    // never initialize or clean up the parent's state.
+    assert.ok(
+      logs().some((record) => record.hook === "agent-hook-session-start" && record.session === child),
+    );
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("nested subagents resolve to the top-level session", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin();
+    const created = (id, parentID) =>
+      hooks.event({ event: { type: "session.created", properties: { info: { id, parentID } } } });
+    void created("audit-root");
+    void created("audit-middle", "audit-root");
+    void created("audit-leaf", "audit-middle");
+    await hooks["chat.message"]({ sessionID: "audit-leaf", agent: "general" }, say("nested"));
+    const start = await waitForAudit("audit-root", "SubagentStart");
+    assert.equal(start.payload.agent_id, "audit-leaf");
+    assert.equal(start.session, "audit-root");
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("V2 subagent activity is filed under its parent session", async () => {
+  clearLog();
+  installRecorder();
+  const parent = "audit-v2-parent";
+  const child = "audit-v2-child";
+  const callbacks = new Map();
+  let host;
+  try {
+    host = await v2({
+      session: {
+        hook: async (name, callback) => {
+          callbacks.set(name, callback);
+          return { dispose: async () => {} };
+        },
+        get: async ({ sessionID }) => ({
+          agent: sessionID === child ? "general" : "build",
+          location: { directory: sourceDirectory },
+          ...(sessionID === child ? { parentID: parent } : {}),
+        }),
+      },
+    });
+    await callbacks.get("prompt")({ sessionID: parent, prompt: { text: "delegate" } });
+    await callbacks.get("prompt")({ sessionID: child, prompt: { text: "v2 task" } });
+    await host.registered.get("tool.execute.before")({
+      tool: "shell",
+      sessionID: child,
+      id: "audit-v2-child-call",
+      input: { command: "true" },
+    });
+
+    const start = await waitForAudit(parent, "SubagentStart");
+    assert.equal(start.payload.agent_id, child);
+    assert.equal(start.payload.prompt, "v2 task");
+    const pre = await waitForAudit(parent, "PreToolUse", (payload) => payload.agent_id === child);
+    assert.equal(pre.session, parent);
+    assert.deepEqual(audits(child), []);
+    const guard = logs().find((record) => record.hook === "agent-hook-pre-bash");
+    assert.equal(guard.payload.session_id, parent);
+    assert.equal(guard.payload.agent_id, child);
+  } finally {
+    await host?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("terminal MCP failures reach the post guard as PostToolUseFailure", async () => {
+  clearLog();
+  let hooks;
+  try {
+    hooks = await plugin({ mcp: { docs: { type: "local" } } });
+    const sessionID = "failure-event-name";
+    const failed = { tool: "docs_lookup", sessionID, callID: "failure-event-failed" };
+    await hooks["tool.execute.before"](failed, { args: { query: "x" } });
+    void hooks.event({
+      event: toolErrorEvent({ ...failed, input: { query: "x" }, error: "MCP server error" }),
+    });
+    const succeeded = { tool: "docs_lookup", sessionID, callID: "failure-event-ok" };
+    await hooks["tool.execute.before"](succeeded, { args: { query: "y" } });
+    await hooks["tool.execute.after"](
+      { ...succeeded, args: { query: "y" } },
+      { title: "lookup", output: "ok", metadata: {} },
+    );
+    await hooks.dispose();
+    hooks = undefined;
+
+    const posts = new Map(
+      logs()
+        .filter((record) => record.hook === "agent-hook-post-mcp")
+        .map((record) => [record.payload.tool_use_id, record.payload]),
+    );
+    assert.equal(posts.get("failure-event-failed").hook_event_name, "PostToolUseFailure");
+    assert.equal(posts.get("failure-event-failed").tool_result_is_error, true);
+    assert.equal(posts.get("failure-event-ok").hook_event_name, "PostToolUse");
+  } finally {
+    await hooks?.dispose();
+  }
+});
+
+await check("the stop guard skips failed and interrupted turns", async () => {
+  clearLog();
+  let hooks;
+  try {
+    hooks = await plugin();
+    const sessionID = "stop-guard-abnormal";
+    const idle = () => hooks.event({ event: { type: "session.idle", properties: { sessionID } } });
+    const fail = (error) =>
+      hooks.event({ event: { type: "session.error", properties: { sessionID, error } } });
+    await hooks["chat.message"]({ sessionID, agent: "build" }, say("fails"));
+    void fail({ name: "APIError", data: { message: "overloaded" } });
+    void idle();
+    await hooks["chat.message"]({ sessionID, agent: "build" }, say("interrupted"));
+    void fail({ name: "MessageAbortedError", data: { message: "aborted" } });
+    void idle();
+    await hooks["chat.message"]({ sessionID, agent: "build" }, say("succeeds"));
+    void idle();
+    // Dispose drains the session queue, so every idle has been handled.
+    await hooks.dispose();
+    hooks = undefined;
+    assert.equal(
+      logs().filter((record) => record.hook === "agent-hook-stop" && record.session === sessionID)
+        .length,
+      1,
+    );
+  } finally {
+    await hooks?.dispose();
+  }
+});
+
+await check("V2 skips the stop guard for a failed turn", async () => {
+  clearLog();
+  installRecorder();
+  let publish;
+  const messages = [];
+  // SessionEnd lands during the stream's own session dispose; scale its drain
+  // so a loaded runner cannot outlast it.
+  const normalTimeoutScale = process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE;
+  process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = "3";
+  let host;
+  try {
+    host = await v2({ event: { subscribe: ({ signal }) => ({ async *[Symbol.asyncIterator]() {
+      while (!signal.aborted) {
+        if (!messages.length) await new Promise((resolve) => { publish = resolve; signal.addEventListener("abort", resolve, { once: true }); });
+        if (messages.length) yield messages.shift();
+      }
+    } }) } });
+    const sessionID = "stop-guard-v2-failed";
+    await host.registered.get("session.prompt")({ sessionID, prompt: { text: "task" } });
+    messages.push(
+      { type: "session.execution.failed", data: { sessionID, error: { type: "provider" } } },
+      { type: "session.idle", data: { sessionID } },
+      { type: "session.deleted", data: { sessionID } },
+    );
+    publish();
+    // SessionEnd is queued behind the idle handling.
+    await waitForAudit(sessionID, "SessionEnd");
+    await waitForAudit(sessionID, "StopFailure");
+    assert.ok(
+      !logs().some((record) => record.hook === "agent-hook-stop" && record.session === sessionID),
+    );
+  } finally {
+    await host?.dispose();
+    process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = normalTimeoutScale;
+    removeRecorder();
   }
 });
 

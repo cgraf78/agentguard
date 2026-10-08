@@ -36,8 +36,23 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
 _hook_parse_mcp
 
 # Track consecutive failures per server so the pre-mcp circuit breaker
-# can block calls to a down server. Reset on any success.
-is_error=$(printf '%s' "$_HOOK_INPUT" | jq -r '.tool_result_is_error // .isError // false')
+# can block calls to a down server. Reset on any success. Runtimes report a
+# failed MCP call differently:
+#   - a failure event (Claude/Muse PostToolUseFailure, Grok
+#     post_tool_use_failure) is itself the signal;
+#   - a top-level flag (OpenCode adapter, Grok `isError`);
+#   - the MCP CallToolResult's own `isError` in tool_response (Codex);
+#   - Gemini's ToolResult `error` object in tool_response. Only Gemini's
+#     response shape is AgentGuard-owned there; elsewhere tool_response is the
+#     server's arbitrary JSON, so an `error` key in it is not a signal.
+is_error=$(printf '%s' "$_HOOK_INPUT" | jq -r --arg agent "$(_hook_agent_name)" '
+  def flag: . == true or . == "true";
+  (.tool_response // .toolResponse) as $r
+  | ((.hook_event_name // .hookEventName // "") | test("^(PostToolUseFailure|post_tool_use_failure)$"))
+    or ((.tool_result_is_error // .isError) | flag)
+    or (($r | type) == "object" and (($r.isError | flag)
+      or ($agent == "gemini" and (($r.error | type) == "object" or (($r.error | type) == "string" and $r.error != "")))))
+' 2>/dev/null) || is_error=false
 
 if [ "$is_error" = "true" ]; then
   _hook_counter_increment "$_HOOK_MCP_FAIL_FILE"

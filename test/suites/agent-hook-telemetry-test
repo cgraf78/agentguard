@@ -803,4 +803,121 @@ AGENTGUARD_TELEMETRY_MAX_PAYLOAD_CHARS=08 _run_hook "$TELEMETRY_HOOK" "$PRE_TOOL
 _assert_eq "payload cap: 08 still records" "1" "$(_record_count)"
 _assert_eq "payload cap: no stderr noise" "" "$HOOK_STDERR"
 
+# The MCP circuit breaker trips on every runtime: three failures reported in
+# that runtime's native shape, then the next call to the server is blocked.
+POST_MCP_HOOK="$BIN_DIR/agent-hook-post-mcp"
+_breaker_case() {
+  local label="$1" agent="$2" ids="$3" failure="$4" call="$5" i
+  for i in 1 2 3; do
+    _run_hook_as "$agent" "$ids" "$POST_MCP_HOOK" "$failure"
+  done
+  _run_hook_as "$agent" "$ids" "$PRE_MCP" "$call"
+  _assert_eq "mcp breaker: $label" "2" "$HOOK_EXIT"
+}
+_fresh_root
+_breaker_case "claude PostToolUseFailure" claude "AGENTGUARD_SESSION_ID=brk-claude" \
+  '{"session_id":"brk-claude","hook_event_name":"PostToolUseFailure","tool_name":"mcp__down__q","error":"boom"}' \
+  '{"session_id":"brk-claude","hook_event_name":"PreToolUse","tool_name":"mcp__down__q","tool_input":{}}'
+_breaker_case "muse PostToolUseFailure" muse "MUSE_SESSION_ID=brk-muse AGENTGUARD_SESSION_ID=brk-muse" \
+  '{"session_id":"brk-muse","hook_event_name":"PostToolUseFailure","tool_name":"mcp__down__q","error":"boom"}' \
+  '{"session_id":"brk-muse","hook_event_name":"PreToolUse","tool_name":"mcp__down__q","tool_input":{}}'
+_breaker_case "grok post_tool_use_failure" grok "GROK_SESSION_ID=brk-grok AGENTGUARD_SESSION_ID=brk-grok" \
+  '{"sessionId":"brk-grok","hookEventName":"post_tool_use_failure","toolName":"down__q"}' \
+  '{"sessionId":"brk-grok","hookEventName":"pre_tool_use","toolName":"down__q","toolInput":{}}'
+_breaker_case "codex tool_response.isError" codex "AGENTGUARD_SESSION_ID=brk-codex" \
+  '{"session_id":"brk-codex","hook_event_name":"PostToolUse","tool_name":"mcp__down__q","tool_response":{"content":[],"isError":true}}' \
+  '{"session_id":"brk-codex","hook_event_name":"PreToolUse","tool_name":"mcp__down__q","tool_input":{}}'
+_breaker_case "gemini tool_response.error" gemini "AGENTGUARD_SESSION_ID=gemini-brk" \
+  '{"session_id":"brk-gemini","hook_event_name":"AfterTool","tool_name":"mcp_down_q","mcp_context":{"server_name":"down","tool_name":"q"},"tool_response":{"error":{"message":"boom"}}}' \
+  '{"session_id":"brk-gemini","hook_event_name":"BeforeTool","tool_name":"mcp_down_q","mcp_context":{"server_name":"down","tool_name":"q"},"tool_input":{}}'
+# A successful response must keep resetting the counter: an `error` key in a
+# server's own result is not a failure outside Gemini.
+_fresh_root
+for i in 1 2 3; do
+  _run_hook_as codex "AGENTGUARD_SESSION_ID=ok-codex" "$POST_MCP_HOOK" \
+    '{"session_id":"ok-codex","hook_event_name":"PostToolUse","tool_name":"mcp__up__q","tool_response":{"content":[],"error":"field in data"}}'
+done
+_run_hook_as codex "AGENTGUARD_SESSION_ID=ok-codex" "$PRE_MCP" \
+  '{"session_id":"ok-codex","hook_event_name":"PreToolUse","tool_name":"mcp__up__q","tool_input":{}}'
+_assert_eq "mcp breaker: data error key is not a failure" "0" "$HOOK_EXIT"
+# A post hook answering a failure event names that event in its response.
+_fresh_root
+_run_hook_as claude "AGENTGUARD_SESSION_ID=evt-claude" "$POST_MCP_HOOK" \
+  '{"session_id":"evt-claude","hook_event_name":"PostToolUseFailure","tool_name":"mcp__down__q"}'
+_assert_eq "post hook on failure: exits 0" "0" "$HOOK_EXIT"
+if [ -n "$HOOK_STDOUT" ] && [ "$HOOK_STDOUT" != "{}" ]; then
+  _assert_eq "post hook on failure: response names PostToolUseFailure" "PostToolUseFailure" \
+    "$(jq -r '.hookSpecificOutput.hookEventName // "PostToolUseFailure"' <<<"$HOOK_STDOUT")"
+else
+  _pass "post hook on failure: empty response"
+fi
+
+_event_name_for() {
+  (
+    _HOOK_SELF="agent-hook-$1"
+    export AGENTGUARD_TELEMETRY=0
+    # shellcheck source=../../lib/agentguard/hook-helpers.sh
+    . "$BIN_DIR/../lib/agentguard/hook-helpers.sh" </dev/null >/dev/null 2>&1
+    _HOOK_INPUT="$2"
+    _hook_event_name
+  )
+}
+_assert_eq "event name: post hook on a failure event" "PostToolUseFailure" \
+  "$(_event_name_for post-mcp '{"hook_event_name": "PostToolUseFailure","tool_name":"mcp__a__b"}')"
+_assert_eq "event name: post hook on a success event" "PostToolUse" \
+  "$(_event_name_for post-mcp '{"hook_event_name":"PostToolUse","tool_name":"mcp__a__b"}')"
+_assert_eq "event name: failure text inside the payload is not the event" "PostToolUse" \
+  "$(_event_name_for post-bash '{"hook_event_name":"PostToolUse","tool_input":{"command":"echo PostToolUseFailure"}}')"
+
+# Directory names are locale-independent ASCII and fit NAME_MAX even for
+# multibyte ids under a UTF-8 locale.
+_fresh_root
+utf8_locale=$(locale -a 2>/dev/null | grep -i -m1 -E '^(C|en_US)\.utf-?8$' || true)
+if [ -n "$utf8_locale" ]; then
+  cjk_id=$(printf '日%.0s' $(seq 1 100))
+  LC_ALL="$utf8_locale" _run_hook_as gemini "AGENTGUARD_SESSION_ID=gemini-4242 LC_ALL=$utf8_locale" "$TELEMETRY_HOOK" \
+    "{\"session_id\":\"$cjk_id\",\"hook_event_name\":\"BeforeTool\"}"
+  name=$(_entries "$AGENTGUARD_TELEMETRY_DIR/sessions/gemini")
+  _assert_eq "utf-8 id: record kept" "1" "$(_dir_records "$AGENTGUARD_TELEMETRY_DIR/sessions/gemini/$name" | wc -l | tr -d ' ')"
+  _assert_eq "utf-8 id: ASCII name within 128 bytes" "true" \
+    "$(
+      LC_ALL=C
+      [[ "$name" =~ ^[A-Za-z0-9._:-]{1,128}$ ]] && echo true || echo false
+    )"
+else
+  _pass "utf-8 id: no UTF-8 locale installed (skipped)"
+fi
+
+# Records never go through a symlinked agent directory either.
+_fresh_root
+link_target="$(_tmpdir)"
+mkdir -p "$AGENTGUARD_TELEMETRY_DIR/sessions"
+ln -s "$link_target" "$AGENTGUARD_TELEMETRY_DIR/sessions/agent"
+_run_hook "$TELEMETRY_HOOK" "$PRE_TOOL"
+_assert_eq "symlinked agent dir: nothing written through the link" "0" \
+  "$(_entries "$link_target" | wc -l | tr -d ' ')"
+
+# The first prompt is found even when the session id needs JSON escaping.
+_fresh_root
+_run_hook_as gemini "AGENTGUARD_SESSION_ID=gemini-4242" "$TELEMETRY_HOOK" \
+  "$(jq -cn '{session_id:"s\"1\\x",hook_event_name:"BeforeAgent",prompt:"escaped ask"}')"
+_run_cli sessions --json
+_assert_eq "sessions: first prompt with an escaped session id" "escaped ask" "$(jq -r .first_prompt <<<"$CLI_OUT")"
+
+# Help still works with a bad override.
+CLI_EXIT=0
+CLI_OUT=$(env AGENTGUARD_TELEMETRY_DIR=relative "$TELEMETRY_CLI" --help 2>&1) || CLI_EXIT=$?
+_assert_eq "relative override: --help still exits 0" "0" "$CLI_EXIT"
+
+# A Codex subagent's shell sees its own thread id while its records file
+# under the root session; current still resolves it.
+_fresh_root
+_run_hook_as codex "AGENTGUARD_SESSION_ID=thread-child" "$TELEMETRY_HOOK" \
+  '{"session_id":"root-sess","hook_event_name":"PreToolUse","tool_name":"Bash","tool_use_id":"c1","tool_input":{"command":"ls"}}'
+_assert_eq "codex subagent: launcher key recorded" "thread-child" \
+  "$(_dir_records "$AGENTGUARD_TELEMETRY_DIR/sessions/codex/root-sess" | jq -r .launcher_key)"
+_run_cli_as "CODEX_THREAD_ID=thread-child" path current
+_assert_eq "current: codex subagent shell resolves the root session" \
+  "$AGENTGUARD_TELEMETRY_DIR/sessions/codex/root-sess" "$CLI_OUT"
+
 _test_summary

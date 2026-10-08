@@ -126,8 +126,10 @@ _telemetry_current_keys() {
 
 # Directory of the most recently active session among rows $1 (newest first)
 # that belongs to one of the candidate keys on stdin: either its directory key
-# is a candidate, or its newest record carries one as `state_key` (Gemini and
-# Grok records file under a durable id that a tool shell may not see).
+# is a candidate, or its newest record carries one as `state_key` or
+# `launcher_key` (Gemini and Grok records file under a durable id a tool shell
+# may not see, and a Codex subagent's shell sees its own thread id while its
+# records file under the root session).
 # Picking the most recently active match, rather than the first candidate
 # with any match, keeps a stale directory left by a recycled pid from winning
 # over the live session, and makes a nested agent resolve to itself: the
@@ -138,7 +140,7 @@ _telemetry_current_match() {
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     candidates="$candidates$key"$'\n'
-    patterns+=(-e "\"state_key\":\"$key\"")
+    patterns+=(-e "\"state_key\":\"$key\"" -e "\"launcher_key\":\"$key\"")
   done
   [ "${#patterns[@]}" -gt 0 ] || return 1
   while IFS=$'\t' read -r _ _ _ dir; do
@@ -147,12 +149,14 @@ _telemetry_current_match() {
     [ -e "${records[0]}" ] && newest+=("${records[${#records[@]} - 1]}")
   done <<<"$rows"
   # One fixed-string scan over each session's newest record, instead of a jq
-  # parse per session, keeps `current` cheap with months of sessions. Keys
+  # parse per session, keeps `current` cheap with months of sessions; paths
+  # stream through xargs because months of sessions can exceed the platform's
+  # argument-length limit. Keys
   # are written as plain JSON strings (telemetry keys are [[:alnum:]._:-]).
   if [ "${#newest[@]}" -gt 0 ]; then
     while IFS= read -r dir; do
       state_dirs="$state_dirs${dir%/*}"$'\n'
-    done < <(grep -l -F "${patterns[@]}" -- "${newest[@]}" 2>/dev/null)
+    done < <(printf '%s\0' "${newest[@]}" | xargs -0 grep -l -F "${patterns[@]}" -- 2>/dev/null)
   fi
   while IFS=$'\t' read -r _ _ key dir; do
     case "$candidates" in *$'\n'"$key"$'\n'*)
@@ -242,7 +246,7 @@ _telemetry_cmd_sessions() {
   # with thousands of large tool records.
   local last agent key dir first prompt_file summary
   local -a records
-  $json || printf '%-26s %-7s %-38s %6s  %-24s %s\n' LAST_ACTIVITY AGENT SESSION RECORDS CWD FIRST_PROMPT
+  $json || printf '%-26s %-8s %-38s %6s  %-24s %s\n' LAST_ACTIVITY AGENT SESSION RECORDS CWD FIRST_PROMPT
   while IFS=$'\t' read -r last agent key dir; do
     records=("$dir"/*.json)
     first="${records[0]}"
@@ -254,7 +258,7 @@ _telemetry_cmd_sessions() {
     # values. Paths stream through xargs: a long session can exceed the
     # platform's argument-length limit.
     prompt_file=$(printf '%s\0' "${records[@]}" |
-      xargs -0 grep -l -E '^\{"schema":"[^"]*","kind":"event","ts":"[^"]*","agent":"[^"]*","session_key":"[^"]*",("state_key":"[^"]*",)?("session_id":"[^"]*",)?"event":"(UserPromptSubmit|BeforeAgent|user_prompt_submit)"' \
+      xargs -0 grep -l -E '^\{"schema":"[^"]*","kind":"event","ts":"[^"]*","agent":"[^"]*","session_key":"[^"]*",("state_key":"([^"\\]|\\.)*",)?("launcher_key":"([^"\\]|\\.)*",)?("session_id":"([^"\\]|\\.)*",)?"event":"(UserPromptSubmit|BeforeAgent|user_prompt_submit)"' \
         2>/dev/null | head -n 1)
     summary=$(jq -nc \
       --arg agent "$agent" --arg key "$key" --arg dir "$dir" \
@@ -412,6 +416,12 @@ _telemetry_cmd_prune() {
 
 _telemetry_main() {
   local cmd="${1:-}"
+  case "$cmd" in
+    -h | --help | help)
+      _telemetry_usage
+      return 0
+      ;;
+  esac
   # Hooks ignore a relative override (they cannot report an error), but the
   # CLI must not: readers would silently fall back to the real state home, and
   # `prune` would delete there while the caller believes it is isolated.

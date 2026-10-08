@@ -45,8 +45,9 @@ only the guarded ones (see `docs/telemetry.md`). It never blocks or injects
 context. The OpenCode adapter has no declarative fragment; it spawns the
 recorder itself for every tool call and lifecycle event.
 
-Codex runs a hook only after its trust hash is approved, and silently skips
-untrusted ones. Any new or changed Codex handler, including a changed
+Codex runs a hook only after its trust hash is approved. The interactive TUI
+asks to review new or changed hooks at startup; headless runs skip untrusted
+ones without a prompt. Any new or changed Codex handler, including a changed
 matcher, needs approval once before it guards or records anything; consumers
 that manage Codex trust must recognise every event label in the fragment.
 

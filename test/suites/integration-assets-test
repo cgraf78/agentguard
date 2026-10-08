@@ -30,6 +30,7 @@ expected = {
             ("Bash", "agent-hook-post-bash", 120),
             ("^mcp__", "agent-hook-post-mcp", 10),
         ],
+        "PostToolUseFailure": [("^mcp__", "agent-hook-post-mcp", 10)],
         "PreToolUse": [
             ("Bash", "agent-hook-pre-bash", 600),
             ("Edit|Write", "agent-hook-pre-edit", 10),
@@ -77,13 +78,14 @@ expected = {
     },
     "muse": {
         "PostToolUse": [
-            ("Edit|Write", "agent-hook-post-edit", 60),
+            ("Edit|Write|apply_patch", "agent-hook-post-edit", 60),
             ("Bash", "agent-hook-post-bash", 120),
             ("^mcp__", "agent-hook-post-mcp", 10),
         ],
+        "PostToolUseFailure": [("^mcp__", "agent-hook-post-mcp", 10)],
         "PreToolUse": [
             ("Bash", "agent-hook-pre-bash", 600),
-            ("Edit|Write", "agent-hook-pre-edit", 10),
+            ("Edit|Write|apply_patch", "agent-hook-pre-edit", 10),
             ("Grep|Search", "agent-hook-pre-search", 10),
             ("^mcp__", "agent-hook-pre-mcp", 10),
         ],
@@ -129,7 +131,6 @@ TELEMETRY = "agent-hook-telemetry"
 # out everywhere for volume.
 telemetry_only_events = {
     "claude": [
-        "PostToolUseFailure",
         "PermissionRequest",
         "PermissionDenied",
         "SubagentStart",
@@ -148,7 +149,6 @@ telemetry_only_events = {
     "gemini": ["PreCompress"],
     "muse": [
         "PermissionRequest",
-        "PostToolUseFailure",
         "SubagentStart",
         "SubagentStop",
         "PreCompact",
@@ -258,8 +258,10 @@ exact_grammar = {
 # Representative tool names each guard family must select, per runtime.
 guarded_tools = {
     "claude": {"-mcp": "mcp__github__create_issue", "-bash": "Bash", "-edit": "Edit"},
-    "codex": {"-mcp": "mcp__github__create_issue", "-bash": "exec_command", "-edit": "apply_patch"},
-    "muse": {"-mcp": "mcp__github__create_issue", "-bash": "Bash", "-edit": "Write"},
+    # Codex reports unified exec as `Bash`; Muse's apply-patch profile edits
+    # through `apply_patch`.
+    "codex": {"-mcp": "mcp__github__create_issue", "-bash": "Bash", "-edit": "apply_patch"},
+    "muse": {"-mcp": "mcp__github__create_issue", "-bash": "Bash", "-edit": "apply_patch"},
     "gemini": {"-mcp": "mcp_github_create_issue", "-bash": "run_shell_command", "-edit": "write_file"},
     "grok": {"-mcp": "github__create_issue", "-bash": "run_terminal_command", "-edit": "search_replace"},
 }
@@ -282,6 +284,14 @@ for runtime, events in expected.items():
                     raise AssertionError(
                         f"{runtime} {event} matcher {matcher!r} does not select {tool!r}"
                     )
+            # And the other way: an MCP guard must not fire for shell, edit,
+            # or read tools (it would count their results against a server).
+            if executable.endswith("-mcp"):
+                for tool in ("Bash", "Edit", "Write", "Read", "apply_patch", "run_shell_command"):
+                    if selects(runtime, matcher, tool):
+                        raise AssertionError(
+                            f"{runtime} {event} MCP matcher {matcher!r} selects {tool!r}"
+                        )
 PY
 asset_status=$?
 

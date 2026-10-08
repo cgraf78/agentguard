@@ -1501,6 +1501,7 @@ _HOOK_TELEMETRY_JQ='
       agent: $agent,
       session_key: $key,
       state_key: (if $state_key == $key then null else $state_key end),
+      launcher_key: (if $launcher == "" or $launcher == $key or $launcher == $state_key then null else $launcher end),
       session_id: (($p.session_id // $p.sessionId) | if type == "string" then . else null end),
       event: ($p.hook_event_name // $p.hookEventName // (if $event == "" then null else $event end)),
       hook: $hook,
@@ -1535,6 +1536,10 @@ _HOOK_TELEMETRY_JQ='
 # control characters must never reach a directory name. Real runtime ids
 # (UUIDs, `ses_...`, `gemini-<pid>`) already fit and pass through unchanged.
 _hook_telemetry_component() {
+  # C locale: [[:alnum:]] is ASCII-only and the length cap counts bytes, so
+  # the result is the same everywhere and always fits NAME_MAX (a UTF-8
+  # locale would keep multibyte letters and could exceed 255 bytes).
+  local LC_ALL=C
   local value="${!1}"
   value="${value//[![:alnum:]._:-]/_}"
   case "$value" in
@@ -1664,7 +1669,13 @@ _hook_telemetry_exit() {
   # than following a symlink planted at its name.
   umask 077
   set -C
-  [ -d "$dir" ] || mkdir -p "$dir" 2>/dev/null || return 0
+  # Check every directory AgentGuard owns below the root before creating
+  # anything inside it (the root itself may legitimately be reached through a
+  # user's own symlinked state dir).
+  [ -d "$root/sessions/$agent" ] || mkdir -p "$root/sessions/$agent" 2>/dev/null || return 0
+  [ ! -L "$root/sessions" ] && [ -O "$root/sessions" ] || return 0
+  [ ! -L "$root/sessions/$agent" ] && [ -O "$root/sessions/$agent" ] || return 0
+  [ -d "$dir" ] || mkdir "$dir" 2>/dev/null || [ -d "$dir" ] || return 0
   [ ! -L "$dir" ] && [ -O "$dir" ] || return 0
   stem="$end_us-$$-${hook#agent-hook-}"
   tmp="$dir/.$stem.tmp"
@@ -1693,6 +1704,7 @@ _hook_telemetry_exit() {
         --arg agent "$agent" \
         --arg key "$key" \
         --arg state_key "$_HOOK_SESSION_KEY" \
+        --arg launcher "${AGENTGUARD_SESSION_ID:-}" \
         --arg event "$event" \
         --arg hook "$hook" \
         --arg pwd "${PWD:-}" \
@@ -1763,7 +1775,17 @@ _hook_event_name() {
     agent-hook-session-start*) echo "SessionStart" ;;
     agent-hook-prompt-submit*) echo "UserPromptSubmit" ;;
     agent-hook-pre-*) echo "PreToolUse" ;;
-    agent-hook-post-*) echo "PostToolUse" ;;
+    agent-hook-post-*)
+      # Post hooks also serve failed tool calls (PostToolUseFailure), and a
+      # strict runner rejects a response naming a different event. A string
+      # match keeps this jq-free; the payload is already cached when a
+      # response is built.
+      if [[ "${_HOOK_INPUT:-}" =~ \"hook_event_name\"[[:space:]]*:[[:space:]]*\"PostToolUseFailure\" ]]; then
+        echo "PostToolUseFailure"
+      else
+        echo "PostToolUse"
+      fi
+      ;;
     agent-hook-stop*) echo "Stop" ;;
     agent-hook-notification*) echo "PermissionRequest" ;;
     *) echo "UserPromptSubmit" ;;
