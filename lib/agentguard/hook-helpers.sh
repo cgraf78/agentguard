@@ -17,6 +17,7 @@ _HOOK_BLOCKED=''
 _HOOK_CTX=''
 _HOOK_HM_CONFIG_PATH=''
 _HOOK_INPUT_STATE_REFRESHED=''
+_HOOK_INPUT_SESSION=''
 _HOOK_PROMPT_SUBMITTED=''
 # Telemetry accumulators: block/warn/remind messages joined by ASCII record
 # separators so multi-line messages survive intact into the audit record.
@@ -328,6 +329,9 @@ _hook_refresh_state_dir() {
   # hook process instead of being trusted structurally anywhere downstream.
   _hook_session_key_safe "$session_key" || session_key="$$"
 
+  # Kept for telemetry, which keys durable records by the payload's own id
+  # where the state key is process-scoped (see _hook_telemetry_key).
+  _HOOK_INPUT_SESSION="$input_session"
   _HOOK_SESSION_KEY="$session_key"
   _HOOK_STATE_DIR="$(_hook_state_root)/$_HOOK_SESSION_KEY"
   if [ -n "${_HOOK_INPUT+x}" ]; then
@@ -1446,11 +1450,12 @@ _HOOK_TELEMETRY_JQ='
       ts: $ts,
       agent: $agent,
       session_key: $key,
+      state_key: (if $state_key == $key then null else $state_key end),
       session_id: ($p.session_id // $p.sessionId // (if $sid == "" then null else $sid end)),
       event: ($p.hook_event_name // $p.hookEventName // (if $event == "" then null else $event end)),
       hook: $hook,
       tool_name: ($p.tool_name // $p.toolName),
-      tool_use_id: ($p.tool_use_id // $p.toolUseId // $p.call_id // $p.callId),
+      tool_use_id: ($p.tool_use_id // $p.toolUseId // $p.tool_call_id // $p.toolCallId // $p.call_id // $p.callId),
       cwd: ($p.cwd // $pwd),
       host: $host,
       pid: ($pid | tonumber),
@@ -1471,6 +1476,33 @@ _HOOK_TELEMETRY_JQ='
   | if $kind == "event" then . + {payload: $payload} else . end
 '
 
+# Store the directory key for this hook's audit records into the variable
+# named by $1 (no subshell: this runs on every hook exit). Guard state
+# keys are tuned so a tool shell and its hooks agree inside one live process,
+# which is the wrong trade-off for records kept for months:
+#   - Gemini's state key is its CLI pid. Pids recycle within the retention
+#     window, and every session `/clear` starts in one process shares it, so
+#     unrelated sessions would merge. Gemini puts its real session id in every
+#     payload (and in GEMINI_SESSION_ID), so records use that.
+#   - Grok suffixes subagent state keys so concurrent children keep separate
+#     circuit breakers. Claude and Muse subagent events carry the parent
+#     session id, so Grok records file under the parent too; the child key
+#     stays visible as the record's `state_key`.
+# Every other runtime's state key already is its durable session id.
+_hook_telemetry_key() {
+  local candidate=''
+  case "${AGENTGUARD_NAME:-}" in
+    gemini) candidate="${_HOOK_INPUT_SESSION:-${GEMINI_SESSION_ID:-}}" ;;
+    grok)
+      candidate="${GROK_SESSION_ID:-${AGENTGUARD_SESSION_ID:-}}"
+      [ -n "$candidate" ] || candidate="${_HOOK_SESSION_KEY%%:*}"
+      ;;
+  esac
+  _hook_session_key_safe "$candidate" || candidate="${_HOOK_SESSION_KEY:-}"
+  _hook_session_key_safe "$candidate" || return 1
+  printf -v "$1" '%s' "$candidate"
+}
+
 # EXIT trap for hook entry points: write one audit record for this hook
 # invocation. Running from the trap rather than _hook_finish covers every exit
 # path, including early no-op exits and fail-closed parse errors, and observes
@@ -1487,7 +1519,7 @@ _HOOK_TELEMETRY_JQ='
 # Telemetry must never change hook behavior: every failure is silent, and the
 # trap leaves the exit status untouched (it never calls `exit`).
 _hook_telemetry_exit() {
-  local status=$? hook kind root agent dir end_us elapsed duration
+  local status=$? hook kind root agent key dir end_us elapsed duration
   local stem tmp event='' raw='' truncated='' max
   _agentguard_telemetry_enabled || return 0
   root=$(_agentguard_telemetry_root 2>/dev/null) || return 0
@@ -1520,8 +1552,8 @@ _hook_telemetry_exit() {
   fi
   agent=$(_hook_agent_name 2>/dev/null) || agent=agent
   _hook_session_key_safe "$agent" || agent=agent
-  _hook_session_key_safe "${_HOOK_SESSION_KEY:-}" || return 0
-  dir="$root/sessions/$agent/$_HOOK_SESSION_KEY"
+  _hook_telemetry_key key || return 0
+  dir="$root/sessions/$agent/$key"
 
   _agentguard_telemetry_now_us end_us
   elapsed=$((end_us - ${_HOOK_TELEMETRY_START_US:-$end_us}))
@@ -1564,7 +1596,8 @@ _hook_telemetry_exit() {
       --arg sec "${end_us:0:${#end_us}-6}" \
       --arg frac "${end_us: -6}" \
       --arg agent "$agent" \
-      --arg key "$_HOOK_SESSION_KEY" \
+      --arg key "$key" \
+      --arg state_key "$_HOOK_SESSION_KEY" \
       --arg sid "${AGENTGUARD_SESSION_ID:-}" \
       --arg event "$event" \
       --arg hook "$hook" \

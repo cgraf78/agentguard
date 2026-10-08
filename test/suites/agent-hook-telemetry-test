@@ -404,4 +404,147 @@ _assert_eq "unknown option: exit 2" "2" "$CLI_EXIT"
 _run_cli --help
 _assert_contains "help: documents the storage root" "agentguard-telemetry dir" "$CLI_OUT"
 
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== per-runtime keying and payload shapes ==="
+
+# Run a hook as runtime $1 with the env assignments in $2 (space-separated
+# NAME=value words, matching what that runtime's fragment and host export).
+# Every runtime id the test process itself may carry is cleared first, so a
+# record's directory is decided by the fixture alone.
+_run_hook_as() {
+  local agent="$1" ids="$2" hook="$3" payload="$4"
+  local -a extra=()
+  read -ra extra <<<"$ids"
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    -u AGENTGUARD_SESSION_ID -u CODEX_THREAD_ID -u GROK_SESSION_ID
+    -u MUSE_SESSION_ID -u GEMINI_SESSION_ID -u GEMINI_PROJECT_DIR
+    -u CLAUDE_CODE_CURRENT_SESSION_ID -u CLAUDE_CODE_SESSION_ID
+    AGENTGUARD_PROCESS_DETECT=0
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="$agent"
+    "${extra[@]}"
+  )
+  _run_hook_env "$hook" "$payload"
+}
+
+_dir_records() {
+  local f
+  for f in "$1"/*.json; do
+    [ -e "$f" ] && jq -c . "$f"
+  done
+}
+
+# Codex: the payload session_id outranks an inherited CODEX_THREAD_ID-derived
+# AGENTGUARD_SESSION_ID (nested Codex), for event and decision records alike.
+_fresh_root
+codex_pre='{"session_id":"thread-B","turn_id":"t1","hook_event_name":"PreToolUse","tool_name":"Bash","tool_use_id":"call_x","tool_input":{"command":"rm -rf /"}}'
+_run_hook_as codex "AGENTGUARD_SESSION_ID=thread-A" "$TELEMETRY_HOOK" "$codex_pre"
+_run_hook_as codex "AGENTGUARD_SESSION_ID=thread-A" "$PRE_BASH" "$codex_pre"
+codex_dir="$AGENTGUARD_TELEMETRY_DIR/sessions/codex/thread-B"
+_assert_eq "codex: both records keyed by payload session_id" "2" \
+  "$(_dir_records "$codex_dir" | wc -l | tr -d ' ')"
+_assert_eq "codex: event and decision share tool_use_id" "call_x call_x" \
+  "$(_dir_records "$codex_dir" | jq -r .tool_use_id | paste -sd ' ' -)"
+_assert_eq "codex: nothing filed under the inherited thread id" "false" \
+  "$([ -d "$AGENTGUARD_TELEMETRY_DIR/sessions/codex/thread-A" ] && echo true || echo false)"
+
+# Gemini: the state key is the CLI pid, but records file under the payload's
+# real session id so pid reuse and `/clear` cannot merge sessions.
+_fresh_root
+gemini_tool='{"session_id":"g-sess-1","hook_event_name":"BeforeTool","cwd":"/work","tool_name":"read_file","tool_input":{"absolute_path":"/etc/hosts"}}'
+_run_hook_as gemini "AGENTGUARD_SESSION_ID=gemini-4242" "$TELEMETRY_HOOK" "$gemini_tool"
+gemini_dir="$AGENTGUARD_TELEMETRY_DIR/sessions/gemini/g-sess-1"
+rec=$(_dir_records "$gemini_dir")
+_assert_eq "gemini: keyed by payload session id" "g-sess-1" "$(jq -r .session_key <<<"$rec")"
+_assert_eq "gemini: pid state key kept as a field" "gemini-4242" "$(jq -r .state_key <<<"$rec")"
+_assert_eq "gemini: native event name" "BeforeTool" "$(jq -r .event <<<"$rec")"
+_assert_eq "gemini: tool name" "read_file" "$(jq -r .tool_name <<<"$rec")"
+_run_hook_as gemini "AGENTGUARD_SESSION_ID=gemini-4242" "$PRE_BASH" \
+  '{"session_id":"g-sess-1","hook_event_name":"BeforeTool","tool_name":"run_shell_command","tool_input":{"command":"ls"}}'
+_assert_eq "gemini: decision record joins the same session" "2" \
+  "$(_dir_records "$gemini_dir" | wc -l | tr -d ' ')"
+_run_hook_as gemini "AGENTGUARD_SESSION_ID=gemini-4242" "$TELEMETRY_HOOK" \
+  '{"session_id":"g-sess-2","hook_event_name":"SessionStart","source":"clear"}'
+_assert_eq "gemini: /clear in the same process starts a new session" "true" \
+  "$([ -d "$AGENTGUARD_TELEMETRY_DIR/sessions/gemini/g-sess-2" ] && echo true || echo false)"
+_fresh_root
+_run_hook_as gemini "AGENTGUARD_SESSION_ID=gemini-4242" "$TELEMETRY_HOOK" ''
+_assert_eq "gemini: payload-less record falls back to the state key" "true" \
+  "$([ -d "$AGENTGUARD_TELEMETRY_DIR/sessions/gemini/gemini-4242" ] && echo true || echo false)"
+_fresh_root
+_run_hook_as gemini "AGENTGUARD_SESSION_ID=gemini-4242 GEMINI_SESSION_ID=g-env" "$TELEMETRY_HOOK" ''
+_assert_eq "gemini: GEMINI_SESSION_ID keys payload-less records" "true" \
+  "$([ -d "$AGENTGUARD_TELEMETRY_DIR/sessions/gemini/g-env" ] && echo true || echo false)"
+_fresh_root
+_run_hook_as gemini "AGENTGUARD_SESSION_ID=gemini-4242" "$TELEMETRY_HOOK" \
+  '{"session_id":"../escape","hook_event_name":"BeforeTool"}'
+_assert_eq "gemini: unsafe payload id falls back to the state key" "true" \
+  "$([ -d "$AGENTGUARD_TELEMETRY_DIR/sessions/gemini/gemini-4242" ] && echo true || echo false)"
+
+# Grok: camelCase envelope with snake_case event values; subagent events file
+# under the parent session (as Claude's do), with the child state key kept.
+_fresh_root
+grok_child='{"hookEventName":"pre_tool_use","sessionId":"grok-parent","subagentType":"explore","promptId":"p9","toolName":"Bash","toolCallId":"tc1","toolInput":{"command":"ls"}}'
+_run_hook_as grok "GROK_SESSION_ID=grok-parent AGENTGUARD_SESSION_ID=grok-parent" "$TELEMETRY_HOOK" "$grok_child"
+grok_dir="$AGENTGUARD_TELEMETRY_DIR/sessions/grok/grok-parent"
+rec=$(_dir_records "$grok_dir")
+_assert_eq "grok: subagent event filed under the parent" "grok-parent" "$(jq -r .session_key <<<"$rec")"
+_assert_eq "grok: child state key kept as a field" "grok-parent:explore:p9" "$(jq -r .state_key <<<"$rec")"
+_assert_eq "grok: camelCase event name" "pre_tool_use" "$(jq -r .event <<<"$rec")"
+_assert_eq "grok: camelCase tool name" "Bash" "$(jq -r .tool_name <<<"$rec")"
+_assert_eq "grok: toolCallId is the join key" "tc1" "$(jq -r .tool_use_id <<<"$rec")"
+_run_hook_as grok "GROK_SESSION_ID=grok-parent AGENTGUARD_SESSION_ID=grok-parent" "$TELEMETRY_HOOK" \
+  '{"hookEventName":"session_start","sessionId":"grok-parent"}'
+_assert_eq "grok: parent and child share one session directory" "1" \
+  "$(find "$AGENTGUARD_TELEMETRY_DIR/sessions/grok" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+
+# Muse and OpenCode: the launcher-provided id is already durable.
+_fresh_root
+_run_hook_as muse "MUSE_SESSION_ID=muse-s1 AGENTGUARD_SESSION_ID=muse-s1" "$TELEMETRY_HOOK" \
+  '{"session_id":"muse-s1","hook_event_name":"PostToolUseFailure","tool_name":"Read","tool_use_id":"m1"}'
+rec=$(_dir_records "$AGENTGUARD_TELEMETRY_DIR/sessions/muse/muse-s1")
+_assert_eq "muse: keyed by MUSE_SESSION_ID" "muse-s1" "$(jq -r .session_key <<<"$rec")"
+_assert_eq "muse: no redundant state key" "null" "$(jq -r .state_key <<<"$rec")"
+_fresh_root
+_run_hook_as opencode "AGENTGUARD_SESSION_ID=ses_01OC" "$TELEMETRY_HOOK" \
+  '{"session_id":"ses_01OC","hook_event_name":"PreToolUse","tool_name":"Read","tool_use_id":"call_oc","tool_input":{"filePath":"/etc/hosts"}}'
+rec=$(_dir_records "$AGENTGUARD_TELEMETRY_DIR/sessions/opencode/ses_01OC")
+_assert_eq "opencode: keyed by the adapter's session id" "ses_01OC" "$(jq -r .session_key <<<"$rec")"
+_assert_eq "opencode: tool use id" "call_oc" "$(jq -r .tool_use_id <<<"$rec")"
+
+# `current` from each runtime's tool shell. Only the fixture ids are visible.
+_run_cli_as() {
+  local ids="$1"
+  shift
+  local -a extra=()
+  read -ra extra <<<"$ids"
+  CLI_EXIT=0
+  CLI_OUT=$(env -u XDG_STATE_HOME \
+    -u AGENTGUARD_SESSION_ID -u CODEX_THREAD_ID -u GROK_SESSION_ID \
+    -u MUSE_SESSION_ID -u GEMINI_SESSION_ID \
+    -u CLAUDE_CODE_CURRENT_SESSION_ID -u CLAUDE_CODE_SESSION_ID \
+    AGENTGUARD_PROCESS_DETECT=0 HOME="$CLI_HOME" "${extra[@]}" \
+    "$TELEMETRY_CLI" "$@" 2>"$TEST_TMPDIR/cli.err") || CLI_EXIT=$?
+  CLI_ERR=$(cat "$TEST_TMPDIR/cli.err")
+}
+
+_fresh_root
+_run_hook_as gemini "AGENTGUARD_SESSION_ID=gemini-4242" "$TELEMETRY_HOOK" "$gemini_tool"
+_run_hook_as grok "GROK_SESSION_ID=grok-parent AGENTGUARD_SESSION_ID=grok-parent" "$TELEMETRY_HOOK" "$grok_child"
+_run_hook_as codex "" "$TELEMETRY_HOOK" "$codex_pre"
+_run_cli_as "GEMINI_SESSION_ID=g-sess-1" path current
+_assert_eq "current: gemini via GEMINI_SESSION_ID" "$AGENTGUARD_TELEMETRY_DIR/sessions/gemini/g-sess-1" "$CLI_OUT"
+# A Gemini tool shell may only know the pid-based state key (the agent
+# ancestor); records carry it as state_key.
+_run_cli_as "AGENTGUARD_SESSION_ID=gemini-4242" path current
+_assert_eq "current: gemini via its state key" "$AGENTGUARD_TELEMETRY_DIR/sessions/gemini/g-sess-1" "$CLI_OUT"
+_run_cli_as "GROK_SESSION_ID=grok-parent" path current
+_assert_eq "current: grok parent session" "$AGENTGUARD_TELEMETRY_DIR/sessions/grok/grok-parent" "$CLI_OUT"
+_run_cli_as "CODEX_THREAD_ID=thread-B" path current
+_assert_eq "current: codex thread" "$AGENTGUARD_TELEMETRY_DIR/sessions/codex/thread-B" "$CLI_OUT"
+_run_cli_as "AGENTGUARD_SESSION_ID=nobody" path current
+_assert_eq "current: unknown session exits 1" "1" "$CLI_EXIT"
+
 _test_summary

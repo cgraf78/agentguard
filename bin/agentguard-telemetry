@@ -103,20 +103,40 @@ _telemetry_sorted_rows() {
   _telemetry_session_rows | sort -r
 }
 
-# Session keys the calling agent shell can see, in the same precedence the
-# hooks use. Only identifiers are needed here, not process probing: a tool
-# shell launched by an agent inherits the runtime's session variables.
+# Session keys the calling agent shell can see, best first. The hook runtime
+# owns this resolution (explicit runtime ids, then the agent-ancestor key that
+# Gemini and id-less Muse sessions depend on), so source it rather than keep a
+# second copy here; it is loaded only for `current`, which keeps the other
+# commands free of process probing. GEMINI_SESSION_ID comes first because
+# Gemini records are filed under it rather than under the state key (see
+# _hook_telemetry_key).
 _telemetry_current_keys() {
-  local id
-  for id in \
-    "${AGENTGUARD_SESSION_ID:-}" \
-    "${CODEX_THREAD_ID:-}" \
-    "${GROK_SESSION_ID:-}" \
-    "${MUSE_SESSION_ID:-}" \
-    "${CLAUDE_CODE_CURRENT_SESSION_ID:-}" \
-    "${CLAUDE_CODE_SESSION_ID:-}"; do
-    [ -n "$id" ] && printf '%s\n' "$id"
-  done
+  # shellcheck source=../lib/agentguard/hook-helpers.sh
+  # shellcheck disable=SC1091 # Resolved relative to this symlink-aware launcher.
+  source "$_TELEMETRY_BIN_DIR/../lib/agentguard/hook-helpers.sh" || return 1
+  if [ -n "${GEMINI_SESSION_ID:-}" ] && _hook_session_key_safe "$GEMINI_SESSION_ID"; then
+    printf '%s\n' "$GEMINI_SESSION_ID"
+  fi
+  _hook_agent_shell_session_keys
+}
+
+# Directory of the most recent session among rows $1 whose records were
+# written under guard state key $2 (the record's `state_key`, present only
+# where it differs from the directory key). Only the newest record of the
+# most recent sessions is read: `current` is by definition still active.
+_telemetry_state_key_match() {
+  local rows="$1" want="$2" dir
+  local -a newest=() records
+  while IFS=$'\t' read -r _ _ _ dir; do
+    [ -n "$dir" ] || continue
+    records=("$dir"/*.json)
+    [ -e "${records[0]}" ] || continue
+    newest+=("${records[${#records[@]} - 1]}")
+  done < <(printf '%s\n' "$rows" | head -n 20)
+  [ "${#newest[@]}" -gt 0 ] || return 1
+  jq -r --arg want "$want" \
+    'select(.state_key == $want) | input_filename' "${newest[@]}" 2>/dev/null |
+    head -n 1 | sed 's|/[^/]*$||' | grep .
 }
 
 # Resolve a SESSION argument to exactly one record directory.
@@ -136,6 +156,7 @@ _telemetry_resolve() {
     current)
       while IFS= read -r key; do
         matches=$(printf '%s\n' "$rows" | awk -F '\t' -v k="$key" '$3 == k { print $4 }' | head -n 1)
+        [ -n "$matches" ] || matches=$(_telemetry_state_key_match "$rows" "$key") || matches=''
         if [ -n "$matches" ]; then
           printf '%s\n' "$matches"
           return 0

@@ -86,7 +86,9 @@ expected = {
             ("Grep|Search", "agent-hook-pre-search", 10),
             ("mcp__", "agent-hook-pre-mcp", 10),
         ],
+        "SessionEnd": [(None, "agent-hook-session-end", 30)],
         "SessionStart": [(None, "agent-hook-session-start", 10)],
+        "Notification": [("", "agent-hook-notification", None)],
         "Stop": [("", "agent-hook-stop", None)],
         "UserPromptSubmit": [("", "agent-hook-prompt-submit", 10)],
     },
@@ -120,6 +122,10 @@ expected = {
 # omitting the matcher; JSON runtimes use "" (match-all for both literal and
 # regex matcher semantics). Lifecycle events without a matcher stay without one.
 TELEMETRY = "agent-hook-telemetry"
+# Events wired only for the recorder, per runtime: every audit-relevant event
+# the runtime exposes beyond the ones its guards already use. Per-call model
+# events (Gemini BeforeModel/AfterModel, Muse PreLLMCall/PostLLMCall) are left
+# out everywhere for volume.
 telemetry_only_events = {
     "claude": [
         "PostToolUseFailure",
@@ -129,6 +135,25 @@ telemetry_only_events = {
         "SubagentStop",
         "PreCompact",
         "PostCompact",
+        "StopFailure",
+    ],
+    "codex": [
+        "SubagentStart",
+        "SubagentStop",
+        "PreCompact",
+        "PostCompact",
+        "Interrupt",
+    ],
+    "gemini": ["PreCompress"],
+    "muse": [
+        "PermissionRequest",
+        "PostToolUseFailure",
+        "SubagentStart",
+        "SubagentStop",
+        "PreCompact",
+        "PostCompact",
+        "StopFailure",
+        "Interrupt",
     ],
 }
 tool_events = {
@@ -146,8 +171,15 @@ for runtime, events in expected.items():
         else:
             matcher = None
         # Gemini hook timeouts are milliseconds; every other runtime uses
-        # seconds. Both budgets are ten seconds.
-        groups.append((matcher, TELEMETRY, 10000 if runtime == "gemini" else 10))
+        # seconds. Both budgets are ten seconds, except that Codex runs
+        # SessionEnd during shutdown and keeps its guard's 3 s budget.
+        if runtime == "gemini":
+            timeout = 10000
+        elif runtime == "codex" and event == "SessionEnd":
+            timeout = 3
+        else:
+            timeout = 10
+        groups.append((matcher, TELEMETRY, timeout))
 
 identity_prefixes = {
     "claude": 'env -u BASH_ENV -u ENV AGENTGUARD_NAME=claude AGENTGUARD_SESSION_ID="${CLAUDE_CODE_CURRENT_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}" ',

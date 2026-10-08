@@ -1,5 +1,60 @@
 {
   "hooks": {
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-notification",
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "hooks": [
@@ -40,6 +95,29 @@
           }
         ],
         "matcher": ""
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": ""
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
       }
     ],
     "PreToolUse": [
@@ -94,6 +172,26 @@
         "matcher": ""
       }
     ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-session-end",
+            "timeout": 30,
+            "type": "command"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [
@@ -133,6 +231,39 @@
           }
         ],
         "matcher": ""
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [

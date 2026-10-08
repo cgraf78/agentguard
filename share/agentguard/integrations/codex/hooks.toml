@@ -111,11 +111,13 @@ type = "command"
 command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
 timeout = 10
 
+# Codex flushes the transcript and runs SessionEnd during shutdown, so the
+# recorder keeps the same short budget as the SessionEnd guard above.
 [[hooks.SessionEnd]]
 [[hooks.SessionEnd.hooks]]
 type = "command"
 command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
-timeout = 10
+timeout = 3
 
 [[hooks.PermissionRequest]]
 [[hooks.PermissionRequest.hooks]]
@@ -125,6 +127,36 @@ timeout = 10
 
 [[hooks.UserPromptSubmit]]
 [[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
+timeout = 10
+
+[[hooks.SubagentStart]]
+[[hooks.SubagentStart.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
+timeout = 10
+
+[[hooks.SubagentStop]]
+[[hooks.SubagentStop.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
+timeout = 10
+
+[[hooks.PreCompact]]
+[[hooks.PreCompact.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
+timeout = 10
+
+[[hooks.PostCompact]]
+[[hooks.PostCompact.hooks]]
+type = "command"
+command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
+timeout = 10
+
+[[hooks.Interrupt]]
+[[hooks.Interrupt.hooks]]
 type = "command"
 command = "env -u BASH_ENV -u ENV AGENTGUARD_NAME=codex AGENTGUARD_SESSION_ID=\"${CODEX_THREAD_ID:-}\" agent-hook-telemetry"
 timeout = 10

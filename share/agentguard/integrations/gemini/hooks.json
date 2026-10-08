@@ -167,6 +167,17 @@
         "matcher": ""
       }
     ],
+    "PreCompress": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=gemini AGENTGUARD_SESSION_ID=\"gemini-${PPID}\" agent-hook-telemetry",
+            "timeout": 10000,
+            "type": "command"
+          }
+        ]
+      }
+    ],
     "Notification": [
       {
         "hooks": [
