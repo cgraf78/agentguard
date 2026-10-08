@@ -139,12 +139,15 @@ subagent runs no lifecycle guards (session start and end, prompt, stop), and
 its permission notice runs on the top-level session with `agent_id`, so no
 hook ever runs under the child's own ID and no guard record opens a separate
 telemetry session for it. Links come from V1 `session.created` and V2
-`session.get` or `session.created`. A V1 child seen without `session.created`
-(a resumed subagent, or a plugin loaded after the child existed) is looked up
-once through the session API before its first prompt; a lookup that fails or
-takes over a second leaves it top-level. A link is dropped when its session
-ends. At unload, subagents end first, so their `SubagentStop` lands before the
-parent's `SessionEnd`.
+`session.get` or `session.created`. A V1 session seen without
+`session.created` (a resumed subagent, or a plugin loaded after the child
+existed) is looked up once through the session API before its first prompt; a
+lookup that fails or takes over a second leaves it top-level. Sessions whose
+`session.created` was seen, with or without a parent, are never looked up. A
+link is dropped when its session ends, unless a still-running nested subagent
+resolves through it; it is then dropped with its last descendant. At unload,
+the deepest subagents end first, one level at a time, so each `SubagentStop`
+lands before its parent's `SubagentStop` or `SessionEnd`.
 
 Each record is a separate recorder process, stamped when it finishes, so the
 timeline guarantees only two orderings: a call's post or failure record lands

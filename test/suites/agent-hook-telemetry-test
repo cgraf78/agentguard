@@ -858,8 +858,10 @@ _event_name_for() {
     export AGENTGUARD_TELEMETRY=0
     # shellcheck source=../../lib/agentguard/hook-helpers.sh
     . "$BIN_DIR/../lib/agentguard/hook-helpers.sh" </dev/null >/dev/null 2>&1
+    # The real path: a hook reads its payload, then the prefiltered refresh.
     _HOOK_INPUT="$2"
-    _hook_refresh_state_dir
+    _HOOK_INPUT_STATE_REFRESHED=''
+    _hook_refresh_state_dir_for_input
     _hook_event_name
   )
 }
@@ -962,5 +964,12 @@ _run_cli sessions
 header_col=$(printf '%s\n' "$CLI_OUT" | head -n 1 | awk '{print index($0, "SESSION")}')
 row_cols=$(printf '%s\n' "$CLI_OUT" | tail -n +2 | awk '{print index($0, "col-")}' | sort -u | paste -sd ' ' -)
 _assert_eq "sessions table: session column aligned" "$header_col" "$row_cols"
+
+_assert_eq "event name: failure event without any session field" "PostToolUseFailure" \
+  "$(_event_name_for post-mcp '{"hook_event_name":"PostToolUseFailure","tool_name":"mcp__a__b","error":"boom"}')"
+_assert_eq "event name: newline in an earlier field cannot shift it" "PostToolUse" \
+  "$(_event_name_for post-mcp "$(jq -cn '{session_id:"s",prompt_id:"p\nPostToolUseFailure",hook_event_name:"PostToolUse"}')")"
+_assert_eq "event name: object subagent_type cannot shift it" "PostToolUseFailure" \
+  "$(_event_name_for post-mcp '{"session_id":"s","subagent_type":{"a":1},"hook_event_name":"PostToolUseFailure"}')"
 
 _test_summary

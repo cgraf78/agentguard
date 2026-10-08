@@ -694,7 +694,7 @@ function spawnRecorder(command, body, directory, sessionID, runtimeName) {
 // OpenCode runs a task subagent in a child session that names its parent.
 // Every other runtime files subagent activity under the session that spawned
 // it, so the adapter keeps child -> parent links and resolves the top-level
-// session. Links are bounded like call records; an evicted link only means a
+// session. Entries are bounded like call records; an evicted one only means a
 // very old subagent's late records file under its own session again.
 const MAX_LINEAGE = 4_096;
 
@@ -708,27 +708,88 @@ async function settleWithin(promises, milliseconds) {
   clearTimeout(timer);
 }
 
-function link(lineage, sessionID, parentID) {
-  if (typeof sessionID !== "string" || !sessionID) return;
-  if (typeof parentID !== "string" || !parentID || parentID === sessionID) return;
-  lineage.delete(sessionID);
-  lineage.set(sessionID, parentID);
-  while (lineage.size > MAX_LINEAGE) lineage.delete(lineage.keys().next().value);
-}
-
-function rootSession(lineage, sessionID) {
-  // Follow nested subagents to the top. The visited set makes a malformed
-  // cycle terminate instead of hanging a tool callback.
-  let current = sessionID;
-  const visited = new Set();
-  while (lineage.has(current) && !visited.has(current)) {
-    visited.add(current);
-    current = lineage.get(current);
+// Groups items by subagent depth, deepest first. Unload ends one level at a
+// time: a session ending before its own subagents would release the link they
+// resolve through and strand their final records under it.
+function byDepth(items, depthOf) {
+  const levels = new Map();
+  for (const item of items) {
+    const depth = depthOf(item);
+    levels.set(depth, [...(levels.get(depth) ?? []), item]);
   }
-  return current;
+  return [...levels.entries()]
+    .sort(([a], [b]) => b - a)
+    .map(([depth, level]) => ({ depth, level }));
 }
 
-export const AgentGuardPlugin = async ({ directory, client, onContext, lineage = new Map() }) => {
+function createLineage() {
+  // Session -> parent ID, or null for a session known to be top-level, so a
+  // session whose parentage is already known is never looked up again.
+  const parents = new Map();
+  // Ended sessions kept only because a live descendant still routes through
+  // them: dropping a middle link early would re-root its subagents onto it.
+  const ended = new Set();
+
+  function routesThrough(sessionID) {
+    for (const parentID of parents.values()) if (parentID === sessionID) return true;
+    return false;
+  }
+
+  function ancestors(sessionID) {
+    // Follow nested subagents to the top. The visited set makes a malformed
+    // cycle terminate instead of hanging a tool callback.
+    const chain = [sessionID];
+    const visited = new Set(chain);
+    let parentID = parents.get(sessionID);
+    while (parentID && !visited.has(parentID)) {
+      chain.push(parentID);
+      visited.add(parentID);
+      parentID = parents.get(parentID);
+    }
+    return chain;
+  }
+
+  return {
+    known: (sessionID) => parents.has(sessionID),
+    root: (sessionID) => ancestors(sessionID).at(-1),
+    depth: (sessionID) => ancestors(sessionID).length - 1,
+
+    learn(sessionID, parentID) {
+      if (typeof sessionID !== "string" || !sessionID) return;
+      if (typeof parentID === "string" && parentID && parentID !== sessionID) {
+        parents.delete(sessionID);
+        parents.set(sessionID, parentID);
+      } else if (!parents.has(sessionID)) {
+        parents.set(sessionID, null);
+      }
+      while (parents.size > MAX_LINEAGE) {
+        const oldest = parents.keys().next().value;
+        parents.delete(oldest);
+        ended.delete(oldest);
+      }
+    },
+
+    end(sessionID) {
+      if (!parents.has(sessionID)) return;
+      ended.add(sessionID);
+      // Drop ended sessions bottom-up once no live descendant needs them.
+      let current = sessionID;
+      while (current && ended.has(current) && !routesThrough(current)) {
+        const parentID = parents.get(current);
+        parents.delete(current);
+        ended.delete(current);
+        current = parentID;
+      }
+    },
+  };
+}
+
+export const AgentGuardPlugin = async ({
+  directory,
+  client,
+  onContext,
+  lineage = createLineage(),
+}) => {
   // Session records serialize lifecycle events that OpenCode intentionally
   // dispatches without awaiting. Call records are separate because concurrent
   // tools need their own pre-hook context and cleanup boundary.
@@ -907,7 +968,7 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
   }
 
   function rootOf(sessionID) {
-    return rootSession(lineage, sessionID);
+    return lineage.root(sessionID);
   }
 
   function isSubagent(sessionID) {
@@ -1046,8 +1107,9 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
     // V1 announces a child only in session.created, which a resumed subagent,
     // or a plugin loaded after the child existed, never sees. Ask once before
     // the first parent-dependent decision; a slow or failing lookup fails open
-    // to a top-level session. V2 resolves parents in its own session lookup.
-    if (lineage.has(sessionID) || typeof client?.session?.get !== "function") return;
+    // to a top-level session. A session whose session.created was seen is
+    // already known, parent or not. V2 resolves parents in its own lookup.
+    if (lineage.known(sessionID) || typeof client?.session?.get !== "function") return;
     let timer;
     try {
       const deadline = new Promise((resolve) => {
@@ -1057,7 +1119,7 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
         Promise.resolve().then(() => client.session.get({ path: { id: sessionID } })),
         deadline,
       ]);
-      link(lineage, sessionID, response?.data?.parentID);
+      if (response?.data) lineage.learn(sessionID, response.data.parentID);
     } catch {
       // Unknown parentage stays top-level.
     } finally {
@@ -1185,8 +1247,9 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
         await advisory(record.id, "agent-hook-session-end", payload);
       }
       removeCalls(record.id);
-      // Drop the ended session's link so the cap only ever evicts dead ones.
-      lineage.delete(record.id);
+      // Release the ended session's link so the cap only evicts dead ones; it
+      // stays while a live nested subagent still resolves through it.
+      lineage.end(record.id);
       if (sessions.get(record.id) === record) sessions.delete(record.id);
     });
     return record.end;
@@ -1417,7 +1480,7 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
       if (handleTerminalToolError(event, sessionID)) return Promise.resolve();
 
       if (event.type === "session.created") {
-        link(lineage, sessionID, event.properties?.info?.parentID);
+        lineage.learn(sessionID, event.properties?.info?.parentID);
         state(sessionID);
         return Promise.resolve();
       }
@@ -1473,17 +1536,20 @@ export const AgentGuardPlugin = async ({ directory, client, onContext, lineage =
     [OBSERVE]: observe,
 
     dispose: async () => {
-      // End subagents first and let their SubagentStop records land, briefly
-      // bounded, before any parent's SessionEnd: a parent's trail must not
-      // close while a delegated turn still appears open.
-      const all = [...sessions.values()];
-      const subagents = all.filter((record) => isSubagent(record.id));
-      await Promise.all(subagents.map(finalize));
-      await settleWithin(
-        subagents.map((record) => record.audited),
-        scaled(RECORDER_DRAIN),
-      );
-      await Promise.all(all.filter((record) => !subagents.includes(record)).map(finalize));
+      // End the deepest subagents first and let each level's SubagentStop
+      // records land, briefly bounded, before its parents end: a trail must
+      // not close while a delegated turn still appears open.
+      for (const { depth, level } of byDepth(sessions.values(), (record) =>
+        lineage.depth(record.id),
+      )) {
+        await Promise.all(level.map(finalize));
+        if (depth > 0) {
+          await settleWithin(
+            level.map((record) => record.audited),
+            scaled(RECORDER_DRAIN),
+          );
+        }
+      }
       await drainRecorders();
     },
   };
@@ -1502,7 +1568,7 @@ export default {
     const controller = new AbortController();
     // V2 gives each session its own core, so subagent links live here, shared
     // by every core, where a child's core can resolve its parent's session.
-    const lineage = new Map();
+    const lineage = createLineage();
     let disposed = false;
     const client = {
       mcp: {
@@ -1523,7 +1589,7 @@ export default {
         // Resolve once per session, not per tool, and share its core across calls.
         record = (async () => {
           const info = await ctx.session.get({ sessionID });
-          link(lineage, sessionID, info.parentID);
+          lineage.learn(sessionID, info.parentID);
           const directory = path.resolve(info.location.directory, info.subpath ?? ".");
           const record = { context: "" };
           record.hooks = await AgentGuardPlugin({
@@ -1551,14 +1617,13 @@ export default {
       // Dispose explicitly before draining children, including partially failed
       // setup. A retained callback may not recreate a finalized session.
       await Promise.allSettled(registrations.map((registration) => registration.dispose()));
-      // Each core drains its own records on dispose, so ending subagent cores
-      // first lands their SubagentStop before any parent's SessionEnd.
-      const entries = [...sessions.entries()];
-      const subagent = ([sessionID]) => rootSession(lineage, sessionID) !== sessionID;
-      const disposeAll = (list) =>
-        Promise.allSettled(list.map(async ([, record]) => (await record).hooks.dispose()));
-      await disposeAll(entries.filter(subagent));
-      await disposeAll(entries.filter((entry) => !subagent(entry)));
+      // Each core drains its own records on dispose, so ending the deepest
+      // subagent cores first lands their SubagentStop before their parents end.
+      for (const { level } of byDepth(sessions.entries(), ([sessionID]) =>
+        lineage.depth(sessionID),
+      )) {
+        await Promise.allSettled(level.map(async ([, record]) => (await record).hooks.dispose()));
+      }
       sessions.clear();
     }
     try {
@@ -1581,7 +1646,7 @@ export default {
           if (disposed) throw new Error("AgentGuard plugin is unloaded");
           event.env.AGENTGUARD_NAME = agentName();
           const sessionID = execution.getStore()?.sessionID;
-          event.env.AGENTGUARD_SESSION_ID = sessionID ? rootSession(lineage, sessionID) : "";
+          event.env.AGENTGUARD_SESSION_ID = sessionID ? lineage.root(sessionID) : "";
         }),
       );
       registrations.push(
@@ -1691,7 +1756,7 @@ export default {
           const sessionID = event.data?.sessionID;
           // Learn subagent links even for sessions no callback has touched yet,
           // so a child's first prompt already resolves to its parent.
-          if (event.type === "session.created") link(lineage, sessionID, event.data?.parentID);
+          if (event.type === "session.created") lineage.learn(sessionID, event.data?.parentID);
           const translate = V2_AUDIT_EVENTS.get(event.type);
           if (
             !sessionID ||

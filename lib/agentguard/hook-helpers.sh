@@ -240,12 +240,14 @@ _hook_refresh_state_dir() {
       IFS= read -r input_prompt || true
       IFS= read -r input_event || true
     } < <(printf '%s' "$_HOOK_INPUT" | jq -r '
-      # Only a string is an id; an object or number would otherwise be
-      # printed as JSON text and become a key.
-      ((.session_id // .sessionId) | if type == "string" then . else "" end),
-      (.subagent_type // .subagentType // ""),
-      (.prompt_id // .promptId // ""),
-      ((.hook_event_name // .hookEventName) | if type == "string" then . else "" end)
+      # One output line per field: only a string counts (an object would be
+      # printed as multi-line JSON), and CR/LF are removed so a value can
+      # never shift the fields read after it.
+      def line: if type == "string" then gsub("[\r\n]"; "") else "" end;
+      ((.session_id // .sessionId) | line),
+      ((.subagent_type // .subagentType) | line),
+      ((.prompt_id // .promptId) | line),
+      ((.hook_event_name // .hookEventName) | line)
     ' 2>/dev/null)
   fi
 
@@ -343,7 +345,7 @@ _hook_refresh_state_dir() {
   # Kept for telemetry, which keys durable records by the payload's own id
   # where the state key is process-scoped (see _hook_telemetry_key).
   _HOOK_INPUT_SESSION="$input_session"
-  _HOOK_INPUT_EVENT="${input_event//[$'\n\r']/}"
+  _HOOK_INPUT_EVENT="$input_event"
   _HOOK_SESSION_KEY="$session_key"
   _HOOK_STATE_DIR="$(_hook_state_root)/$_HOOK_SESSION_KEY"
   if [ -n "${_HOOK_INPUT+x}" ]; then
@@ -353,17 +355,17 @@ _hook_refresh_state_dir() {
   fi
 }
 
-# String prefilter: does this payload mention any session field the state
-# refresh reads (`session_id`/`sessionId`, `subagent_type`/`subagentType`,
-# `prompt_id`/`promptId`)? The refresh extracts those three fields and nothing
-# else from hook JSON, so a payload mentioning none of them re-resolves the
+# String prefilter: does this payload mention any field the state refresh
+# reads (`session_id`/`sessionId`, `subagent_type`/`subagentType`,
+# `prompt_id`/`promptId`), or a failure event whose name post hooks must echo
+# (`_HOOK_INPUT_EVENT`)? A payload mentioning none of them re-resolves the
 # exact key the source-time refresh already computed. False positives (a
 # command containing the word "session") just take the slow path. Any
 # `\uXXXX` escape also takes the slow path, so JSON-escaped key spellings
 # (e.g. `ses\u0073ion_id`) cannot false-negative.
 _hook_input_has_session_fields() {
   case "${1:-}" in
-    *session* | *subagent* | *prompt* | *\\u*) return 0 ;;
+    *session* | *subagent* | *prompt* | *PostToolUseFailure* | *\\u*) return 0 ;;
     *) return 1 ;;
   esac
 }

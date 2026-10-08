@@ -71,8 +71,10 @@ fi
 # MCP success/failure is another tool boundary; `hm` owns any memory refresh.
 # Hand `hm` the failure verdict computed above; its generic status reader
 # does not know the runtime-specific failure shapes.
+# An interrupted call did not succeed either, so it must not refresh state
+# the way a success does.
 case "$verdict" in
-  true) _hook_hm_tool_complete 1 ;;
+  true | interrupt) _hook_hm_tool_complete 1 ;;
   false) _hook_hm_tool_complete 0 ;;
   *) _hook_hm_tool_complete ;;
 esac

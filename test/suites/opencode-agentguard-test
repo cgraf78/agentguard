@@ -3054,6 +3054,149 @@ await check("V2 unload records SubagentStop before the parent's SessionEnd", asy
   }
 });
 
+await check("V1 unload files nested subagents under the top-level session, deepest first", async () => {
+  clearLog();
+  installRecorder();
+  const normalTimeoutScale = process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE;
+  process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = "3";
+  let hooks;
+  try {
+    hooks = await plugin();
+    const created = (id, parentID) =>
+      hooks.event({ event: { type: "session.created", properties: { info: { id, parentID } } } });
+    void created("nest-p");
+    void created("nest-c", "nest-p");
+    void created("nest-g", "nest-c");
+    await hooks["chat.message"]({ sessionID: "nest-p", agent: "build" }, say("delegate"));
+    await hooks["chat.message"]({ sessionID: "nest-c", agent: "general" }, say("delegate again"));
+    await hooks["chat.message"]({ sessionID: "nest-g", agent: "general" }, say("leaf work"));
+    await hooks.dispose();
+    hooks = undefined;
+
+    assert.deepEqual(audits("nest-c"), []);
+    assert.deepEqual(audits("nest-g"), []);
+    const ends = audits("nest-p")
+      .filter((record) => ["SubagentStop", "SessionEnd"].includes(record.payload.hook_event_name))
+      .map((record) => `${record.payload.hook_event_name}:${record.payload.agent_id ?? ""}`);
+    assert.deepEqual(ends, ["SubagentStop:nest-g", "SubagentStop:nest-c", "SessionEnd:"]);
+    assert.deepEqual(
+      logs()
+        .filter((record) => record.session === "nest-c" || record.session === "nest-g")
+        .map((record) => record.hook),
+      [],
+    );
+  } finally {
+    await hooks?.dispose();
+    process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = normalTimeoutScale;
+    removeRecorder();
+  }
+});
+
+await check("V2 unload files nested subagents under the top-level session, deepest first", async () => {
+  clearLog();
+  installRecorder();
+  const normalTimeoutScale = process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE;
+  process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = "3";
+  const parents = { "nest-v2-c": "nest-v2-p", "nest-v2-g": "nest-v2-c" };
+  const callbacks = new Map();
+  let host;
+  try {
+    host = await v2({
+      session: {
+        hook: async (name, callback) => {
+          callbacks.set(name, callback);
+          return { dispose: async () => {} };
+        },
+        get: async ({ sessionID }) => ({
+          agent: parents[sessionID] ? "general" : "build",
+          location: { directory: sourceDirectory },
+          ...(parents[sessionID] ? { parentID: parents[sessionID] } : {}),
+        }),
+      },
+    });
+    for (const sessionID of ["nest-v2-p", "nest-v2-c", "nest-v2-g"]) {
+      await callbacks.get("prompt")({ sessionID, prompt: { text: sessionID } });
+    }
+    await host.dispose();
+    host = undefined;
+
+    assert.deepEqual(audits("nest-v2-c"), []);
+    assert.deepEqual(audits("nest-v2-g"), []);
+    const ends = audits("nest-v2-p")
+      .filter((record) => ["SubagentStop", "SessionEnd"].includes(record.payload.hook_event_name))
+      .map((record) => `${record.payload.hook_event_name}:${record.payload.agent_id ?? ""}`);
+    assert.deepEqual(ends, ["SubagentStop:nest-v2-g", "SubagentStop:nest-v2-c", "SessionEnd:"]);
+  } finally {
+    await host?.dispose();
+    process.env.AGENTGUARD_OPENCODE_TIMEOUT_SCALE = normalTimeoutScale;
+    removeRecorder();
+  }
+});
+
+await check("a nested subagent stays under the top-level session after its parent ends", async () => {
+  clearLog();
+  installRecorder();
+  let hooks;
+  try {
+    hooks = await plugin();
+    const created = (id, parentID) =>
+      hooks.event({ event: { type: "session.created", properties: { info: { id, parentID } } } });
+    void created("mid-p");
+    void created("mid-c", "mid-p");
+    void created("mid-g", "mid-c");
+    await hooks["chat.message"]({ sessionID: "mid-c", agent: "general" }, say("delegate"));
+    await hooks["chat.message"]({ sessionID: "mid-g", agent: "general" }, say("leaf work"));
+    // The middle subagent ends while its own subagent is still working.
+    void hooks.event({ event: { type: "session.deleted", properties: { info: { id: "mid-c" } } } });
+    await waitForAudit("mid-p", "SubagentStop", (payload) => payload.agent_id === "mid-c");
+
+    const call = { tool: "bash", sessionID: "mid-g", callID: "mid-g-call" };
+    await hooks["tool.execute.before"](call, { args: { command: "echo leaf" } });
+    void hooks.event({ event: { type: "session.idle", properties: { sessionID: "mid-g" } } });
+    const pre = await waitForAudit("mid-p", "PreToolUse", (payload) => payload.agent_id === "mid-g");
+    assert.equal(pre.session, "mid-p");
+    await waitForAudit("mid-p", "SubagentStop", (payload) => payload.agent_id === "mid-g");
+    assert.deepEqual(audits("mid-c"), []);
+    const guard = logs().find((record) => record.payload.tool_use_id === "mid-g-call");
+    assert.equal(guard.session, "mid-p");
+    assert.equal(guard.payload.session_id, "mid-p");
+  } finally {
+    await hooks?.dispose();
+    removeRecorder();
+  }
+});
+
+await check("V1 skips the parent lookup for a session whose creation was seen", async () => {
+  clearLog();
+  const lookups = [];
+  let hooks;
+  try {
+    hooks = await plugin(
+      {},
+      {
+        session: {
+          get: async ({ path: { id } }) => {
+            lookups.push(id);
+            return { data: { id } };
+          },
+        },
+      },
+    );
+    void hooks.event({
+      event: { type: "session.created", properties: { info: { id: "seen-top-level" } } },
+    });
+    await hooks["chat.message"]({ sessionID: "seen-top-level", agent: "build" }, say("hello"));
+    assert.deepEqual(lookups, []);
+    assert.ok(
+      logs().some(
+        (record) => record.hook === "agent-hook-session-start" && record.session === "seen-top-level",
+      ),
+    );
+  } finally {
+    await hooks?.dispose();
+  }
+});
+
 await check("terminal MCP failures reach the post guard as PostToolUseFailure", async () => {
   clearLog();
   let hooks;
