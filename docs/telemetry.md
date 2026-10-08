@@ -42,50 +42,69 @@ agentguard-telemetry sessions               # recent sessions, newest first
 agentguard-telemetry sessions --agent codex # one runtime only
 agentguard-telemetry show                   # timeline of the latest session
 agentguard-telemetry show 8a15fead          # a session by unique key prefix
-agentguard-telemetry show current           # the session running this command
+agentguard-telemetry show current           # the session running this command (*)
 agentguard-telemetry show <key> --json | jq # raw records (JSONL)
+agentguard-telemetry show all --json        # every session, for cross-session audits
 ```
 
-Common audits with `jq` (each record file is one line, so a session directory
-concatenates to valid JSONL):
+(*) `current` matches the runtime session id exported to the agent's tool
+shell (`AGENTGUARD_SESSION_ID`, Claude, Codex, Grok, or `MUSE_SESSION_ID`).
+Gemini and id-less Muse sessions are keyed by process id; use `latest` or a
+key from `sessions` for them.
+
+Common audits with `jq` (each record file is one line, so `show --json`
+prints valid JSONL). Payloads are each runtime's native hook payload, so field
+and event names differ: these recipes use Claude Code's (`PreToolUse`,
+`tool_input`, `Edit`/`Write`). Gemini uses `BeforeTool`/`AfterTool`, Grok
+uses camelCase keys such as `toolInput`, and Codex sends `apply_patch` edits
+as a patch in `tool_input.command`.
 
 ```bash
-dir=$(agentguard-telemetry path <key>)
+s=<key>   # or: latest, current, a unique prefix
 
 # Every shell command the agent ran, in order
-cat "$dir"/*.json | jq -r 'select(.kind=="event" and .event=="PreToolUse")
-  | .payload.tool_input.command // empty'
+agentguard-telemetry show "$s" --json |
+  jq -r 'select(.kind=="event" and .event=="PreToolUse" and .tool_name=="Bash")
+    | .payload.tool_input.command'
 
 # Every file the agent wrote or edited
-cat "$dir"/*.json | jq -r 'select(.kind=="event" and .event=="PreToolUse")
-  | .payload.tool_input.file_path // empty' | sort -u
-
-# Everything AgentGuard blocked or warned about, across all sessions
-cat "$(agentguard-telemetry dir)"/sessions/*/*/*.json |
-  jq -c 'select(.kind=="hook" and (.blocked or .warnings))
-    | {ts, agent, session_key, hook, blocked, warnings}'
+agentguard-telemetry show "$s" --json |
+  jq -r 'select(.kind=="event" and .event=="PreToolUse"
+      and (.tool_name | test("^(Edit|Write|MultiEdit|NotebookEdit)$")))
+    | .payload.tool_input.file_path // .payload.tool_input.notebook_path' | sort -u
 
 # The output of a specific tool call
-cat "$dir"/*.json | jq 'select(.tool_use_id=="toolu_..." and .event=="PostToolUse")
-  | .payload.tool_response'
+agentguard-telemetry show "$s" --json |
+  jq 'select(.kind=="event" and .event=="PostToolUse" and .tool_use_id=="toolu_...")
+    | .payload.tool_response'
+
+# Everything AgentGuard blocked or warned about, across all sessions
+agentguard-telemetry show all --json |
+  jq -c 'select(.kind=="hook" and (.blocked or .warnings))
+    | {ts, agent, session_key, hook, blocked, warnings}'
 ```
 
 `rg PATTERN "$(agentguard-telemetry dir)"` searches every session's records.
+`agentguard-telemetry dir` prints the root this shell's environment selects;
+if a runtime scrubs `XDG_STATE_HOME` from hook processes, its records land in
+`~/.local/state` instead, which `sessions` and `show` also search.
 
 ## Record kinds
 
 Two hook entry points write records, and both share one schema.
 
 - **`event`** records come from `agent-hook-telemetry`, a passive recorder that
-  integrations register for every event and every tool the runtime exposes.
+  the integrations register for every tool and for each event listed under
+  [Coverage](#coverage).
   They carry the host's complete hook payload under `payload`: prompts, tool
   inputs, tool outputs, permission requests, subagent and compaction events.
 - **`hook`** records come from every other `agent-hook-*` entry point. They
   carry that hook's decision: exit status, outcome, block/warning/reminder
   messages, the context it injected into the model, and the command or edit
   files it parsed. They omit the payload because the matching `event` record
-  already holds it; join the two on `tool_use_id` (or on `ts` and `event` when
-  a runtime has no tool-use id).
+  already holds it; join the two on `tool_use_id`. Without one, use order:
+  both records for an event sit next to each other in the timeline, though
+  parallel hooks finish in either order.
 
 A hook records on every exit path, including no-op early exits and fail-closed
 parse errors, because recording runs from an `EXIT` trap rather than from the
@@ -101,7 +120,7 @@ normal finish path.
 | `agent` | all | Runtime identity (`AGENTGUARD_NAME` or detection). |
 | `session_key` | all | AgentGuard's session key; the directory name. |
 | `session_id` | all | The payload's session id when present. |
-| `event` | all | Native event name (`PreToolUse`, `BeforeTool`, `SessionStart`, ...). |
+| `event` | all | The payload's native event name (`PreToolUse`, `BeforeTool`, ...); for a hook that received no payload, AgentGuard's canonical name for that hook. |
 | `hook` | all | Executable that wrote the record. |
 | `tool_name`, `tool_use_id` | all | From the payload when present. |
 | `cwd` | all | Payload `cwd`, else the hook's working directory. |
@@ -117,7 +136,8 @@ normal finish path.
 | `payload` | event | The raw host payload (parsed JSON, or `{"unparsed": "..."}`). |
 | `payload_truncated_chars` | event | Original payload length when truncated. |
 
-Empty and null fields are omitted. Additive fields do not change the schema
+Empty and null fields are omitted, except that an `event` record always has
+`payload` (null when the host sent none). Additive fields do not change the schema
 version; a renamed or removed field will.
 
 ## Configuration
@@ -155,9 +175,18 @@ history: do not commit, sync, or share it without review.
 | Muse | All tools; prompts, stop, session start | yes |
 | OpenCode | Not yet: the plugin adapter does not call `agent-hook-telemetry` | yes, for guarded tools |
 
-Events a runtime does not expose to hooks cannot be recorded; for example,
-model responses are not hook events in most runtimes. Use the runtime's own
-transcript for those.
+Only the events above are wired. Some runtimes expose more that are not yet
+recorded: Codex compaction, subagent, and interrupt events; Muse permission
+requests and tool failures (so a failed Muse tool call has no post-tool
+record); Grok compaction, permission-denied, and stop-failure events; Gemini
+model and compression events; and newer Claude events such as `StopFailure`.
+Wiring one means adding it to the runtime's fragment after confirming the
+runtime accepts it. Events a runtime does not expose at all cannot be
+recorded; model responses, for example, are not hook events in most runtimes,
+so use the runtime's own transcript for those.
+
+Codex only runs hooks whose trust hash the user (or a configuration manager)
+has approved, so the Codex rows apply once the new handlers are trusted.
 
 Consumers that merge the integration fragments pick up the recorder
 automatically. A consumer that wires hooks by hand should register

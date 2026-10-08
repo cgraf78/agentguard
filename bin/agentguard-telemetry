@@ -54,6 +54,7 @@ Commands:
       --json              One JSON object per session instead of a table.
   show [SESSION] [--json] Show a session's timeline. With --json, print the
                           raw records as JSONL (one record per line) for jq.
+                          SESSION `all` covers every session.
   path [SESSION]          Print a session's record directory.
   prune [--days N]        Delete sessions idle for more than N days
                           (default: AGENTGUARD_TELEMETRY_RETENTION_DAYS or 90).
@@ -301,6 +302,22 @@ _telemetry_cmd_show() {
         ;;
     esac
   done
+  if [ "$want" = all ]; then
+    # Every session across every root, oldest activity first, for audits
+    # that span sessions. Session by session keeps each one chronological.
+    local rows
+    rows=$(_telemetry_sorted_rows)
+    [ -n "$rows" ] || _telemetry_die "no telemetry sessions found"
+    printf '%s\n' "$rows" | sort | cut -f4 | while IFS= read -r dir; do
+      if $json; then
+        _telemetry_cat "$dir" | jq -c .
+      else
+        printf '# %s\n' "${dir//[[:cntrl:]]/?}"
+        _telemetry_cat "$dir" | jq -r "$_TELEMETRY_TIMELINE_JQ"
+      fi
+    done
+    return 0
+  fi
   dir=$(_telemetry_resolve "${want:-latest}") || exit 1
   records=("$dir"/*.json)
   [ -e "${records[0]}" ] || _telemetry_die "no records in $dir"

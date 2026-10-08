@@ -143,6 +143,11 @@ _assert_eq "early exit: exit 0" "0" "$HOOK_EXIT"
 _assert_eq "early exit: recorded" "1" "$(_record_count)"
 _assert_eq "early exit: event derived from hook name" "PreToolUse" "$(_records | jq -r .event)"
 
+# Without a payload, the fallback name must match the hook, not a default.
+_fresh_root
+_run_hook "$BIN_DIR/agent-hook-session-end" ''
+_assert_eq "no payload: session-end recorded as SessionEnd" "SessionEnd" "$(_records | jq -r .event)"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== storage location and privacy ==="
@@ -365,6 +370,9 @@ _assert_contains "show: prompt summary" "line one line two" "$CLI_OUT"
 _run_cli show "agent/$TEST_SID" --json
 _assert_eq "show --json: JSONL, one line per record" "3" "$(printf '%s\n' "$CLI_OUT" | jq -c . | wc -l | tr -d ' ')"
 _assert_eq "show --json: chronological" "UserPromptSubmit" "$(printf '%s\n' "$CLI_OUT" | head -n 1 | jq -r .event)"
+
+_run_cli show all --json
+_assert_eq "show all: every session's records" "4" "$(printf '%s\n' "$CLI_OUT" | jq -c . | wc -l | tr -d ' ')"
 
 _run_cli path "${TEST_SID:0:12}"
 _assert_eq "path: unique prefix resolves" "$SESSION_DIR" "$CLI_OUT"

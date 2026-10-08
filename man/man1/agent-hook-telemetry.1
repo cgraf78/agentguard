@@ -5,17 +5,20 @@ agent-hook-telemetry \- record an agent hook event in the audit trail
 .B agent-hook-telemetry
 .SH DESCRIPTION
 .B agent-hook-telemetry
-reads any hook JSON payload from standard input and records it, unmodified,
-as an
+reads any hook JSON payload from standard input and records its complete
+content (re-serialized compactly; non-JSON input is kept as text) as an
 .B event
 record in the session's audit directory under
 .IR ${XDG_STATE_HOME:-~/.local/state}/agentguard/telemetry/sessions/ .
 It always prints an empty JSON response and exits 0: it never blocks, warns,
 or injects context, so it is safe to register beside any guard hook.
 .PP
-AgentGuard's native integrations register it for every supported event with
-a match-all tool matcher, so every prompt, tool input, tool output, and
-lifecycle event is captured, including tools no guard inspects. Every other
+AgentGuard's native integrations register it for every wired event with a
+match-all tool matcher, so prompts, tool inputs, tool outputs, and lifecycle
+events are captured, including tools no guard inspects. The wired events per
+runtime are listed in
+.IR docs/telemetry.md .
+Every other
 .B agent-hook-*
 entry point writes a companion
 .B hook

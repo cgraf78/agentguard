@@ -1503,7 +1503,20 @@ _hook_telemetry_exit() {
     kind=event
   else
     kind=hook
-    event=$(_hook_event_name 2>/dev/null) || event=''
+    # Fallback only, for hooks that received no payload (the payload's own
+    # event name wins in the jq program). _hook_event_name maps to response
+    # schema names and defaults unknown hooks to UserPromptSubmit, which would
+    # mislabel session-end and notification records, so map explicitly and
+    # leave anything unrecognized unnamed.
+    case "${hook#agent-hook-}" in
+      pre-*) event=PreToolUse ;;
+      post-*) event=PostToolUse ;;
+      session-start*) event=SessionStart ;;
+      session-end*) event=SessionEnd ;;
+      prompt-submit*) event=UserPromptSubmit ;;
+      stop*) event=Stop ;;
+      notification*) event=Notification ;;
+    esac
   fi
   agent=$(_hook_agent_name 2>/dev/null) || agent=agent
   _hook_session_key_safe "$agent" || agent=agent
