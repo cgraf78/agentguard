@@ -30,6 +30,17 @@ _trim_hook_fragment() {
   printf '%s' "$value"
 }
 
+# True for a plain shell variable/function name. Every attacker-controlled word
+# must pass this before it becomes an associative-array key in `[[ -v A[k] ]]`
+# or `unset "A[k]"`, or a `${!name}` indirection: Bash re-expands those
+# subscripts, so a word like `$x` or `$(cmd)` would otherwise abort the hook
+# under `set -u` or run `cmd` inside the guard itself. Case globs such as
+# `[A-Za-z_][A-Za-z0-9_]*` are not a substitute because their trailing `*`
+# matches any suffix.
+_shell_name_is_valid() {
+  [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
+}
+
 # Heredoc delimiters decide whether the body is executable input or inert prose.
 # Keep that parsing centralized so the line splitter, generic command guards,
 # and protected bare-Git scan blocker agree on multiple heredocs, quoted delimiters, and
@@ -1548,7 +1559,7 @@ _expand_path_aliases() {
         replacement="$HOME"
         ;;
       *)
-        if [[ -v _HOOK_ASSIGNMENTS[$name] ]]; then
+        if [ -n "${_HOOK_ASSIGNMENTS[$name]+x}" ]; then
           replacement="${_HOOK_ASSIGNMENTS[$name]}"
         elif [ -n "${!name+x}" ]; then
           replacement="${!name}"
@@ -1624,7 +1635,8 @@ _is_protected_bare_git_path() {
 
 _forget_assignment() {
   local name="$1"
-  [[ -v _HOOK_READONLY_ASSIGNMENTS[$name] ]] && return 0
+  _shell_name_is_valid "$name" || return 0
+  [ -n "${_HOOK_READONLY_ASSIGNMENTS[$name]+x}" ] && return 0
   unset "_HOOK_ASSIGNMENTS[$name]"
   unset "_HOOK_EXPORTED_ASSIGNMENTS[$name]"
   _PROTECTED_BARE_GIT_PATH_VARS="${_PROTECTED_BARE_GIT_PATH_VARS// $name / }"
@@ -1632,13 +1644,15 @@ _forget_assignment() {
 
 _export_assignment() {
   local name="$1"
-  if [[ -v _HOOK_ASSIGNMENTS[$name] ]]; then
+  _shell_name_is_valid "$name" || return 0
+  if [ -n "${_HOOK_ASSIGNMENTS[$name]+x}" ]; then
     _HOOK_EXPORTED_ASSIGNMENTS[$name]="${_HOOK_ASSIGNMENTS[$name]}"
   fi
 }
 
 _unexport_assignment() {
   local name="$1"
+  _shell_name_is_valid "$name" || return 0
   unset "_HOOK_EXPORTED_ASSIGNMENTS[$name]"
 }
 
@@ -1761,6 +1775,9 @@ _remember_protected_bare_git_path_assignments() {
       [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
         name="${word%%=*}"
         value="${word#*=}"
+        # Not a real assignment word (`a$(x)=y` is a command); Bash would
+        # run it as a command name, so it ends the assignment prefix.
+        _shell_name_is_valid "$name" || return 0
         if [ "$unset_builtin" -eq 1 ] || [ "$export_functions" -eq 1 ]; then
           continue
         fi
@@ -1768,6 +1785,7 @@ _remember_protected_bare_git_path_assignments() {
         [ "$unexport_assignment" -eq 1 ] && _unexport_assignment "$name"
         ;;
       [A-Za-z_][A-Za-z0-9_]*)
+        _shell_name_is_valid "$word" || return 0
         if [ "$unset_builtin" -eq 1 ]; then
           if [ "$unset_variables" -eq 1 ]; then
             _forget_assignment "$word"
@@ -1779,7 +1797,7 @@ _remember_protected_bare_git_path_assignments() {
         else
           [ "$export_assignment" -eq 1 ] && _export_assignment "$word"
           [ "$unexport_assignment" -eq 1 ] && _unexport_assignment "$word"
-          if [ "$readonly_assignment" -eq 1 ] && [[ -v _HOOK_ASSIGNMENTS[$word] ]]; then
+          if [ "$readonly_assignment" -eq 1 ] && [ -n "${_HOOK_ASSIGNMENTS[$word]+x}" ]; then
             _HOOK_READONLY_ASSIGNMENTS[$word]=1
           fi
         fi
@@ -1795,7 +1813,8 @@ _remember_protected_bare_git_path_assignments() {
 
 _remember_assignment() {
   local name="$1" value="$2" export_assignment="${3:-0}" readonly_assignment="${4:-0}" protected_bare_path=0 expanded_value
-  if [[ -v _HOOK_READONLY_ASSIGNMENTS[$name] ]] && [ "$readonly_assignment" -eq 0 ]; then
+  _shell_name_is_valid "$name" || return 0
+  if [ -n "${_HOOK_READONLY_ASSIGNMENTS[$name]+x}" ] && [ "$readonly_assignment" -eq 0 ]; then
     return 0
   fi
   expanded_value="$(_expand_path_aliases "$value")"
@@ -1803,7 +1822,7 @@ _remember_assignment() {
 
   _HOOK_ASSIGNMENTS[$name]="$expanded_value"
   [ "$readonly_assignment" -eq 1 ] && _HOOK_READONLY_ASSIGNMENTS[$name]=1
-  if [ "$export_assignment" -eq 1 ] || [[ -v _HOOK_EXPORTED_ASSIGNMENTS[$name] ]]; then
+  if [ "$export_assignment" -eq 1 ] || [ -n "${_HOOK_EXPORTED_ASSIGNMENTS[$name]+x}" ]; then
     _HOOK_EXPORTED_ASSIGNMENTS[$name]="$expanded_value"
   fi
 
@@ -3631,7 +3650,10 @@ _assignment_value() {
     fi
   done
 
-  if [[ -v _HOOK_ASSIGNMENTS[$name] ]]; then
+  # The name can come from command text (`--config-env=key=NAME`), and both
+  # lookups below would re-expand a non-identifier.
+  _shell_name_is_valid "$name" || return 1
+  if [ -n "${_HOOK_ASSIGNMENTS[$name]+x}" ]; then
     printf '%s' "${_HOOK_ASSIGNMENTS[$name]}"
     return 0
   fi
@@ -3650,8 +3672,14 @@ _git_config_env_untracked_status_state() {
   local -a words=()
 
   if config_count="$(_assignment_value "$fragment" "GIT_CONFIG_COUNT")" && [[ "$config_count" =~ ^[0-9]+$ ]]; then
+    # Git refuses to run when any GIT_CONFIG_KEY_<n> below the count is
+    # missing, so stopping at the first gap loses nothing and bounds the walk
+    # by the keys that actually exist. A hostile count such as 999999999
+    # would otherwise keep the hook busy past its host timeout, which hosts
+    # treat as a non-blocking hook error.
+    [ "${#config_count}" -le 4 ] || config_count=9999
     for ((index = 0; index < config_count; index++)); do
-      config_key="$(_assignment_value "$fragment" "GIT_CONFIG_KEY_$index")" || continue
+      config_key="$(_assignment_value "$fragment" "GIT_CONFIG_KEY_$index")" || break
       [ "$config_key" = "status.showUntrackedFiles" ] || continue
       found=1
       if config_value="$(_assignment_value "$fragment" "GIT_CONFIG_VALUE_$index")"; then
@@ -4158,7 +4186,10 @@ _block_called_function_protected_bare_git_body() {
   local fragment="$1" depth="$2" command_word payload
 
   command_word="$(_fragment_command_word "$fragment")" || return 0
-  [[ -v _HOOK_FUNCTION_BODIES[$command_word] ]] || return 0
+  # Command words are raw command text (`$g`, `$(cmd)`); only names that
+  # `_remember_function_definition` could have recorded can match.
+  _shell_name_is_valid "$command_word" || return 0
+  [ -n "${_HOOK_FUNCTION_BODIES[$command_word]+x}" ] || return 0
   payload="${_HOOK_FUNCTION_BODIES[$command_word]}"
   [ "$depth" -lt 2 ] || return 0
   # Function bodies execute in the current shell when called. Scan them without

@@ -42,6 +42,7 @@ program	test/suites/agent-hook-bash-fast-test
 program	test/suites/agent-hook-bash-find-grep-test
 program	test/suites/agent-hook-bash-gate-test
 program	test/suites/agent-hook-bash-guards-test
+program	test/suites/agent-hook-bash-hostile-input-test
 program	test/suites/agent-hook-bash-output-scan-test
 program	test/suites/agent-hook-bash-parse-test
 program	test/suites/agent-hook-bash-pr-checks-test
