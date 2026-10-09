@@ -71,6 +71,15 @@ assets through shdeps, or use their absolute paths in this checkout.
   `AGENTGUARD_EDIT_CHURN_BYPASS=1` in the hook/launcher environment bypasses
   the same guard at launch time. An `export` in an agent tool shell cannot
   reach hook processes, so it never bypasses the guard.
+- Guard hooks (`agent-hook-pre-*`) fail closed. Hosts block a tool call only
+  on exit status 2 (OpenCode's adapter on any nonzero status) and treat every
+  other status as a non-blocking hook error that runs the tool unguarded, so
+  an unexpected exit status, a Bash runtime error raised inside AgentGuard's
+  own files (even one a command substitution swallowed), or a missing
+  library becomes a block with an `AgentGuard internal error` reason.
+  Advisory hooks (post-tool, lifecycle, prompt, Stop, notification) keep their
+  status: they cannot undo a completed call, and blocking a prompt or a Stop
+  would trap the session.
 - `agent-hook-pre-bash` can guard a broad bare-Git work tree when an integration
   sets `AGENTGUARD_PROTECTED_BARE_GIT_DIR`. Optional companion settings are
   `AGENTGUARD_PROTECTED_BARE_GIT_WORK_TREE` (defaults to `$HOME`),

@@ -55,6 +55,7 @@ program	test/suites/agent-hook-bash-protected-git-substitution-test
 program	test/suites/agent-hook-bash-safety-test
 program	test/suites/agent-hook-cmdline-test
 program	test/suites/agent-hook-edit-test
+program	test/suites/agent-hook-fail-closed-test
 program	test/suites/agent-hook-gemini-test
 program	test/suites/agent-hook-grok-test
 program	test/suites/agent-hook-helpers-test

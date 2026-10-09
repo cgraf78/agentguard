@@ -9,14 +9,15 @@ reads a PreToolUse hook JSON payload from standard input. The base hook
 enforces nothing itself: file-search tools differ per agent, so
 agent-specific extensions
 .RB ( agent-hook-pre-search\- <agent>)
-carry the policy. Fail-open throughout: an uninspectable payload never
-blocks the tool call.
+carry the policy. Payload handling fails open: an uninspectable payload never
+blocks the tool call. An AgentGuard internal error still blocks, as in every
+guard hook.
 .SH EXIT STATUS
 .TP
 .B 0
 The search call is allowed, possibly with warnings.
 .TP
 .B 2
-An extension blocked the search call.
+An extension blocked the search call, or AgentGuard hit an internal error.
 .SH SEE ALSO
 .BR agent-hook-pre-search-muse (1)

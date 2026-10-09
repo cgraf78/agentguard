@@ -369,7 +369,10 @@ case "$-" in
       exit 2
     }
     # shellcheck disable=SC1091 # Resolved relative to this symlink-aware launcher.
-    source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
+    source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
+      echo "${0##*/}: cannot load AgentGuard hook helpers" >&2
+      exit 2
+    }
     # END GENERATED LAUNCHER BOOTSTRAP
 
     _hook_parse_command
@@ -513,8 +516,11 @@ case "$-" in
     }
 
     if _pre_bash_needs_classifier "$AGENTGUARD_CMD_TRIMMED"; then
+      # A failed source would leave every guard below calling missing
+      # functions, which Bash reports and then continues past to an allow.
       # shellcheck source=../lib/agentguard/hook-command-classifier.sh
-      source "$_HOOK_BIN_DIR/../lib/agentguard/hook-command-classifier.sh"
+      source "$_HOOK_BIN_DIR/../lib/agentguard/hook-command-classifier.sh" ||
+        _hook_fail_closed 'cannot load hook-command-classifier.sh'
       _hook_cache_executable_fragments "$AGENTGUARD_CMD_TRIMMED"
     else
       _hook_source_extensions

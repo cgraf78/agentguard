@@ -28,6 +28,160 @@ _HOOK_PROMPT_SUBMITTED=''
 _HOOK_TELEMETRY_BLOCKS=''
 _HOOK_TELEMETRY_WARNINGS=''
 _HOOK_TELEMETRY_REMINDERS=''
+# Set by _hook_finish once it has written the response, so the exit trap only
+# supplies one when a hook died before reaching it.
+_HOOK_EMITTED=''
+# Fail-closed state for guard hooks; see _hook_exit.
+_HOOK_FAIL_CLOSED=''
+_HOOK_STDERR_FILE=''
+_HOOK_STDERR_FD=''
+
+# --- Fail-closed exit handling ---
+#
+# Hosts block a tool call only when a PreToolUse hook exits 2 (OpenCode's
+# adapter rejects any nonzero exit). Every other status, including Bash's 127
+# for an unbound variable under `set -u` or 1 for a failed builtin, is a
+# "non-blocking hook error": the tool runs with every guard skipped. Guard
+# hooks therefore treat any unexpected exit, or any Bash runtime error that a
+# command substitution swallowed, as a block.
+#
+# Advisory hooks (PostToolUse, lifecycle, prompt, Stop, notification) keep
+# their status. They cannot undo a completed call, and turning their failures
+# into exit 2 would block the user's prompt or re-enter the agent loop on
+# Stop. This matches the OpenCode adapter's documented failure semantics.
+
+# Bash runtime errors that mean AgentGuard's own code misbehaved. Bash prints
+# `<file>: line <n>: <message>`; only files AgentGuard ships count (see
+# _hook_stderr_line_is_internal_error), so a consumer extension's noise or a
+# missing optional tool (`sl: command not found`) cannot block every command.
+_hook_bash_error_is_internal() {
+  case "$1" in
+    *"unbound variable" | *"bad array subscript" | *"bad substitution" | \
+      *"syntax error"* | *"invalid arithmetic operator"* | *"division by 0"* | \
+      *"value too great for base"* | *"integer expression expected" | \
+      *"unary operator expected" | *"binary operator expected" | \
+      *"too many arguments" | *"not a valid identifier" | \
+      *"invalid variable name" | *"maximum function nesting level exceeded"* | \
+      *"readonly variable" | *"ambiguous redirect")
+      return 0
+      ;;
+    # A missing private helper means a broken or partial install; external
+    # tools never use the leading underscore.
+    _*": command not found")
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+_hook_stderr_line_is_internal_error() {
+  local line="$1" source base
+  [[ "$line" =~ ^(.*):\ line\ [0-9]+:\ (.*)$ ]] || return 1
+  source="${BASH_REMATCH[1]}"
+  _hook_bash_error_is_internal "${BASH_REMATCH[2]}" || return 1
+  base="${source##*/}"
+  [ -n "$base" ] || return 1
+  # Match by basename: Bash names a sourced file by the path it was sourced
+  # through (`bin/../lib/...`). The hook itself and its library modules count;
+  # `<hook>-<agent>` and `<hook>-work` extensions do not, even when one sits
+  # in the same directory as the hook.
+  [ "$base" = "${_HOOK_SELF##*/}" ] && return 0
+  case "$base" in
+    *.sh) [ -e "${_AGENTGUARD_LIB_DIR:-/nonexistent}/$base" ] && return 0 ;;
+  esac
+  return 1
+}
+
+# Route this guard hook's stderr through a private file so _hook_exit can see
+# Bash runtime errors raised inside command substitutions. Those subshells
+# exit nonzero, their callers read that as "no match", and the guard would
+# silently allow. Capture is best-effort: when the state root is unwritable
+# the hook keeps its real stderr and still fails closed on its exit status.
+_hook_capture_stderr() {
+  local dir file
+  [ -n "$_HOOK_FAIL_CLOSED" ] || return 0
+  [ -z "$_HOOK_STDERR_FILE" ] || return 0
+  dir="${_HOOK_STATE_DIR%/*}-stderr"
+  [ -d "$dir" ] || _hook_mkstate "$dir" || return 0
+  file="$dir/$$.${RANDOM}${RANDOM}"
+  exec {_HOOK_STDERR_FD}>&2 || return 0
+  # noclobber makes the open exclusive, so a planted file or symlink at this
+  # name is refused instead of followed.
+  set -C
+  if exec 2>"$file"; then
+    _HOOK_STDERR_FILE="$file"
+  else
+    exec {_HOOK_STDERR_FD}>&-
+    _HOOK_STDERR_FD=''
+  fi
+  set +C
+}
+
+# Restore the real stderr, replay what the hook wrote, and report whether any
+# line was an internal Bash error. Replay keeps block reasons and warnings
+# reaching the host unchanged; they are only delayed until exit.
+_hook_release_stderr() {
+  local file="$_HOOK_STDERR_FILE" line found=1
+  [ -n "$file" ] || return 1
+  _HOOK_STDERR_FILE=''
+  exec 2>&"$_HOOK_STDERR_FD" {_HOOK_STDERR_FD}>&-
+  _HOOK_STDERR_FD=''
+  if [ -f "$file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      printf '%s\n' "$line" >&2
+      _hook_stderr_line_is_internal_error "$line" && found=0
+    done <"$file"
+  fi
+  rm -f -- "$file" 2>/dev/null
+  return "$found"
+}
+
+# EXIT trap for every agent-hook-* entry point. The fail-closed verdict comes
+# first and touches nothing that can fail fatally; telemetry then runs in a
+# subshell because a fatal error inside an EXIT trap replaces the exit status,
+# which would turn a block back into a non-blocking error.
+_hook_exit() {
+  local status=$? internal=''
+  if _hook_release_stderr; then
+    internal="a Bash runtime error"
+  fi
+  if [ -n "$_HOOK_FAIL_CLOSED" ]; then
+    case "$status" in
+      0 | 2) ;;
+      *) internal="${internal:+$internal and }exit status $status" ;;
+    esac
+    if [ -n "$internal" ]; then
+      status=2
+      _HOOK_BLOCKED=1
+      printf 'BLOCKED: AgentGuard internal error in %s (%s); refusing to run the tool call unguarded. Report this as an AgentGuard bug.\n' \
+        "${_HOOK_SELF##*/}" "$internal" >&2
+      _HOOK_TELEMETRY_BLOCKS+="${_HOOK_TELEMETRY_BLOCKS:+$'\x1e'}AgentGuard internal error ($internal)"
+      [ -n "$_HOOK_EMITTED" ] || printf '{}\n'
+    fi
+  fi
+  if declare -F _hook_telemetry_exit >/dev/null; then
+    (_hook_telemetry_exit "$status") 2>/dev/null
+  fi
+  exit "$status"
+}
+
+# Single front door for "this guard cannot do its job": block with a clear
+# reason and emit the response now.
+_hook_fail_closed() {
+  _hook_block "AgentGuard internal error: $1; refusing to run the tool call unguarded."
+  _hook_finish
+}
+
+case "${_HOOK_SELF:-$0}" in
+  agent-hook-* | */agent-hook-*)
+    # Installed before the rest of this library runs so a crash while it
+    # initializes is still caught.
+    case "${_HOOK_SELF:-$0}" in
+      agent-hook-pre-* | */agent-hook-pre-*) _HOOK_FAIL_CLOSED=1 ;;
+    esac
+    trap _hook_exit EXIT
+    ;;
+esac
 
 # General non-interactive shells get env.d through BASH_ENV/.zshenv. This is a
 # hook-local fallback for launchers that invoke hook scripts by absolute path
@@ -387,6 +541,7 @@ _hook_refresh_state_dir_for_input() {
 }
 
 _hook_refresh_state_dir
+_hook_capture_stderr
 
 # --- Accumulators (stderr-only, never touch stdout) ---
 
@@ -1713,7 +1868,7 @@ _hook_telemetry_key() {
   printf -v "$1" '%s' "$candidate"
 }
 
-# EXIT trap for hook entry points: write one audit record for this hook
+# Called from the EXIT trap (_hook_exit): write one audit record for this hook
 # invocation. Running from the trap rather than _hook_finish covers every exit
 # path, including early no-op exits and fail-closed parse errors, and observes
 # the real exit status the host receives.
@@ -1727,9 +1882,9 @@ _hook_telemetry_key() {
 #           large tool outputs.
 #
 # Telemetry must never change hook behavior: every failure is silent, and the
-# trap leaves the exit status untouched (it never calls `exit`).
+# caller (_hook_exit) passes the final status and runs this in a subshell.
 _hook_telemetry_exit() {
-  local status=$? hook kind root agent key dir end_us elapsed duration
+  local status="${1:-$?}" hook kind root agent key dir end_us elapsed duration
   local stem tmp event='' raw='' truncated='' max ctx cmd files server
   _agentguard_telemetry_enabled || return 0
   root=$(_agentguard_telemetry_root 2>/dev/null) || return 0
@@ -1964,6 +2119,7 @@ _hook_strict_output_agent() {
 # emit additionalContext alone, and Muse has no documented suppressOutput
 # contract, so Muse output stays minimal.
 _hook_finish() {
+  _HOOK_EMITTED=1
   # Handle Codex Stop before the generic context/block branches. A Stop
   # extension can call _hook_block without adding _HOOK_CTX; falling through
   # would still exit 2 and turn stderr into the same replay-unsafe prompt.
@@ -2033,17 +2189,16 @@ _hook_finish() {
   exit 0
 }
 
-# Record every hook entry point's invocation. Only executables named
-# agent-hook-* install the trap: non-hook launchers (agentguard-churn-bypass)
-# and test harnesses also source this library, and their exits are not hook
-# events. Extensions run inside the hook process and share its single record.
-# Parsed-command and edit-file variables are exported for extensions, so a
-# hook can inherit them from a parent hook's children (a nested agent). Clear
-# them here: every hook parses its own before use, and a record must never
-# attribute a parent's command to this hook.
+# Only executables named agent-hook-* install the exit trap (top of this file):
+# non-hook launchers (agentguard-churn-bypass) and test harnesses also source
+# this library, and their exits are not hook events. Extensions run inside the
+# hook process and share its single record. Parsed-command and edit-file
+# variables are exported for extensions, so a hook can inherit them from a
+# parent hook's children (a nested agent). Clear them here: every hook parses
+# its own before use, and a record must never attribute a parent's command to
+# this hook.
 case "${_HOOK_SELF:-$0}" in
   agent-hook-* | */agent-hook-*)
     unset AGENTGUARD_CMD_TRIMMED AGENTGUARD_CMD_LINE1 AGENTGUARD_EDIT_FILES AGENTGUARD_EDIT_FILE
-    trap _hook_telemetry_exit EXIT
     ;;
 esac

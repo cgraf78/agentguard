@@ -77,7 +77,9 @@ The command is allowed, possibly with warnings or reminders.
 .B 2
 The command is blocked, or launcher initialization failed closed because its
 interpreter, inspection tools, bootstrap protocol, or private descriptors were
-unavailable or invalid.
+unavailable or invalid. Any AgentGuard internal error, including an unexpected
+exit status or a Bash runtime error raised inside AgentGuard's own code, is
+also reported as a block.
 .SH SEE ALSO
 .BR agentguard-classify-command (1),
 .BR agent-hook-post-bash (1)
