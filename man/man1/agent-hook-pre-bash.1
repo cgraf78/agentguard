@@ -65,6 +65,13 @@ other platforms use
 .BR /usr/bin/awk ,
 and
 .BR /usr/bin/env .
+.SH ENVIRONMENT
+.TP
+.B AGENTGUARD_CLASSIFY_TIMEOUT
+Seconds the classifier may spend on one command before the hook blocks it
+(default 30, maximum 3600). Commands over 256 KiB, with more than 2048
+commands, or with one command of more than 2048 words are also blocked,
+because a hook that outlives the host timeout lets the command run unguarded.
 .SH EXTENSIONS
 After base policy runs, AgentGuard sources matching extension files through
 its hook helper API. Extensions can add warnings, blocks, or context while the
@@ -77,7 +84,9 @@ The command is allowed, possibly with warnings or reminders.
 .B 2
 The command is blocked, or launcher initialization failed closed because its
 interpreter, inspection tools, bootstrap protocol, or private descriptors were
-unavailable or invalid.
+unavailable or invalid. Any AgentGuard internal error, including an unexpected
+exit status or a Bash runtime error raised inside AgentGuard's own code, is
+also reported as a block.
 .SH SEE ALSO
 .BR agentguard-classify-command (1),
 .BR agent-hook-post-bash (1)

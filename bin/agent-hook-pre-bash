@@ -369,7 +369,10 @@ case "$-" in
       exit 2
     }
     # shellcheck disable=SC1091 # Resolved relative to this symlink-aware launcher.
-    source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
+    source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
+      echo "${0##*/}: cannot load AgentGuard hook helpers" >&2
+      exit 2
+    }
     # END GENERATED LAUNCHER BOOTSTRAP
 
     _hook_parse_command
@@ -419,7 +422,8 @@ case "$-" in
       read -r -a words <<<"$text"
       [ "${#words[@]}" -ge 3 ] || return 1
 
-      word="${words[0]##*/}"
+      word="${words[0]}"
+      [[ "$word" =~ ^.*/ ]] && word="${word:${#BASH_REMATCH[0]}}"
       [ "$word" = "git" ] || return 1
 
       i=1
@@ -480,20 +484,24 @@ case "$-" in
           return 0
           ;;
       esac
+      # A lone `&` ends a command just like `;`, so `true & git reset --hard`
+      # must not be judged by its first word. Only the redirection forms `>&`,
+      # `<&`, and `&>` keep the fast path, which keeps `2>&1` cheap.
+      local lone_ampersand='(^|[^<>])&($|[^>])'
+      [[ "$text" =~ $lone_ampersand ]] && return 0
 
       read -r word _rest <<<"$text"
       [ -n "$word" ] || return 1
+      # Quoted or escaped words already went to the classifier above, so no
+      # quote or backslash stripping is needed here.
       case "$word" in
         *=* | *"'"* | *\"* | *\\*)
           return 0
           ;;
       esac
-      word="${word%\"}"
-      word="${word#\"}"
-      word="${word%\'}"
-      word="${word#\'}"
-      word="${word//\\/}"
-      word="${word##*/}"
+      # Basename via an anchored regex: `${word##*/}` is quadratic in the word
+      # length, and this runs on every command before any size limit.
+      [[ "$word" =~ ^.*/ ]] && word="${word:${#BASH_REMATCH[0]}}"
 
       case "$word" in
         git)
@@ -512,10 +520,79 @@ case "$-" in
       return 1
     }
 
+    # --- Classification bounds ---
+    # The classifier is a Bash scanner whose cost grows with the command. A
+    # hook that runs past the host's timeout is a non-blocking error there, so
+    # the command would run unguarded. Bound the work and block instead:
+    # oversized input is refused up front, and a deadline stops long loops and
+    # blocks when the scan cannot finish. The defaults leave ample headroom:
+    # a 400-line `python3 -c` script classifies in a few seconds. The limits
+    # are hook-environment settings; an agent's tool shell cannot reach them.
+    # Positive integer setting $1, clamped to $3, or the default $2; written to
+    # the variable named by $4 (no command-substitution fork on this path).
+    _pre_bash_limit() {
+      local value="${1:-}" result="$2"
+      case "$value" in
+        "" | *[!0-9]* | 0*) ;;
+        *)
+          result="$3"
+          [ "${#value}" -le "${#3}" ] && [ "$value" -le "$3" ] && result="$value"
+          ;;
+      esac
+      printf -v "$4" '%s' "$result"
+    }
+    # Bytes, not characters. Some Bash string operations stay superlinear
+    # however they are written, so the cap bounds their worst case; it is far
+    # above any command a model emits in one tool call.
+    _PRE_BASH_MAX_BYTES=262144
+    _PRE_BASH_MAX_FRAGMENTS=2048
+    _PRE_BASH_MAX_FRAGMENT_WORDS=2048
+
+    _pre_bash_block_unbounded() {
+      _hook_block "AgentGuard cannot inspect this command: $1. Split it into smaller commands, or write a long script to a file and run the file."
+      _hook_finish
+    }
+
+    # The per-fragment word loops fork per word, so one enormous fragment
+    # could outlast the deadline between checks. Counting needs no forks.
+    _pre_bash_check_fragment_limits() {
+      local fragment count=0
+      local -a words=()
+      while IFS= read -r fragment; do
+        count=$((count + 1))
+        [ "$count" -le "$_PRE_BASH_MAX_FRAGMENTS" ] ||
+          _pre_bash_block_unbounded "it has more than $_PRE_BASH_MAX_FRAGMENTS commands"
+        read -r -a words <<<"$fragment"
+        [ "${#words[@]}" -le "$_PRE_BASH_MAX_FRAGMENT_WORDS" ] ||
+          _pre_bash_block_unbounded "one command has more than $_PRE_BASH_MAX_FRAGMENT_WORDS words"
+      done <<<"$_HOOK_EXECUTABLE_FRAGMENTS_CACHE_VALUE"
+    }
+
+    # Sets _PRE_BASH_BYTES; a C-locale length counts bytes.
+    _pre_bash_command_bytes() {
+      local LC_ALL=C
+      _PRE_BASH_BYTES=${#AGENTGUARD_CMD_TRIMMED}
+    }
+
+    _pre_bash_check_deadline() {
+      _agentguard_deadline_ok ||
+        _pre_bash_block_unbounded "classification did not finish within ${_PRE_BASH_CLASSIFY_TIMEOUT}s"
+    }
+
     if _pre_bash_needs_classifier "$AGENTGUARD_CMD_TRIMMED"; then
+      _pre_bash_command_bytes 2>/dev/null
+      [ "$_PRE_BASH_BYTES" -le "$_PRE_BASH_MAX_BYTES" ] ||
+        _pre_bash_block_unbounded "it is larger than $_PRE_BASH_MAX_BYTES bytes"
+      # A failed source would leave every guard below calling missing
+      # functions, which Bash reports and then continues past to an allow.
       # shellcheck source=../lib/agentguard/hook-command-classifier.sh
-      source "$_HOOK_BIN_DIR/../lib/agentguard/hook-command-classifier.sh"
+      source "$_HOOK_BIN_DIR/../lib/agentguard/hook-command-classifier.sh" ||
+        _hook_fail_closed 'cannot load hook-command-classifier.sh'
+      _pre_bash_limit "${AGENTGUARD_CLASSIFY_TIMEOUT:-}" 30 3600 _PRE_BASH_CLASSIFY_TIMEOUT
+      _AGENTGUARD_DEADLINE=$((SECONDS + _PRE_BASH_CLASSIFY_TIMEOUT))
       _hook_cache_executable_fragments "$AGENTGUARD_CMD_TRIMMED"
+      _pre_bash_check_deadline
+      _pre_bash_check_fragment_limits
     else
       _hook_source_extensions
       _hook_finish
@@ -627,6 +704,7 @@ case "$-" in
       local text="$1" depth="${2:-0}" fragment
 
       while IFS= read -r fragment; do
+        _agentguard_deadline_ok || return 1
         _vcs_authoring_fragment "$fragment" && return 0
       done < <(_hook_executable_fragments "$text" "$depth")
 
@@ -639,12 +717,14 @@ case "$-" in
       [ "$depth" -lt 2 ] || return 1
 
       while IFS= read -r -d '' command; do
+        _agentguard_deadline_ok || return 1
         while IFS= read -r -d '' payload; do
           _vcs_authoring_in_executable_text "$payload" $((depth + 1)) &&
             return 0
         done < <(_executable_expansion_payloads "$command")
 
         while IFS= read -r fragment; do
+          _agentguard_deadline_ok || return 1
           while IFS= read -r payload; do
             _vcs_authoring_in_shell_expansions "$payload" $((depth + 1)) &&
               return 0
@@ -730,6 +810,7 @@ case "$-" in
 
       while IFS= read -r frag; do
         [ -n "$frag" ] || continue
+        _agentguard_deadline_ok || break
 
         # Most fragments in compound inspection commands are plain words. Keep
         # those in the current shell: command substitution plus the recursive
@@ -1153,6 +1234,12 @@ case "$-" in
         _hook_warn 'This chmod grants world-write access. Verify the mode and path are intentional.'
         ;;
     esac
+
+    # Every guard above may have stopped early at the deadline; a partial scan
+    # must not allow. Extensions own their latency budget, so they run without
+    # the deadline.
+    _pre_bash_check_deadline
+    unset _AGENTGUARD_DEADLINE
 
     _hook_source_extensions
     _hook_finish

@@ -72,4 +72,37 @@ _assert_not_contains \
   "protected bare-Git" \
   "$HOOK_STDERR"
 
+echo ""
+echo "=== pre-bash: a lone & separates commands ==="
+
+# A lone `&` ends a command like `;`. The fast path used to judge the whole
+# line by its first word, so the command after `&` ran unguarded.
+for _amp_command in \
+  'true & git reset --hard' \
+  'echo hi & git reset --hard' \
+  'true&git push --force' \
+  'sleep 1 & rm -rf ~' \
+  'true >&2& git reset --hard' \
+  'x 2>&1&git push -f'; do
+  rm -f "$classifier_marker"
+  _run_hook_with_classifier_marker "$fast_install/bin/agent-hook-pre-bash" \
+    "$(jq -nc --arg c "$_amp_command" '{"tool_input":{"command":$c}}')"
+  _assert_eq "$_amp_command: blocked" "2" "$HOOK_EXIT"
+  _assert_file_exists "$_amp_command: classified" "$classifier_marker"
+done
+
+# Redirections that merely contain `&` are not separators and stay cheap.
+for _amp_command in 'ls 2>&1' 'ls &>/dev/null' 'echo x >&2' 'cat <&3' 'ls 2>&-'; do
+  rm -f "$classifier_marker"
+  _run_hook_with_classifier_marker "$fast_install/bin/agent-hook-pre-bash" \
+    "$(jq -nc --arg c "$_amp_command" '{"tool_input":{"command":$c}}')"
+  _assert_eq "$_amp_command: allowed" "0" "$HOOK_EXIT"
+  _assert_file_missing "$_amp_command: stays on the fast path" "$classifier_marker"
+done
+
+rm -f "$classifier_marker"
+_run_hook_with_classifier_marker "$fast_install/bin/agent-hook-pre-bash" \
+  '{"tool_input":{"command":"sleep 5 &"}}'
+_assert_eq "trailing background job: allowed" "0" "$HOOK_EXIT"
+
 _test_summary

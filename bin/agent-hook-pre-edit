@@ -29,7 +29,10 @@ _HOOK_BIN_DIR=$(_agentguard_script_dir "${BASH_SOURCE[0]}") || {
   exit 2
 }
 # shellcheck disable=SC1091 # Resolved relative to this symlink-aware launcher.
-source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh"
+source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
+  echo "${0##*/}: cannot load AgentGuard hook helpers" >&2
+  exit 2
+}
 # END GENERATED LAUNCHER BOOTSTRAP
 
 _hook_parse_edit_files

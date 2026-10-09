@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# agent-hook-fail-closed-test — guard hooks turn internal errors into blocks.
+#
+# Hosts block a tool call only on exit 2; any other status is a non-blocking
+# hook error that runs the tool with every guard skipped. These fixtures break
+# a copy of the hooks in the ways a real bug would (main-shell crash, a Bash
+# error swallowed by a command substitution, a missing library) and assert the
+# verdict per host runtime, plus the advisory hooks that must keep their
+# status.
+
+# shellcheck disable=SC1090,SC1091,SC2016 # dynamic helper path; literal shell text.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+_fc_root="$TEST_TMPDIR/fail-closed"
+_fc_hooks=(
+  agent-hook-pre-bash agent-hook-pre-edit agent-hook-pre-mcp agent-hook-pre-search
+  agent-hook-post-bash agent-hook-prompt-submit agent-hook-session-start agent-hook-stop
+)
+
+# Fresh copy of the shipped hooks so each scenario can break exactly one
+# piece without touching the checkout.
+_fc_install() {
+  rm -rf "$_fc_root"
+  _install_hook_fixture "$_fc_root" "${_fc_hooks[@]}"
+}
+
+_fc_run() {
+  local hook="$1" agent="$2" payload="$3"
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    AGENTGUARD_SESSION_ID="$TEST_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="$agent"
+    CODEX_THREAD_ID=
+  )
+  _run_hook_env "$_fc_root/bin/$hook" "$payload"
+}
+
+_fc_bash_payload() {
+  jq -nc --arg c "$1" '{"tool_name":"Bash","tool_input":{"command":$c}}'
+}
+
+_fc_assert_internal_block() {
+  local desc="$1"
+  _assert_eq "$desc: exit 2" "2" "$HOOK_EXIT"
+  _assert_contains "$desc: internal error reason" \
+    "AgentGuard internal error" "$HOOK_STDERR"
+  if printf '%s' "$HOOK_STDOUT" | jq -e . >/dev/null 2>&1; then
+    _pass "$desc: stdout is one JSON response"
+  else
+    _fail "$desc: stdout is one JSON response (got '$HOOK_STDOUT')"
+  fi
+}
+
+_fc_edit_payload='{"tool_name":"Edit","tool_input":{"file_path":"/tmp/agentguard-fc/a.py"}}'
+_fc_mcp_payload='{"tool_name":"mcp__srv__tool","tool_input":{}}'
+_fc_search_payload='{"tool_name":"Grep","tool_input":{"pattern":"x"}}'
+
+echo ""
+echo "=== guard hooks: a main-shell crash blocks on every runtime ==="
+
+for _fc_agent in claude codex gemini grok muse; do
+  _fc_install
+  for _fc_hook in agent-hook-pre-bash agent-hook-pre-edit agent-hook-pre-mcp agent-hook-pre-search; do
+    printf '%s\n' 'echo "$agentguard_fail_closed_unset_variable"' \
+      >"$_fc_root/bin/$_fc_hook-$_fc_agent"
+  done
+
+  _fc_run agent-hook-pre-bash "$_fc_agent" "$(_fc_bash_payload 'ls -la; true')"
+  _fc_assert_internal_block "$_fc_agent pre-bash classifier path crash"
+
+  _fc_run agent-hook-pre-bash "$_fc_agent" "$(_fc_bash_payload 'ls -la')"
+  _fc_assert_internal_block "$_fc_agent pre-bash fast path crash"
+
+  _fc_run agent-hook-pre-edit "$_fc_agent" "$_fc_edit_payload"
+  _fc_assert_internal_block "$_fc_agent pre-edit crash"
+
+  _fc_run agent-hook-pre-mcp "$_fc_agent" "$_fc_mcp_payload"
+  _fc_assert_internal_block "$_fc_agent pre-mcp crash"
+
+  _fc_run agent-hook-pre-search "$_fc_agent" "$_fc_search_payload"
+  _fc_assert_internal_block "$_fc_agent pre-search crash"
+done
+
+echo ""
+echo "=== guard hooks: errors swallowed by command substitutions block ==="
+
+# The classifier asks most questions through `$(...)`. A Bash error in that
+# subshell only makes the call look like "no match", so without stderr
+# inspection the guard silently allows.
+_fc_install
+printf '%s\n' '_fragment_command_word() { printf "%s" "$agentguard_fail_closed_unset_variable"; }' \
+  >>"$_fc_root/lib/agentguard/hook-command-classifier.sh"
+_fc_run agent-hook-pre-bash claude "$(_fc_bash_payload 'sudo rm -rf /tmp/x; git push --force')"
+_fc_assert_internal_block "subshell unbound variable in classifier"
+
+_fc_install
+printf '%s\n' '_fragment_command_word() { local -a a=(); printf "%s" "${a[x y]}"; }' \
+  >>"$_fc_root/lib/agentguard/hook-command-classifier.sh"
+_fc_run agent-hook-pre-bash claude "$(_fc_bash_payload 'nohup git status; true')"
+_fc_assert_internal_block "subshell arithmetic syntax error in classifier"
+
+_fc_install
+printf '%s\n' '_fragment_command_word() { _agentguard_missing_private_helper; }' \
+  >>"$_fc_root/lib/agentguard/hook-command-classifier.sh"
+_fc_run agent-hook-pre-bash claude "$(_fc_bash_payload 'nohup git status; true')"
+_fc_assert_internal_block "missing private helper in classifier"
+
+# A consumer extension's own noise is not an AgentGuard bug: blocking every
+# command because an extension's optional probe failed would be a regression.
+_fc_install
+printf '%s\n' 'x=$(echo "$agentguard_fail_closed_unset_variable" 2>/dev/null); x=$(set -u; : "$also_unset"); :' \
+  >"$_fc_root/bin/agent-hook-pre-bash-claude"
+_fc_run agent-hook-pre-bash claude "$(_fc_bash_payload 'ls -la; true')"
+_assert_eq "extension subshell error: not escalated" "0" "$HOOK_EXIT"
+
+printf '%s\n' 'sl_missing_tool_for_test 2>&1 >/dev/null | :; agentguard_missing_tool_for_test; :' \
+  >"$_fc_root/bin/agent-hook-pre-bash-claude"
+_fc_run agent-hook-pre-bash claude "$(_fc_bash_payload 'ls -la; true')"
+_assert_eq "missing external tool in extension: not escalated" "0" "$HOOK_EXIT"
+
+echo ""
+echo "=== guard hooks: missing libraries block ==="
+
+_fc_install
+rm -f "$_fc_root/lib/agentguard/hook-command-classifier.sh"
+_fc_run agent-hook-pre-bash claude "$(_fc_bash_payload 'true; git push --force')"
+_fc_assert_internal_block "missing classifier"
+_assert_contains "missing classifier: names the library" \
+  "hook-command-classifier.sh" "$HOOK_STDERR"
+
+_fc_install
+rm -f "$_fc_root/lib/agentguard/hook-helpers.sh"
+for _fc_hook in agent-hook-pre-bash agent-hook-pre-edit agent-hook-pre-mcp agent-hook-pre-search; do
+  _fc_run "$_fc_hook" claude "$(_fc_bash_payload 'git push --force')"
+  _assert_eq "$_fc_hook missing helpers: exit 2" "2" "$HOOK_EXIT"
+  _assert_contains "$_fc_hook missing helpers: reason" \
+    "cannot load AgentGuard hook helpers" "$HOOK_STDERR"
+done
+
+echo ""
+echo "=== guard hooks: healthy runs are unchanged ==="
+
+_fc_install
+_fc_run agent-hook-pre-bash claude "$(_fc_bash_payload 'ls -la | head -3; echo done')"
+_assert_eq "healthy compound command: allowed" "0" "$HOOK_EXIT"
+_assert_eq "healthy compound command: response" "{}" "$HOOK_STDOUT"
+_assert_not_contains "healthy compound command: no internal error" \
+  "internal error" "$HOOK_STDERR"
+
+_fc_run agent-hook-pre-bash claude "$(_fc_bash_payload 'git push --force; rm -rf build')"
+_assert_eq "real block: exit 2" "2" "$HOOK_EXIT"
+_assert_contains "real block: block reason replayed" \
+  "BLOCKED: git push --force" "$HOOK_STDERR"
+_assert_contains "real block: warning replayed" "WARNING: rm -rf" "$HOOK_STDERR"
+_assert_not_contains "real block: no internal error" "internal error" "$HOOK_STDERR"
+
+_fc_capture_dir="$XDG_RUNTIME_DIR/agentguard/hook-state-stderr"
+if [ -d "$_fc_capture_dir" ] && [ -z "$(ls -A "$_fc_capture_dir")" ]; then
+  _pass "stderr capture files are removed"
+else
+  _fail "stderr capture files are removed ($(ls -A "$_fc_capture_dir" 2>&1))"
+fi
+
+# Telemetry must record the status the host actually received.
+_fc_install
+printf '%s\n' 'echo "$agentguard_fail_closed_unset_variable"' \
+  >"$_fc_root/bin/agent-hook-pre-bash-claude"
+_fc_telemetry="$TEST_TMPDIR/fc-telemetry"
+# shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+_RUN_HOOK_ENV=(
+  AGENTGUARD_SESSION_ID="$TEST_SID-telemetry"
+  TMPDIR="$TEST_TMPDIR"
+  AGENTGUARD_NAME=claude
+  AGENTGUARD_TELEMETRY_DIR="$_fc_telemetry"
+)
+_run_hook_env "$_fc_root/bin/agent-hook-pre-bash" "$(_fc_bash_payload 'ls')"
+_fc_record=$(cat "$_fc_telemetry"/sessions/claude/*/*.json 2>/dev/null)
+_assert_eq "telemetry: records the converted status" "2" \
+  "$(printf '%s' "$_fc_record" | jq -r '.exit_status // .status // empty' 2>/dev/null)"
+unset _RUN_HOOK_ENV
+
+echo ""
+echo "=== advisory hooks keep their status ==="
+
+_fc_install
+for _fc_hook in agent-hook-post-bash agent-hook-prompt-submit agent-hook-session-start agent-hook-stop; do
+  printf '%s\n' 'echo "$agentguard_fail_closed_unset_variable"' \
+    >"$_fc_root/bin/$_fc_hook-claude"
+  _fc_run "$_fc_hook" claude '{"tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"stdout":"x"},"prompt":"hi"}'
+  if [ "$HOOK_EXIT" -ne 0 ] && [ "$HOOK_EXIT" -ne 2 ]; then
+    _pass "$_fc_hook crash: stays a non-blocking error"
+  else
+    _fail "$_fc_hook crash: stays a non-blocking error (got $HOOK_EXIT)"
+  fi
+  _assert_not_contains "$_fc_hook crash: no guard block" "BLOCKED" "$HOOK_STDERR"
+done
+
+_test_summary

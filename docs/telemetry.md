@@ -273,5 +273,7 @@ automatically. A consumer that wires hooks by hand should register
 - **Payloads travel through stdin.** Linux limits a single argument or
   environment string to 128 KiB, which a tool output easily exceeds.
 - **Recording never changes a decision.** Every telemetry failure is silent,
-  and the trap preserves the hook's exit status. `agent-hook-telemetry` always
-  exits 0 with an empty response, even if an extension tries to block.
+  and the recorder runs after the exit trap has settled the hook's final
+  status, which is the status recorded. (Guard hooks turn internal errors
+  into a block before recording; see the README.) `agent-hook-telemetry`
+  always exits 0 with an empty response, even if an extension tries to block.

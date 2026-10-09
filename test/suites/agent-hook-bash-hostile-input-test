@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# agent-hook-bash-hostile-input-test — command text that targets the
+# classifier itself: words Bash would re-expand as associative-array subscripts
+# or `${!name}` indirections, and counts that would make the hook outlive its
+# host timeout. The guard must classify these as data, never evaluate them.
+
+# shellcheck disable=SC1090,SC1091,SC2016 # dynamic helper path; literal command text.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+_mock_protected_bare_git_home
+
+_hostile_marker="$TEST_TMPDIR/hostile-marker"
+
+_run_pre_bash_command() {
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c "$1" '{"tool_input":{"command":$c}}')"
+}
+
+# The payload runs `touch` on the marker only if the hook evaluates the word.
+_assert_marker_absent() {
+  local desc="$1"
+  if [ -e "$_hostile_marker" ]; then
+    _fail "$desc (hook evaluated command text)"
+    rm -f "$_hostile_marker"
+  else
+    _pass "$desc"
+  fi
+}
+
+echo ""
+echo "=== pre-bash: variable command words do not crash the classifier ==="
+
+# A `$name` command word reached `[[ -v _HOOK_FUNCTION_BODIES[$g] ]]`, which
+# re-expanded `$g` under `set -u` and killed the hook with status 127. Hosts
+# only block on status 2, so every later guard was skipped.
+_run_pre_bash_command 'g=echo; $g hi; git push --force origin main'
+_assert_eq "variable command word before force push: blocked" "2" "$HOOK_EXIT"
+_assert_contains "variable command word before force push: push guard ran" \
+  "git push --force" "$HOOK_STDERR"
+_assert_not_contains "variable command word: no unbound variable" \
+  "unbound variable" "$HOOK_STDERR"
+
+_run_pre_bash_command '${g} hi; git reset --hard'
+_assert_eq "braced variable command word before reset: blocked" "2" "$HOOK_EXIT"
+_assert_contains "braced variable command word: reset guard ran" \
+  "git reset --hard" "$HOOK_STDERR"
+
+_run_pre_bash_command 'g=echo; $g hi'
+_assert_eq "variable command word alone: allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "variable command word alone: no shell error" \
+  "line " "$HOOK_STDERR"
+
+echo ""
+echo "=== pre-bash: hostile names are never evaluated by the hook ==="
+
+_run_pre_bash_command "\$(touch $_hostile_marker) hi; git status"
+_assert_eq "substitution command word: classified" "0" "$HOOK_EXIT"
+_assert_marker_absent "substitution command word: not evaluated by hook"
+
+_run_pre_bash_command "f() { :; }; \"\$(touch $_hostile_marker)\" hi; git status"
+_assert_marker_absent "quoted substitution command word after function: not evaluated"
+
+_run_pre_bash_command "unset ab\$(touch\${IFS}$_hostile_marker); git status"
+_assert_eq "unset hostile name: classified" "0" "$HOOK_EXIT"
+_assert_marker_absent "unset hostile name: not evaluated by hook"
+
+_run_pre_bash_command "unset -f ab\$(touch\${IFS}$_hostile_marker); git status"
+_assert_marker_absent "unset -f hostile name: not evaluated by hook"
+
+_run_pre_bash_command "export ab\$(touch\${IFS}$_hostile_marker); git status"
+_assert_marker_absent "export hostile name: not evaluated by hook"
+
+_run_pre_bash_command "export -n ab\$(touch\${IFS}$_hostile_marker); git status"
+_assert_marker_absent "export -n hostile name: not evaluated by hook"
+
+_run_pre_bash_command "readonly ab\$(touch\${IFS}$_hostile_marker); git status"
+_assert_marker_absent "readonly hostile name: not evaluated by hook"
+
+_run_pre_bash_command "ab\$(touch\${IFS}$_hostile_marker)=x git status"
+_assert_marker_absent "hostile assignment name: not evaluated by hook"
+
+_run_pre_bash_command "declare ab\$(touch\${IFS}$_hostile_marker)=x; git status"
+_assert_marker_absent "declare hostile assignment name: not evaluated by hook"
+
+_run_pre_bash_command "git --config-env=status.showUntrackedFiles=a[\$(touch\${IFS}$_hostile_marker)] status"
+_assert_marker_absent "config-env hostile variable name: not evaluated by hook"
+_assert_eq "config-env unreadable variable name: untracked scan blocked" "2" "$HOOK_EXIT"
+
+echo ""
+echo "=== pre-bash: hostile counts stay bounded ==="
+
+_hostile_start=$SECONDS
+_run_pre_bash_command 'GIT_CONFIG_COUNT=999999999 git status --short'
+_assert_eq "huge GIT_CONFIG_COUNT: classified" "0" "$HOOK_EXIT"
+if [ "$((SECONDS - _hostile_start))" -le 20 ]; then
+  _pass "huge GIT_CONFIG_COUNT: returns promptly"
+else
+  _fail "huge GIT_CONFIG_COUNT: returns promptly (took $((SECONDS - _hostile_start))s)"
+fi
+
+_run_pre_bash_command 'GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=cat GIT_CONFIG_KEY_1=status.showUntrackedFiles GIT_CONFIG_VALUE_1=all git status'
+_assert_eq "counted untracked config after another key: blocked" "2" "$HOOK_EXIT"
+
+_test_summary
