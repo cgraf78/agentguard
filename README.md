@@ -367,8 +367,12 @@ To add a new managed agent runtime:
   Muse file searches that do not follow symlinks; uninspectable payloads fail
   open.
 - `agent-hook-post-bash` scans command stdout for high-confidence credential
-  patterns. Stdout extraction is centralized so agent-specific payload names do
-  not leak into the base hook.
+  patterns. After a successful `git push` or `gh pr create`, `ready`, `reopen`,
+  or `update-branch`, or output showing a push summary or a new pull-request
+  URL (pushes run through a script or terminal multiplexer), it reminds once
+  per prompt that the pull request is not done until its checks pass on the
+  pushed commit. Output extraction is centralized so agent-specific payload
+  names do not leak into the base hook.
 - `agent-hook-pre-edit` parses edited paths, blocks edits to secret and
   credential files (such as `.env`, SSH keys, `*.pem`, `credentials`, and
   `.netrc`), reminds once per user prompt on

@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# agent-hook-bash-pr-checks-test — post-bash reminder to watch PR checks after a push.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+POST_BASH="$BIN_DIR/agent-hook-post-bash"
+GATE="PR checks gate"
+_case_seq=0
+
+# Builds a PostToolUse payload for a command, its stdout and stderr, and its
+# exit code.
+_payload() {
+  local cmd="$1" out="${2:-}" status="${3:-0}" err="${4:-}"
+  jq -nc --arg cmd "$cmd" --arg out "$out" --arg err "$err" --argjson status "$status" \
+    '{"tool_input":{"command":$cmd},"tool_response":{"stdout":$out,"stderr":$err,"exit_code":$status}}'
+}
+
+# Runs one case in a fresh session so the once-per-prompt de-duplication of
+# an earlier case cannot hide this one. `$1` names the agent runtime.
+_run_case() {
+  local agent="$1" payload="$2"
+  _case_seq=$((_case_seq + 1))
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    AGENTGUARD_SESSION_ID="$TEST_SID-pr-$_case_seq"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="$agent"
+    CODEX_THREAD_ID=
+  )
+  _run_hook_env "$POST_BASH" "$payload"
+}
+
+# The reminder must reach the model through the protocol context field, not
+# only stderr.
+_context() {
+  printf '%s' "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.additionalContext // empty'
+}
+
+_expect_reminder() {
+  local desc="$1" payload="$2"
+  _run_case agent "$payload"
+  _assert_eq "$desc: exits 0" "0" "$HOOK_EXIT"
+  _assert_contains "$desc: reminds" "$GATE" "$(_context)"
+}
+
+_expect_quiet() {
+  local desc="$1" payload="$2"
+  _run_case agent "$payload"
+  _assert_eq "$desc: exits 0" "0" "$HOOK_EXIT"
+  _assert_not_contains "$desc: no reminder" "$GATE" "$HOOK_STDOUT"
+}
+
+echo ""
+echo "=== post-bash: PR checks gate from the command ==="
+
+for _cmd in \
+  "git push origin HEAD:refs/heads/fix/x" \
+  "git push -u origin fix/x" \
+  "git push --force-with-lease=fix/x:abc123 origin HEAD:refs/heads/fix/x" \
+  "git -C /tmp/repo push origin main" \
+  "git -c push.default=simple push" \
+  "git --git-dir=/tmp/repo/.git push origin main" \
+  "env FOO=1 git push origin main" \
+  "git commit -m wip && git push" \
+  "bash -c 'git push origin main'" \
+  "gh pr create --repo o/r --base main --head fix/x --title t --body b" \
+  "gh -R o/r pr create --fill" \
+  "url=\$(gh pr create --fill)" \
+  "gh pr ready 12 --repo o/r" \
+  "gh pr reopen 12 --repo o/r" \
+  "gh pr update-branch 12 --repo o/r"; do
+  _expect_reminder "command '$_cmd'" "$(_payload "$_cmd")"
+done
+
+for _cmd in \
+  "git push --dry-run origin main" \
+  "git push -n origin main" \
+  "git push -fn origin main" \
+  "git push origin --delete fix/x" \
+  "git push -d origin fix/x" \
+  "git push origin :fix/x" \
+  "git stash push -m wip" \
+  "git config push.default simple" \
+  "npm run push-docs" \
+  "echo git push" \
+  "tmux send-keys -t github 'git push' Enter" \
+  "gh pr list --repo o/r" \
+  "gh pr view create --repo o/r" \
+  "gh pr list --search create --repo o/r" \
+  "gh pr edit 12 --title 'Fix create flow' --repo o/r" \
+  "gh pr create --dry-run --fill" \
+  "gh pr ready 12 --undo --repo o/r"; do
+  _expect_quiet "command '$_cmd'" "$(_payload "$_cmd")"
+done
+
+_expect_quiet "quoted heredoc body mentioning git push" "$(_payload "cat <<'EOF' >notes.md
+git push origin main
+gh pr create --fill
+EOF")"
+
+_expect_quiet "multi-line text with git and push on separate lines" "$(_payload "python3 - <<EOF
+# notes about git
+# remember to push docs later
+EOF")"
+
+_expect_quiet "failed push" "$(_payload "git push origin main" "" 1)"
+
+echo ""
+echo "=== post-bash: PR checks gate from indirect output ==="
+
+# Pushes routed through a script or terminal multiplexer surface only as the
+# printed log of the push.
+_expect_reminder "new-branch push summary" "$(_payload "tail -5 /tmp/push.log" 'To github.com:o/r.git
+ * [new branch]      HEAD -> fix/x')"
+
+_expect_reminder "fast-forward push summary" "$(_payload "cat /tmp/push.log" 'remote: Resolving deltas: 100% (3/3), done.
+To github-alias:o/r.git
+   24a0da7..82fd152  main -> main')"
+
+_expect_reminder "forced push summary" "$(_payload "tmux capture-pane -p -t github" 'To github.com:o/r.git
+ + 24a0da7...82fd152 fix/x -> fix/x (forced update)')"
+
+_expect_reminder "push summary on stderr" "$(_payload "./scripts/release.sh" "" 0 'To github.com:o/r.git
+   24a0da7..82fd152  main -> main')"
+
+_expect_reminder "gh pr create URL in a log" "$(_payload "cat /tmp/pr.log" "https://github.com/o/r/pull/124")"
+
+_expect_quiet "rejected push summary" "$(_payload "cat /tmp/push.log" 'To github.com:o/r.git
+ ! [rejected]        main -> main (fetch first)')"
+
+_expect_quiet "up-to-date push summary" "$(_payload "cat /tmp/push.log" 'To github.com:o/r.git
+ = [up to date]      main -> main')"
+
+_expect_quiet "branch deletion summary" "$(_payload "cat /tmp/push.log" 'To github.com:o/r.git
+ - [deleted]         fix/x')"
+
+_expect_quiet "PR URL inside other output" "$(_payload "cat notes.txt" "url: https://github.com/o/r/pull/124")"
+
+_expect_quiet "bare PR URL from gh pr edit" "$(_payload "gh pr edit 124 --repo o/r --title t" "https://github.com/o/r/pull/124")"
+
+_expect_quiet "bare PR URL from gh pr view" "$(_payload "gh pr view 124 --repo o/r --json url -q .url" "https://github.com/o/r/pull/124")"
+
+_expect_quiet "prose resembling a push" "$(_payload "cat notes.txt" "To do: push the branch -> later")"
+
+echo ""
+echo "=== post-bash: PR checks gate de-duplication and output shape ==="
+
+# Re-reading the same captured log while monitoring must not repeat the
+# reminder within one prompt.
+_dedup_payload="$(_payload "tmux capture-pane -p -t github" 'To github.com:o/r.git
+ * [new branch]      HEAD -> fix/dedup')"
+_case_seq=$((_case_seq + 1))
+_dedup_sid="$TEST_SID-pr-dedup"
+for _attempt in first second; do
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  _RUN_HOOK_ENV=(AGENTGUARD_SESSION_ID="$_dedup_sid" TMPDIR="$TEST_TMPDIR" AGENTGUARD_NAME=agent CODEX_THREAD_ID=)
+  _run_hook_env "$POST_BASH" "$_dedup_payload"
+  if [ "$_attempt" = first ]; then
+    _assert_contains "same push evidence: first read reminds" "$GATE" "$(_context)"
+  else
+    _assert_not_contains "same push evidence: second read in the prompt is quiet" "$GATE" "$HOOK_STDOUT"
+  fi
+done
+
+for _agent in codex muse; do
+  _run_case "$_agent" "$(_payload "git push origin main")"
+  _assert_contains "$_agent: reminder in additionalContext" "$GATE" "$(_context)"
+  _assert_eq "$_agent: no legacy context field" "false" \
+    "$(printf '%s' "$HOOK_STDOUT" | jq 'has("context")')"
+done
+
+_test_summary
