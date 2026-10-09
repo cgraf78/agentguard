@@ -801,13 +801,19 @@ _hook_read_input() {
       read_rc=$?
       input+="$chunk"
       if [ "$read_rc" -eq 0 ]; then
-        # Delimiter found: keep draining, but a producer that never
-        # pauses still cannot outrun the total bound (matches perl).
+        # Delimiter found: more may follow, inside the total bound
+        # (matches the perl branch).
         [ "$SECONDS" -lt "$drain_deadline" ] || break
         continue
-      elif [ -n "$chunk" ]; then
-        # Partial chunk: EOF or a quiet window cut the read short. The next
-        # pass settles it, inside the total bound.
+      elif [ "$read_rc" -eq 1 ]; then
+        # EOF: the writer is gone, so nothing more is coming even if this
+        # read delivered a partial final chunk. Break at once: on some
+        # platforms a further read will not observe the already-consumed
+        # EOF and would block until its timeout instead.
+        break
+      elif [ "$read_rc" -gt 128 ] && [ -n "$chunk" ]; then
+        # Timeout cut a chunk short: no EOF was observed, so keep
+        # draining, inside the total bound.
         [ "$SECONDS" -lt "$drain_deadline" ] || break
         continue
       elif [ "$read_rc" -gt 128 ]; then
@@ -816,7 +822,7 @@ _hook_read_input() {
         [ "$SECONDS" -lt "$drain_deadline" ] && continue
         break
       else
-        break # EOF (or another read error): nothing more is coming
+        break # Other read error: nothing more is coming.
       fi
     done
   else
@@ -833,14 +839,19 @@ _hook_read_input() {
       read_rc=$?
       input+="$chunk"
       if [ "$read_rc" -eq 0 ]; then
-        # Full chunk (or NUL delimiter): keep draining, but a producer
-        # that never pauses still cannot outrun the total bound
-        # (matches the perl branch).
+        # Full chunk (or NUL delimiter): more may follow, inside the
+        # total bound (matches the perl branch).
         [ "$SECONDS" -lt "$drain_deadline" ] || break
         continue
-      elif [ -n "$chunk" ]; then
-        # Partial chunk: EOF or a quiet window cut the read short. The next
-        # pass settles it, inside the total bound.
+      elif [ "$read_rc" -eq 1 ]; then
+        # EOF: the writer is gone, so nothing more is coming even if this
+        # read delivered a partial final chunk. Break at once: on some
+        # platforms a further read will not observe the already-consumed
+        # EOF and would block until its timeout instead.
+        break
+      elif [ "$read_rc" -gt 128 ] && [ -n "$chunk" ]; then
+        # Timeout cut a chunk short: no EOF was observed, so keep
+        # draining, inside the total bound.
         [ "$SECONDS" -lt "$drain_deadline" ] || break
         continue
       elif [ "$read_rc" -gt 128 ]; then
@@ -850,7 +861,7 @@ _hook_read_input() {
         [ "$SECONDS" -lt "$drain_deadline" ] && continue
         break
       else
-        break # EOF (or another read error): nothing more is coming
+        break # Other read error: nothing more is coming.
       fi
     done
   fi
