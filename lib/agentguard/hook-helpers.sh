@@ -104,14 +104,18 @@ _hook_capture_stderr() {
   dir="${_HOOK_STATE_DIR%/*}-stderr"
   [ -d "$dir" ] || _hook_mkstate "$dir" || return 0
   file="$dir/$$.${RANDOM}${RANDOM}"
-  exec {_HOOK_STDERR_FD}>&2 || return 0
+  # A fixed descriptor, not `exec {var}>&2`: hooks run under macOS
+  # /bin/bash 3.2, which lacks named-descriptor allocation, and a failed exec
+  # there would trip the fail-closed trap and block every call.
+  exec 9>&2 || return 0
+  _HOOK_STDERR_FD=9
   # noclobber makes the open exclusive, so a planted file or symlink at this
   # name is refused instead of followed.
   set -C
   if exec 2>"$file"; then
     _HOOK_STDERR_FILE="$file"
   else
-    exec {_HOOK_STDERR_FD}>&-
+    exec 9>&-
     _HOOK_STDERR_FD=''
   fi
   set +C
@@ -124,7 +128,7 @@ _hook_release_stderr() {
   local file="$_HOOK_STDERR_FILE" line found=1
   [ -n "$file" ] || return 1
   _HOOK_STDERR_FILE=''
-  exec 2>&"$_HOOK_STDERR_FD" {_HOOK_STDERR_FD}>&-
+  exec 2>&9 9>&-
   _HOOK_STDERR_FD=''
   if [ -f "$file" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
@@ -1111,7 +1115,13 @@ _hook_parse_command() {
   # final element that reproduces a trailing newline in the command.
   local -a _lines=()
   local _i
-  mapfile -t _lines <<<"$cmd"
+  # mapfile is Bash 4+; macOS /bin/bash 3.2 runs this hook too, so fall back
+  # to a read loop there (also linear, just slower on huge inputs).
+  if ((BASH_VERSINFO[0] >= 4)); then
+    mapfile -t _lines <<<"$cmd"
+  else
+    while IFS= read -r _line; do _lines+=("$_line"); done <<<"$cmd"
+  fi
   AGENTGUARD_CMD_TRIMMED=''
   for ((_i = 0; _i < ${#_lines[@]}; _i++)); do
     _line="${_lines[_i]}"
