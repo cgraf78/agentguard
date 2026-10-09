@@ -39,6 +39,7 @@ program	test/suites/agent-bash-reexec-test
 program	test/suites/agent-command-classifier-test
 program	test/suites/agent-churn-bypass-test
 program	test/suites/agent-hook-bash-fast-test
+program	test/suites/agent-hook-bash-bounds-test
 program	test/suites/agent-hook-bash-find-grep-test
 program	test/suites/agent-hook-bash-gate-test
 program	test/suites/agent-hook-bash-guards-test
@@ -56,6 +57,7 @@ program	test/suites/agent-hook-bash-safety-test
 program	test/suites/agent-hook-cmdline-test
 program	test/suites/agent-hook-edit-test
 program	test/suites/agent-hook-fail-closed-test
+program	test/suites/agent-hook-fuzz-test
 program	test/suites/agent-hook-gemini-test
 program	test/suites/agent-hook-grok-test
 program	test/suites/agent-hook-helpers-test

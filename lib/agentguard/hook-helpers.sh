@@ -1034,6 +1034,28 @@ _hook_read_input() {
   _hook_refresh_state_dir_for_input
 }
 
+# Export hook text for extensions' child processes only when it fits. Linux
+# rejects an environment string over 128 KiB (MAX_ARG_STRLEN) with E2BIG, and
+# one oversized export makes every external command this hook runs fail.
+# Oversized values stay shell variables, which sourced extensions still see.
+_hook_export_if_fits() {
+  local name
+  for name in "$@"; do
+    # shellcheck disable=SC2163 # Exports the variable named by $name.
+    if _hook_fits_environment "${!name}" 2>/dev/null; then
+      export "$name"
+    else
+      export -n "$name"
+    fi
+  done
+}
+
+_hook_fits_environment() {
+  # Byte length, not characters; 120000 leaves room for the name and `=`.
+  local LC_ALL=C
+  [ "${#1}" -le 120000 ]
+}
+
 # Parses the shell command from hook JSON input. Caches the full JSON in
 # _HOOK_INPUT (same contract as _hook_parse_mcp) so agent-specific and local
 # extensions can read additional fields. Sets AGENTGUARD_CMD_TRIMMED (full command,
@@ -1083,23 +1105,31 @@ _hook_parse_command() {
   [ -z "$cmd" ] && exit 0
   # Strip leading whitespace exactly like the historical
   # `sed 's/^[[:space:]]*//'` (every line: sed is line-oriented, so a leading
-  # newline survives into TRIMMED and empties the first line below).
+  # newline survives into TRIMMED and empties the first line below). mapfile
+  # keeps this linear; peeling one line at a time off the front copied the
+  # rest of the command per line. The here-string's added newline yields the
+  # final element that reproduces a trailing newline in the command.
+  local -a _lines=()
+  local _i
+  mapfile -t _lines <<<"$cmd"
   AGENTGUARD_CMD_TRIMMED=''
-  while [ -n "$cmd" ]; do
-    _line="${cmd%%$'\n'*}"
-    _line="${_line#"${_line%%[![:space:]]*}"}"
-    AGENTGUARD_CMD_TRIMMED+="${_line}"
-    if [[ "$cmd" == *$'\n'* ]]; then
-      cmd="${cmd#*$'\n'}"
-      AGENTGUARD_CMD_TRIMMED+=$'\n'
+  for ((_i = 0; _i < ${#_lines[@]}; _i++)); do
+    _line="${_lines[_i]}"
+    # Anchored regex, not `${_line%%[![:space:]]*}`: Bash's longest-suffix
+    # match is quadratic in the line length (a 1 MiB line took 30 seconds).
+    [[ "$_line" =~ ^[[:space:]]+ ]] && _line="${_line:${#BASH_REMATCH[0]}}"
+    if [ "$_i" -eq 0 ]; then
+      # First line only — heredoc bodies (commit messages, etc.) start on
+      # line 2 and must not trigger command-detection guards. Taken here
+      # because `${TRIMMED%%$'\n'*}` is quadratic in the command length.
+      # shellcheck disable=SC2034 # Exported by _hook_export_if_fits below.
+      AGENTGUARD_CMD_LINE1="$_line"
     else
-      cmd=''
+      AGENTGUARD_CMD_TRIMMED+=$'\n'
     fi
+    AGENTGUARD_CMD_TRIMMED+="${_line}"
   done
-  # First line only — heredoc bodies (commit messages, etc.) start on
-  # line 2 and must not trigger command-detection guards.
-  AGENTGUARD_CMD_LINE1="${AGENTGUARD_CMD_TRIMMED%%$'\n'*}"
-  export AGENTGUARD_CMD_TRIMMED AGENTGUARD_CMD_LINE1
+  _hook_export_if_fits AGENTGUARD_CMD_TRIMMED AGENTGUARD_CMD_LINE1
 }
 
 # Extracts shell stdout from PostToolUse-style payloads. Claude Code uses
@@ -1172,8 +1202,10 @@ _hook_parse_edit_files() {
         sub("^\\*\\*\\* Move to: "; ""))
     ] | map(select(. != "")) | first_seen[]
   ' 2>/dev/null)
-  AGENTGUARD_EDIT_FILE="${AGENTGUARD_EDIT_FILES%%$'\n'*}"
-  export AGENTGUARD_EDIT_FILES AGENTGUARD_EDIT_FILE
+  # First path; `read` stays linear where `${FILES%%$'\n'*}` is quadratic in
+  # the payload length.
+  IFS= read -r AGENTGUARD_EDIT_FILE <<<"$AGENTGUARD_EDIT_FILES" || AGENTGUARD_EDIT_FILE=''
+  _hook_export_if_fits AGENTGUARD_EDIT_FILES AGENTGUARD_EDIT_FILE
 }
 
 # Parses MCP tool info from hook JSON input. Sets _HOOK_INPUT (full JSON for

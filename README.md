@@ -80,6 +80,13 @@ assets through shdeps, or use their absolute paths in this checkout.
   Advisory hooks (post-tool, lifecycle, prompt, Stop, notification) keep their
   status: they cannot undo a completed call, and blocking a prompt or a Stop
   would trap the session.
+- `agent-hook-pre-bash` bounds its own work, because a hook that outlives the
+  host timeout is also a non-blocking error. Commands over 256 KiB, with more
+  than 2048 commands, or with one command of more than 2048 words are
+  blocked, as is any command whose classification does not finish within
+  `AGENTGUARD_CLASSIFY_TIMEOUT` seconds (default 30, maximum 3600). Like the
+  other `AGENTGUARD_*` settings, the timeout is read from the hook
+  environment, which an agent's tool shell cannot change.
 - `agent-hook-pre-bash` can guard a broad bare-Git work tree when an integration
   sets `AGENTGUARD_PROTECTED_BARE_GIT_DIR`. Optional companion settings are
   `AGENTGUARD_PROTECTED_BARE_GIT_WORK_TREE` (defaults to `$HOME`),

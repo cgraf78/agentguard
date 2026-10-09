@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# agent-hook-bash-bounds-test — pre-bash finishes in bounded time.
+#
+# A hook that outlives its host timeout is a non-blocking error, so the
+# command runs unguarded. These cases pin the complexity fixes (large commands
+# classify in seconds, not minutes) and the fail-closed bounds (oversized or
+# too-slow input blocks with a clear reason). Wall ceilings have 10x or more
+# headroom over typical runs; they catch the old quadratic and cubic costs,
+# not noise.
+
+# shellcheck disable=SC1090,SC1091,SC2016 # dynamic helper path; literal shell text.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+_bounds_command="$TEST_TMPDIR/bounds-command.txt"
+_bounds_payload="$TEST_TMPDIR/bounds-payload.json"
+
+# Run pre-bash on the command in $_bounds_command under a hard wall clock and
+# record the elapsed seconds in _BOUNDS_ELAPSED.
+_bounds_run() {
+  local wall="$1"
+  shift
+  local start=$SECONDS out="$TEST_TMPDIR/bounds.out" err="$TEST_TMPDIR/bounds.err"
+  jq -n --rawfile c "$_bounds_command" \
+    '{"tool_name":"Bash","tool_input":{"command":$c}}' >"$_bounds_payload"
+  HOOK_EXIT=0
+  env AGENTGUARD_SESSION_ID="$TEST_SID" TMPDIR="$TEST_TMPDIR" AGENTGUARD_NAME=claude "$@" \
+    timeout "$wall" "$PRE_BASH" <"$_bounds_payload" >"$out" 2>"$err" || HOOK_EXIT=$?
+  _BOUNDS_ELAPSED=$((SECONDS - start))
+  HOOK_STDERR=$(cat "$err")
+}
+
+_bounds_assert_within() {
+  local desc="$1" limit="$2"
+  if [ "$_BOUNDS_ELAPSED" -le "$limit" ]; then
+    _pass "$desc: finished in ${_BOUNDS_ELAPSED}s"
+  else
+    _fail "$desc: finished in ${_BOUNDS_ELAPSED}s (limit ${limit}s)"
+  fi
+}
+
+echo ""
+echo "=== pre-bash: large commands classify in bounded time ==="
+
+# Each appended line used to rescan the whole pending command, which made a
+# multi-line quoted script cubic: 150 lines took about two minutes.
+{
+  printf 'python3 -c "\n'
+  for ((_i = 1; _i <= 150; _i++)); do
+    printf "print('line %d with some text here and a var')\n" "$_i"
+  done
+  printf '"\n'
+} >"$_bounds_command"
+_bounds_run 120
+_assert_eq "150-line python -c: allowed" "0" "$HOOK_EXIT"
+_bounds_assert_within "150-line python -c" 30
+
+{
+  printf 'python3 -c "\n'
+  for ((_i = 1; _i <= 150; _i++)); do
+    printf "print('line %d')\n" "$_i"
+  done
+  printf '"; git push --force\n'
+} >"$_bounds_command"
+_bounds_run 120
+_assert_eq "force push after a 150-line script: blocked" "2" "$HOOK_EXIT"
+_assert_contains "force push after a 150-line script: push guard ran" \
+  "git push --force" "$HOOK_STDERR"
+
+# Per-character `${text:i:1}` reads copied the whole string, so long single
+# lines were quadratic: 16 KiB took over 20 seconds.
+{
+  printf 'echo '
+  head -c 32000 /dev/zero | tr '\0' 'a'
+  printf '; true'
+} >"$_bounds_command"
+_bounds_run 120
+_assert_eq "32 KiB single line: allowed" "0" "$HOOK_EXIT"
+_bounds_assert_within "32 KiB single line" 30
+
+# `${word##*/}` on the first word is quadratic; this runs on the fast path
+# before any limit applies.
+head -c 1000000 /dev/zero | tr '\0' 'x' >"$_bounds_command"
+_bounds_run 120
+_assert_eq "1 MB single word: allowed" "0" "$HOOK_EXIT"
+_bounds_assert_within "1 MB single word" 15
+
+{
+  printf 'cat > /tmp/agentguard-bounds.txt <<EOF\n'
+  for ((_i = 1; _i <= 800; _i++)); do
+    printf 'line %d with $var and some text\n' "$_i"
+  done
+  printf 'EOF\n'
+} >"$_bounds_command"
+_bounds_run 120
+_assert_eq "800-line active heredoc: allowed" "0" "$HOOK_EXIT"
+_bounds_assert_within "800-line active heredoc" 30
+
+echo ""
+echo "=== pre-bash: line joining keeps shell semantics ==="
+
+printf 'git push \\\n  --force origin main\n' >"$_bounds_command"
+_bounds_run 60
+_assert_eq "continued force push: blocked" "2" "$HOOK_EXIT"
+
+printf 'echo "a\n\nb"\ngit reset --hard\n' >"$_bounds_command"
+_bounds_run 60
+_assert_eq "blank lines inside quotes then reset: blocked" "2" "$HOOK_EXIT"
+
+printf 'echo "unterminated \\\n' >"$_bounds_command"
+_bounds_run 60
+_assert_eq "trailing continuation at EOF: classified" "0" "$HOOK_EXIT"
+
+echo ""
+echo "=== pre-bash: oversized or slow input fails closed ==="
+
+{
+  printf 'echo '
+  head -c 64000 /dev/zero | tr '\0' 'a'
+  printf '; true'
+} >"$_bounds_command"
+_bounds_run 60 AGENTGUARD_CLASSIFY_TIMEOUT=1
+_assert_eq "classification deadline: blocked" "2" "$HOOK_EXIT"
+_assert_contains "classification deadline: reason" "did not finish within 1s" "$HOOK_STDERR"
+_bounds_assert_within "classification deadline" 15
+
+{
+  for ((_i = 0; _i < 30000; _i++)); do printf 'echo hello world; '; done
+} >"$_bounds_command"
+_bounds_run 60
+_assert_eq "over the byte limit: blocked" "2" "$HOOK_EXIT"
+_assert_contains "over the byte limit: reason" "larger than 262144 bytes" "$HOOK_STDERR"
+_bounds_assert_within "over the byte limit" 10
+
+{
+  for ((_i = 0; _i < 2100; _i++)); do printf 'true; '; done
+} >"$_bounds_command"
+_bounds_run 60
+_assert_eq "too many commands: blocked" "2" "$HOOK_EXIT"
+_assert_contains "too many commands: reason" "more than 2048 commands" "$HOOK_STDERR"
+
+{
+  printf 'rm -rf'
+  for ((_i = 0; _i < 2100; _i++)); do printf ' f%d' "$_i"; done
+  printf '; true'
+} >"$_bounds_command"
+_bounds_run 60
+_assert_eq "too many words: blocked" "2" "$HOOK_EXIT"
+_assert_contains "too many words: reason" "more than 2048 words" "$HOOK_STDERR"
+
+for _bad in 0 -1 abc 007; do
+  printf 'ls; true' >"$_bounds_command"
+  _bounds_run 60 AGENTGUARD_CLASSIFY_TIMEOUT="$_bad"
+  _assert_eq "invalid timeout '$_bad' uses the default" "0" "$HOOK_EXIT"
+done
+
+echo ""
+echo "=== pre-bash: oversized text is not exported ==="
+
+# Linux rejects an environment string over 128 KiB, so an exported 150 KB
+# command made every external command in the hook, including extensions'
+# helpers, fail with E2BIG.
+_bounds_fixture="$TEST_TMPDIR/bounds-fixture"
+_install_hook_fixture "$_bounds_fixture" agent-hook-pre-bash
+_bounds_marker="$TEST_TMPDIR/bounds-extension-ran"
+printf '%s\n' "/usr/bin/env true && : >\"$_bounds_marker\"" \
+  >"$_bounds_fixture/bin/agent-hook-pre-bash-claude"
+{
+  printf "cat > /tmp/agentguard-bounds.txt <<'EOF'\n"
+  for ((_i = 0; _i < 3000; _i++)); do printf 'quoted heredoc line %d with text\n' "$_i"; done
+  printf 'EOF\n'
+} >"$_bounds_command"
+jq -n --rawfile c "$_bounds_command" \
+  '{"tool_name":"Bash","tool_input":{"command":$c}}' >"$_bounds_payload"
+env AGENTGUARD_SESSION_ID="$TEST_SID" TMPDIR="$TEST_TMPDIR" AGENTGUARD_NAME=claude \
+  "$_bounds_fixture/bin/agent-hook-pre-bash" <"$_bounds_payload" >/dev/null 2>&1
+_assert_eq "150 KB command: allowed" "0" "$?"
+if [ -e "$_bounds_marker" ]; then
+  _pass "150 KB command: extension can run external commands"
+else
+  _fail "150 KB command: extension can run external commands"
+fi
+
+_test_summary

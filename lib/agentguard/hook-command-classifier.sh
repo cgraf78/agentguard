@@ -24,10 +24,26 @@ _shell_word_token() {
 }
 
 _trim_hook_fragment() {
-  local value="$1"
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  printf '%s' "$value"
+  local value="$1" out_name="${2:-}"
+  # Anchored regexes stay linear; `${value%%[![:space:]]*}`-style longest
+  # matches are quadratic in the fragment length.
+  [[ "$value" =~ ^[[:space:]]+ ]] && value="${value:${#BASH_REMATCH[0]}}"
+  [[ "$value" =~ [[:space:]]+$ ]] && value="${value:0:${#value}-${#BASH_REMATCH[0]}}"
+  if [ -n "$out_name" ]; then
+    printf -v "$out_name" '%s' "$value"
+  else
+    printf '%s' "$value"
+  fi
+}
+
+# Classification deadline. The pre-bash hook sets `_AGENTGUARD_DEADLINE` to a
+# `$SECONDS` value; long loops stop early once it passes and the hook then
+# blocks instead of trusting a partial scan. A hook that simply ran until the
+# host's timeout would be a non-blocking error, which runs the command
+# unguarded. Unset (the public classifier, tests) means no deadline.
+# `$SECONDS` is inherited by subshells, so checks inside `$(...)` agree.
+_agentguard_deadline_ok() {
+  [ -z "${_AGENTGUARD_DEADLINE:-}" ] || [ "$SECONDS" -lt "$_AGENTGUARD_DEADLINE" ]
 }
 
 # True for a plain shell variable/function name. Every attacker-controlled word
@@ -41,6 +57,55 @@ _shell_name_is_valid() {
   [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]
 }
 
+# Linear stand-ins for `${word##*X}` and `${word#*X}`. Bash removes a prefix
+# that starts with `*` by trying every candidate prefix, which is quadratic
+# when X occurs late or not at all: one `${word##*/}` on a 100 KiB word took
+# 13 seconds. Words come straight from command text, so the classifier uses
+# these anchored regexes instead. Each writes the result to the variable named
+# by the last argument; X must be a single character that is literal inside
+# and outside a bracket expression.
+_word_after_last() {
+  if [[ "$1" =~ ^.*[$2] ]]; then
+    printf -v "$3" '%s' "${1:${#BASH_REMATCH[0]}}"
+  else
+    printf -v "$3" '%s' "$1"
+  fi
+}
+
+_word_after_first() {
+  if [[ "$1" =~ ^[^$2]*[$2] ]]; then
+    printf -v "$3" '%s' "${1:${#BASH_REMATCH[0]}}"
+  else
+    printf -v "$3" '%s' "$1"
+  fi
+}
+
+# Chunked character access for the hand-written scanners. `${text:i:1}`
+# copies the whole string, and in multibyte locales recounts it, on every
+# call, so a per-character loop over it is quadratic: a 16 KiB command took
+# tens of seconds, long enough to outlive host hook timeouts. Scanners copy the
+# text into `_sc_text` once (with `_sc_start=-256 _sc_chunk=` locals) and call
+# this per index; it refills a 256-character window and sets `ch`, `next`, and
+# `next2` in the caller's scope.
+_scan_char_at() {
+  local k
+  if (($1 + 2 >= _sc_start + 256)); then
+    if ! _agentguard_deadline_ok; then
+      # Past the deadline the result is discarded, so end the caller's loop:
+      # every scanner iterates `i` upward against a smaller bound.
+      i=$((1 << 62))
+      ch='' next='' next2=''
+      return 0
+    fi
+    _sc_start=$1
+    _sc_chunk="${_sc_text:$1:256}"
+  fi
+  k=$(($1 - _sc_start))
+  ch="${_sc_chunk:k:1}"
+  next="${_sc_chunk:k+1:1}"
+  next2="${_sc_chunk:k+2:1}"
+}
+
 # Heredoc delimiters decide whether the body is executable input or inert prose.
 # Keep that parsing centralized so the line splitter, generic command guards,
 # and protected bare-Git scan blocker agree on multiple heredocs, quoted delimiters, and
@@ -49,10 +114,10 @@ _heredoc_specs() {
   local line="$1" quote="" ch next next2 delim active strip_tabs marker_quote="" escaped=0 in_arith=0 arith_depth=0
   local i j
 
-  for ((i = 0; i < ${#line}; i++)); do
-    ch="${line:i:1}"
-    next="${line:i+1:1}"
-    next2="${line:i+2:1}"
+  local _sc_text="$line" _sc_start=-256 _sc_chunk="" _sc_len next next2
+  _sc_len=${#_sc_text}
+  for ((i = 0; i < _sc_len; i++)); do
+    _scan_char_at "$i"
 
     if [ "$escaped" -eq 1 ]; then
       escaped=0
@@ -190,14 +255,40 @@ _heredoc_specs() {
   done
 }
 
-_logical_command_incomplete() {
-  local text="$1" ch next next2 quote="" paren_outer_quote="" escaped=0 in_backtick=0 in_paren=0 in_arith=0 paren_depth=0 arith_depth=0
-  local i
+# Logical-command scanner. Command lines arrive one physical line at a time,
+# and a logical command ends only when no quote, backtick, `$(`, or `$((` is
+# still open. Rescanning the whole pending text after every appended line made
+# multi-line commands cubic: a 150-line `python3 -c "..."` took minutes, and a
+# hook that outlives its host timeout is a non-blocking error, so the command
+# ran unguarded. The scanner therefore keeps its state in `_LC_*` variables and
+# resumes where it stopped. Callers that track a pending command declare those
+# variables `local` (see _lc_reset) so nested scans in the same shell cannot
+# clobber each other.
+_lc_reset() {
+  _LC_QUOTE=''
+  _LC_OUTER=''
+  _LC_ESCAPED=0
+  _LC_BACKTICK=0
+  _LC_PAREN=0
+  _LC_ARITH=0
+  _LC_PDEPTH=0
+  _LC_ADEPTH=0
+  _LC_POS=0
+}
 
-  for ((i = 0; i < ${#text}; i++)); do
-    ch="${text:i:1}"
-    next="${text:i+1:1}"
-    next2="${text:i+2:1}"
+# Advance the scanner over text[_LC_POS, end). The loop body is a plain
+# left-to-right state machine whose lookahead reads at most two characters
+# past `i`, so stopping two characters short of the text's end and resuming
+# later produces exactly the state of one full scan.
+_lc_scan() {
+  local text="$1" end="$2" ch next next2 i
+  local quote="$_LC_QUOTE" paren_outer_quote="$_LC_OUTER" escaped="$_LC_ESCAPED"
+  local in_backtick="$_LC_BACKTICK" in_paren="$_LC_PAREN" in_arith="$_LC_ARITH"
+  local paren_depth="$_LC_PDEPTH" arith_depth="$_LC_ADEPTH"
+
+  local _sc_text="$text" _sc_start=-256 _sc_chunk=""
+  for ((i = _LC_POS; i < end; i++)); do
+    _scan_char_at "$i"
 
     if [ "$escaped" -eq 1 ]; then
       escaped=0
@@ -380,7 +471,27 @@ _logical_command_incomplete() {
     esac
   done
 
-  [ -n "$quote" ] || [ "$in_backtick" -eq 1 ] || [ "$in_paren" -eq 1 ] || [ "$in_arith" -eq 1 ]
+  _LC_QUOTE="$quote"
+  _LC_OUTER="$paren_outer_quote"
+  _LC_ESCAPED="$escaped"
+  _LC_BACKTICK="$in_backtick"
+  _LC_PAREN="$in_paren"
+  _LC_ARITH="$in_arith"
+  _LC_PDEPTH="$paren_depth"
+  _LC_ADEPTH="$arith_depth"
+  _LC_POS="$i"
+}
+
+_lc_open() {
+  [ -n "$_LC_QUOTE" ] || [ "$_LC_BACKTICK" -eq 1 ] || [ "$_LC_PAREN" -eq 1 ] || [ "$_LC_ARITH" -eq 1 ]
+}
+
+_logical_command_incomplete() {
+  local text="$1"
+  local _LC_QUOTE _LC_OUTER _LC_ESCAPED _LC_BACKTICK _LC_PAREN _LC_ARITH _LC_PDEPTH _LC_ADEPTH _LC_POS
+  _lc_reset
+  _lc_scan "$text" "${#text}"
+  _lc_open
 }
 
 # Hook latency matters. This is a shallow scanner for command lines the agent
@@ -395,7 +506,18 @@ _hook_command_lines() {
   local line pending="" marker delim strip_tabs _active
   local -a heredoc_delims=() heredoc_strips=()
 
+  # One physical line is one logical command whether or not it is complete,
+  # and a heredoc it opens has no body lines to skip. Most agent commands are
+  # single-line, so skip the scan entirely.
+  if [[ "$text" != *$'\n'* ]]; then
+    [ -n "$text" ] && printf '%s\0' "$text"
+    return 0
+  fi
+  local _LC_QUOTE _LC_OUTER _LC_ESCAPED _LC_BACKTICK _LC_PAREN _LC_ARITH _LC_PDEPTH _LC_ADEPTH _LC_POS _pending_bs
+  _pending_reset
+
   while IFS= read -r line || [ -n "$line" ]; do
+    _agentguard_deadline_ok || break
     if [ "${#heredoc_delims[@]}" -gt 0 ]; then
       marker="$line"
       if [ "${heredoc_strips[0]}" -eq 1 ]; then
@@ -410,9 +532,9 @@ _hook_command_lines() {
       continue
     fi
 
-    pending="$(_append_pending_command_line "$pending" "$line")"
+    _pending_append "$line"
 
-    if ! _pending_command_complete "$pending"; then
+    if ! _pending_command_complete_incremental; then
       continue
     fi
 
@@ -422,10 +544,13 @@ _hook_command_lines() {
       heredoc_delims+=("$delim")
       heredoc_strips+=("$strip_tabs")
     done < <(_heredoc_specs "$pending")
-    pending=""
+    _pending_reset
   done <<<"$text"
 
-  [ -n "$pending" ] && printf '%s\0' "$pending"
+  if [ -n "$pending" ] || [ "$_pending_bs" -eq 1 ]; then
+    _pending_text line
+    printf '%s\0' "$line"
+  fi
 }
 
 _pending_command_complete() {
@@ -433,28 +558,90 @@ _pending_command_complete() {
   [[ "$pending" != *\\ ]] && ! _logical_command_incomplete "$pending"
 }
 
-_append_pending_command_line() {
-  local pending="$1" line="$2"
-  if [ -n "$pending" ]; then
-    if [[ "$pending" == *\\ ]]; then
-      pending="${pending%\\} $line"
-    else
-      pending+=$'\n'"$line"
-    fi
+# Incremental form for the line loops, which keep the pending command in
+# `pending` and `_pending_bs` (see _pending_append) and reset `_LC_*` whenever
+# `pending` starts over.
+_pending_command_complete_incremental() {
+  local commit_end
+  local s_quote s_outer s_escaped s_backtick s_paren s_arith s_pdepth s_adepth s_pos
+  [ "$_pending_bs" -eq 0 ] || return 1
+  commit_end=$((${#pending} - 2))
+  _lc_scan "$pending" "$commit_end"
+  # The last two characters are scanned on a copy: their lookahead runs off
+  # the end of the text, which the next appended line may change.
+  s_quote="$_LC_QUOTE" s_outer="$_LC_OUTER" s_escaped="$_LC_ESCAPED"
+  s_backtick="$_LC_BACKTICK" s_paren="$_LC_PAREN" s_arith="$_LC_ARITH"
+  s_pdepth="$_LC_PDEPTH" s_adepth="$_LC_ADEPTH" s_pos="$_LC_POS"
+  _lc_scan "$pending" "${#pending}"
+  if _lc_open; then
+    _LC_QUOTE="$s_quote" _LC_OUTER="$s_outer" _LC_ESCAPED="$s_escaped"
+    _LC_BACKTICK="$s_backtick" _LC_PAREN="$s_paren" _LC_ARITH="$s_arith"
+    _LC_PDEPTH="$s_pdepth" _LC_ADEPTH="$s_adepth" _LC_POS="$s_pos"
+    return 1
+  fi
+  return 0
+}
+
+# Append one physical line to the caller's `pending` in place. `+=` is
+# amortized; rebuilding the string per line (`x="$(f "$x" ...)"` or
+# `printf -v`) was quadratic in the command length. A trailing backslash is a
+# line continuation: it is held back in `_pending_bs` instead of being
+# appended and stripped later, which would also copy the whole command.
+# _pending_text reproduces it when the command ends at EOF.
+_pending_append() {
+  local line="$1" continued="$_pending_bs"
+  _pending_bs=0
+  if [[ "$line" == *\\ ]]; then
+    line="${line%\\}"
+    _pending_bs=1
+  fi
+  if [ "$continued" -eq 1 ]; then
+    pending+=" $line"
+  elif [ -n "$pending" ]; then
+    pending+=$'\n'"$line"
   else
     pending="$line"
   fi
-  printf '%s' "$pending"
+}
+
+_pending_reset() {
+  pending=""
+  _pending_bs=0
+  _lc_reset
+}
+
+# The pending command as the historical joiner left it at EOF, with a
+# held-back continuation backslash restored, in the variable named by $1.
+_pending_text() {
+  if [ "$_pending_bs" -eq 1 ]; then
+    printf -v "$1" '%s%s' "$pending" "\\"
+  else
+    printf -v "$1" '%s' "$pending"
+  fi
+}
+
+_append_pending_command_line() {
+  local current="$1" line="$2"
+  if [ -n "$current" ]; then
+    if [[ "$current" == *\\ ]]; then
+      current="${current%\\} $line"
+    else
+      current+=$'\n'"$line"
+    fi
+  else
+    current="$line"
+  fi
+  printf '%s' "$current"
 }
 
 _append_heredoc_body_line() {
-  local body="$1" line="$2"
-  if [ -n "$body" ]; then
-    body+=$'\n'"$line"
+  local current="$1" line="$2"
+  if [ -n "$current" ]; then
+    current+=$'\n'"$line"
   else
-    body="$line"
+    current="$line"
   fi
-  printf '%s' "$body"
+  printf '%s' "$current"
 }
 
 _flush_active_heredoc_payloads() {
@@ -473,9 +660,10 @@ _split_command_fragments() {
   local line="$1" buf="" quote="" ch next fragment escaped=0
   local i
 
-  for ((i = 0; i < ${#line}; i++)); do
-    ch="${line:i:1}"
-    next="${line:i+1:1}"
+  local _sc_text="$line" _sc_start=-256 _sc_chunk="" _sc_len next next2
+  _sc_len=${#_sc_text}
+  for ((i = 0; i < _sc_len; i++)); do
+    _scan_char_at "$i"
     if [ "$escaped" -eq 1 ]; then
       buf+="$ch"
       escaped=0
@@ -511,7 +699,7 @@ _split_command_fragments() {
         buf+="$ch"
         ;;
       ';' | '&' | '|')
-        fragment="$(_trim_hook_fragment "$buf")"
+        _trim_hook_fragment "$buf" fragment
         [ -n "$fragment" ] && printf '%s\n' "$fragment"
         buf=""
         if { [ "$ch" = "&" ] || [ "$ch" = "|" ]; } && [ "$next" = "$ch" ]; then
@@ -524,7 +712,7 @@ _split_command_fragments() {
     esac
   done
 
-  fragment="$(_trim_hook_fragment "$buf")"
+  _trim_hook_fragment "$buf" fragment
   [ -n "$fragment" ] && printf '%s\n' "$fragment"
 }
 
@@ -539,9 +727,10 @@ _unquoted_char_index() {
   local text="$1" needle="$2" quote="" ch next escaped=0
   local i
 
-  for ((i = 0; i < ${#text}; i++)); do
-    ch="${text:i:1}"
-    next="${text:i+1:1}"
+  local _sc_text="$text" _sc_start=-256 _sc_chunk="" _sc_len next next2
+  _sc_len=${#_sc_text}
+  for ((i = 0; i < _sc_len; i++)); do
+    _scan_char_at "$i"
 
     if [ "$escaped" -eq 1 ]; then
       escaped=0
@@ -664,10 +853,10 @@ _executable_expansion_payloads() {
   local fragment="$1" ch next next2 quote="" paren_outer_quote="" payload="" arith_payload="" escaped=0 depth=0 arith_depth=0 in_paren=0 in_backtick=0 in_arith=0
   local i
 
-  for ((i = 0; i < ${#fragment}; i++)); do
-    ch="${fragment:i:1}"
-    next="${fragment:i+1:1}"
-    next2="${fragment:i+2:1}"
+  local _sc_text="$fragment" _sc_start=-256 _sc_chunk="" _sc_len next next2
+  _sc_len=${#_sc_text}
+  for ((i = 0; i < _sc_len; i++)); do
+    _scan_char_at "$i"
 
     if [ "$escaped" -eq 1 ]; then
       if [ "$in_arith" -eq 1 ]; then
@@ -902,7 +1091,13 @@ _active_heredoc_payloads() {
   local text="$1" line pending="" marker body="" delim strip_tabs active
   local -a heredoc_delims=() heredoc_strips=() heredoc_actives=()
 
+  # No `<<` means no heredoc, so there is no body to expand.
+  [[ "$text" == *"<<"* ]] || return 0
+  local _LC_QUOTE _LC_OUTER _LC_ESCAPED _LC_BACKTICK _LC_PAREN _LC_ARITH _LC_PDEPTH _LC_ADEPTH _LC_POS _pending_bs
+  _pending_reset
+
   while IFS= read -r line || [ -n "$line" ]; do
+    _agentguard_deadline_ok || break
     if [ "${#heredoc_delims[@]}" -gt 0 ]; then
       marker="$line"
       if [ "${heredoc_strips[0]}" -eq 1 ]; then
@@ -922,13 +1117,17 @@ _active_heredoc_payloads() {
         continue
       fi
       if [ "${heredoc_actives[0]}" -eq 1 ]; then
-        body="$(_append_heredoc_body_line "$body" "$line")"
+        if [ -n "$body" ]; then
+          body+=$'\n'"$line"
+        else
+          body="$line"
+        fi
       fi
       continue
     fi
 
-    pending="$(_append_pending_command_line "$pending" "$line")"
-    if ! _pending_command_complete "$pending"; then
+    _pending_append "$line"
+    if ! _pending_command_complete_incremental; then
       continue
     fi
 
@@ -938,7 +1137,7 @@ _active_heredoc_payloads() {
       heredoc_strips+=("$strip_tabs")
       heredoc_actives+=("$active")
     done < <(_heredoc_specs "$pending")
-    pending=""
+    _pending_reset
   done <<<"$text"
 
   [ "${#heredoc_delims[@]}" -gt 0 ] &&
@@ -953,6 +1152,7 @@ _hook_executable_fragments_uncached() {
     # executable expansions from the original command so nested heredocs keep
     # their newlines and can be classified accurately.
     while IFS= read -r fragment; do
+      _agentguard_deadline_ok || break
       printf '%s\n' "$fragment"
       if [ "$depth" -lt 2 ]; then
         # A plain fragment cannot carry structural, nested-shell, or env-split
@@ -1051,8 +1251,10 @@ _agentguard_json_string() {
   local value="$1" out="" ch ord escaped
   local i
 
-  for ((i = 0; i < ${#value}; i++)); do
-    ch="${value:i:1}"
+  local _sc_text="$value" _sc_start=-256 _sc_chunk="" _sc_len next next2
+  _sc_len=${#_sc_text}
+  for ((i = 0; i < _sc_len; i++)); do
+    _scan_char_at "$i"
     case "$ch" in
       '"') out+="\\\"" ;;
       \\) out+="\\\\" ;;
@@ -1127,9 +1329,10 @@ _agentguard_direct_simple_fragment_command_word() {
   # Control syntax outside quotes and substitutions inside double quotes can
   # introduce another command. A backslash inside a single-quoted format string
   # is inert; double-quoted escapes remain on the conservative parser path.
-  for ((i = 0; i < ${#text}; i++)); do
-    ch="${text:i:1}"
-    next="${text:i+1:1}"
+  local _sc_text="$text" _sc_start=-256 _sc_chunk="" _sc_len next next2
+  _sc_len=${#_sc_text}
+  for ((i = 0; i < _sc_len; i++)); do
+    _scan_char_at "$i"
     if [ "$quote" = "'" ]; then
       [ "$ch" = "'" ] && quote=""
       continue
@@ -1154,7 +1357,7 @@ _agentguard_direct_simple_fragment_command_word() {
     esac
   done
 
-  base="${word##*/}"
+  _word_after_last "$word" / base
   case "$base" in
     "!" | if | then | elif | while | until | do | else | coproc | \
       command | builtin | exec | time | noglob | \
@@ -1180,7 +1383,7 @@ _agentguard_plain_fragment_command_word() {
 
   while [ "$i" -lt "${#words[@]}" ]; do
     word="${words[$i]}"
-    base="${word##*/}"
+    _word_after_last "$word" / base
     case "$word" in
       [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
         ((i++))
@@ -1214,7 +1417,7 @@ _agentguard_plain_fragment_command_word() {
 
 _agentguard_command_fact_json() {
   local fragment="$1" command="$2" basename
-  basename="${command##*/}"
+  _word_after_last "$command" / basename
 
   printf '{"fragment":'
   _agentguard_json_string "$fragment"
@@ -1316,9 +1519,10 @@ _fragment_tokens() {
     return 0
   fi
 
-  for ((i = 0; i < ${#fragment}; i++)); do
-    ch="${fragment:i:1}"
-    next="${fragment:i+1:1}"
+  local _sc_text="$fragment" _sc_start=-256 _sc_chunk="" _sc_len next next2
+  _sc_len=${#_sc_text}
+  for ((i = 0; i < _sc_len; i++)); do
+    _scan_char_at "$i"
     if [ "$escaped" -eq 1 ]; then
       word+="$ch"
       escaped=0
@@ -1774,7 +1978,7 @@ _remember_protected_bare_git_path_assignments() {
         ;;
       [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
         name="${word%%=*}"
-        value="${word#*=}"
+        _word_after_first "$word" = value
         # Not a real assignment word (`a$(x)=y` is a command); Bash would
         # run it as a command name, so it ends the assignment prefix.
         _shell_name_is_valid "$name" || return 0
@@ -2173,7 +2377,7 @@ _word_is_protected_bare_git_launcher() {
   esac
 
   dir="${path%/*}"
-  base="${path##*/}"
+  _word_after_last "$path" / base
   [ "$base" = "git" ] || return 1
   dir_phys=$(_hook_resolve_dir "$PWD" "$dir") || return 1
   launcher_dir=$(_hook_resolve_dir "$PWD" "${launcher%/*}") || return 1
@@ -2415,7 +2619,7 @@ _protected_bare_git_context() {
     word="$(_clean_command_word "${words[$i]}")"
     case "$word" in
       GIT_DIR=*)
-        value="${word#*=}"
+        _word_after_first "$word" = value
         _is_protected_bare_git_path "$value" && seen_git_dir=1
         explicit_context=1
         ((i++))
@@ -2482,7 +2686,7 @@ _protected_bare_git_context() {
         continue
         ;;
       --git-dir=*)
-        value="${word#*=}"
+        _word_after_first "$word" = value
         _is_protected_bare_git_path "$value" && return 0
         explicit_context=1
         ;;
@@ -2716,8 +2920,10 @@ _first_shell_word() {
   local i
   text="$(_trim_hook_fragment "$1")"
 
-  for ((i = 0; i < ${#text}; i++)); do
-    ch="${text:i:1}"
+  local _sc_text="$text" _sc_start=-256 _sc_chunk="" _sc_len next next2
+  _sc_len=${#_sc_text}
+  for ((i = 0; i < _sc_len; i++)); do
+    _scan_char_at "$i"
     if [ "$escaped" -eq 1 ]; then
       buf+="$ch"
       escaped=0
@@ -2742,7 +2948,7 @@ _first_shell_word() {
 
     case "$ch" in
       "$")
-        if [ "${text:i+1:1}" = "'" ]; then
+        if [ "$next" = "'" ]; then
           quote="ansi"
           started=1
           ((i++))
@@ -2774,8 +2980,10 @@ _first_shell_word_with_remainder() {
   local i j
   text="$(_trim_hook_fragment "$1")"
 
-  for ((i = 0; i < ${#text}; i++)); do
-    ch="${text:i:1}"
+  local _sc_text="$text" _sc_start=-256 _sc_chunk="" _sc_len next next2
+  _sc_len=${#_sc_text}
+  for ((i = 0; i < _sc_len; i++)); do
+    _scan_char_at "$i"
     if [ "$escaped" -eq 1 ]; then
       buf+="$ch"
       escaped=0
@@ -2800,7 +3008,7 @@ _first_shell_word_with_remainder() {
 
     case "$ch" in
       "$")
-        if [ "${text:i+1:1}" = "'" ]; then
+        if [ "$next" = "'" ]; then
           quote="ansi"
           started=1
           ((i++))
@@ -2891,7 +3099,7 @@ _nested_shell_payloads() {
           # `zsh -fc`; treating the next token as the `-c` payload keeps
           # wrapper spelling from bypassing the shared command classifiers.
           if [[ "$word" == -*c* ]]; then
-            suffix="${word#*c}"
+            _word_after_first "$word" c suffix
             if [ -n "$suffix" ]; then
               printf '%s\n' "$suffix"
             else
@@ -3012,7 +3220,8 @@ _env_split_payloads() {
           # is a split-string; treat the rest of the token (after S) as payload.
           case "$word" in
             *S?*)
-              _env_split_emit "${word#*S}" "$((i + 1))" "${words[@]}"
+              _word_after_first "$word" S attached
+              _env_split_emit "$attached" "$((i + 1))" "${words[@]}"
               return $?
               ;;
             *)
@@ -3745,7 +3954,7 @@ _git_option_untracked_status_state() {
       return 0
       ;;
     --config-env=status.showUntrackedFiles=*)
-      value="${word##*=}"
+      _word_after_last "$word" = value
       if config_value="$(_assignment_value "$fragment" "$value")"; then
         if _untracked_status_config_value_is_safe "$config_value"; then
           printf 'off'
@@ -3787,7 +3996,7 @@ _git_option_untracked_status_state() {
   if [[ "$word" == -* && "$word" != --* ]]; then
     short="${word#-}"
     if [[ "$short" == *u* ]]; then
-      suffix="${short#*u}"
+      _word_after_first "$short" u suffix
       [ "$suffix" = "no" ] && {
         printf 'off'
         return 0
@@ -4248,6 +4457,7 @@ _block_protected_bare_git_fragment() {
 _block_protected_bare_git_line() {
   local line="$1" depth="$2" fragment
   while IFS= read -r fragment; do
+    _agentguard_deadline_ok || break
     _block_protected_bare_git_fragment "$fragment" "$depth"
   done < <(_split_command_fragments "${line//$'\n'/ }")
 }
@@ -4271,7 +4481,17 @@ _block_protected_bare_git_untracked_scans() {
   local text="${1:-$AGENTGUARD_CMD_TRIMMED}" depth="${2:-0}" line pending="" marker body="" payload delim strip_tabs active
   local -a heredoc_delims=() heredoc_strips=() heredoc_actives=()
 
+  # A single physical line has no heredoc body to expand (see
+  # _hook_command_lines).
+  if [[ "$text" != *$'\n'* ]]; then
+    [ -n "$text" ] && _block_protected_bare_git_line "$text" "$depth"
+    return 0
+  fi
+  local _LC_QUOTE _LC_OUTER _LC_ESCAPED _LC_BACKTICK _LC_PAREN _LC_ARITH _LC_PDEPTH _LC_ADEPTH _LC_POS _pending_bs
+  _pending_reset
+
   while IFS= read -r line || [ -n "$line" ]; do
+    _agentguard_deadline_ok || break
     if [ "${#heredoc_delims[@]}" -gt 0 ]; then
       marker="$line"
       if [ "${heredoc_strips[0]}" -eq 1 ]; then
@@ -4295,13 +4515,17 @@ _block_protected_bare_git_untracked_scans() {
         continue
       fi
       if [ "${heredoc_actives[0]}" -eq 1 ] && [ "$depth" -lt 2 ]; then
-        body="$(_append_heredoc_body_line "$body" "$line")"
+        if [ -n "$body" ]; then
+          body+=$'\n'"$line"
+        else
+          body="$line"
+        fi
       fi
       continue
     fi
 
-    pending="$(_append_pending_command_line "$pending" "$line")"
-    if ! _pending_command_complete "$pending"; then
+    _pending_append "$line"
+    if ! _pending_command_complete_incremental; then
       continue
     fi
 
@@ -4312,7 +4536,7 @@ _block_protected_bare_git_untracked_scans() {
       heredoc_strips+=("$strip_tabs")
       heredoc_actives+=("$active")
     done < <(_heredoc_specs "$pending")
-    pending=""
+    _pending_reset
   done <<<"$text"
 
   if [ "${#heredoc_delims[@]}" -gt 0 ] && [ "$depth" -lt 2 ]; then
@@ -4320,5 +4544,8 @@ _block_protected_bare_git_untracked_scans() {
       _protected_bare_git_scan_candidate "$payload" && _block_subshell_protected_bare_git_untracked_scans "$payload" $((depth + 1))
     done < <(_flush_active_heredoc_payloads "$body" "${heredoc_actives[0]}")
   fi
-  [ -n "$pending" ] && _block_protected_bare_git_line "$pending" "$depth"
+  if [ -n "$pending" ] || [ "$_pending_bs" -eq 1 ]; then
+    _pending_text line
+    _block_protected_bare_git_line "$line" "$depth"
+  fi
 }
