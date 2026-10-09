@@ -206,7 +206,7 @@ fi
 # while monitoring must not repeat the reminder.
 if [ -n "$_pr_checks_key" ] && [ "$(_hook_hm_tool_status)" = "0" ] &&
   _hook_once_per_prompt "pr-checks-$(printf '%s' "$_pr_checks_key" | cksum | tr -d ' ')"; then
-  _hook_remind "PR checks gate: if this pushed or opened a GitHub pull request, it is not done or green until its checks pass on the pushed commit. Watch them in the background (\`gh pr checks <pr> --repo <owner/repo> --watch\`) and report pending or failing checks instead of calling it green."
+  _hook_remind "PR checks gate: if this pushed or opened a GitHub pull request, it is not done or green until its checks pass on the pushed commit. Watch them in the background (\`gh pr checks <pr> --repo <owner/repo> --watch --fail-fast\`) and report pending or failing checks instead of calling it green."
 fi
 
 # Let `hm` decide whether this completed tool event changes memory context.
