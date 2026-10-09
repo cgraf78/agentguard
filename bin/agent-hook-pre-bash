@@ -484,6 +484,11 @@ case "$-" in
           return 0
           ;;
       esac
+      # A lone `&` ends a command just like `;`, so `true & git reset --hard`
+      # must not be judged by its first word. Only the redirection forms `>&`,
+      # `<&`, and `&>` keep the fast path, which keeps `2>&1` cheap.
+      local lone_ampersand='(^|[^<>])&($|[^>])'
+      [[ "$text" =~ $lone_ampersand ]] && return 0
 
       read -r word _rest <<<"$text"
       [ -n "$word" ] || return 1
