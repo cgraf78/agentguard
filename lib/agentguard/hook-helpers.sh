@@ -104,18 +104,22 @@ _hook_capture_stderr() {
   dir="${_HOOK_STATE_DIR%/*}-stderr"
   [ -d "$dir" ] || _hook_mkstate "$dir" || return 0
   file="$dir/$$.${RANDOM}${RANDOM}"
-  # A fixed descriptor, not `exec {var}>&2`: hooks run under macOS
-  # /bin/bash 3.2, which lacks named-descriptor allocation, and a failed exec
-  # there would trip the fail-closed trap and block every call.
-  exec 9>&2 || return 0
-  _HOOK_STDERR_FD=9
+  # Named descriptors (`exec {var}>&2`) are Bash 4.1+. The `env bash` hooks
+  # can run under macOS /bin/bash 3.2, where that exec would fail and trip the
+  # fail-closed trap on every call, and a fixed number would clobber a caller's
+  # descriptor. Skip the best-effort capture there; the exit status still
+  # fails closed.
+  if ((BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 1))); then
+    return 0
+  fi
+  exec {_HOOK_STDERR_FD}>&2 || return 0
   # noclobber makes the open exclusive, so a planted file or symlink at this
   # name is refused instead of followed.
   set -C
   if exec 2>"$file"; then
     _HOOK_STDERR_FILE="$file"
   else
-    exec 9>&-
+    exec {_HOOK_STDERR_FD}>&-
     _HOOK_STDERR_FD=''
   fi
   set +C
@@ -128,7 +132,7 @@ _hook_release_stderr() {
   local file="$_HOOK_STDERR_FILE" line found=1
   [ -n "$file" ] || return 1
   _HOOK_STDERR_FILE=''
-  exec 2>&9 9>&-
+  exec 2>&"$_HOOK_STDERR_FD" {_HOOK_STDERR_FD}>&-
   _HOOK_STDERR_FD=''
   if [ -f "$file" ]; then
     while IFS= read -r line || [ -n "$line" ]; do
@@ -1105,8 +1109,11 @@ _hook_parse_command() {
     fi
     exit 0
   fi
-  # Valid JSON but no command field: there is nothing to run, so nothing to guard.
-  [ -z "$cmd" ] && exit 0
+  # Valid JSON but no command field (or one that is only a NUL, which Bash
+  # drops): there is nothing to run, so nothing to guard. Still answer with the
+  # normal allow response; jq 1.7 decodes a lone \u0000 to an empty string.
+  # _hook_finish always exits.
+  [ -n "$cmd" ] || _hook_finish
   # Strip leading whitespace exactly like the historical
   # `sed 's/^[[:space:]]*//'` (every line: sed is line-oriented, so a leading
   # newline survives into TRIMMED and empties the first line below). mapfile

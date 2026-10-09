@@ -17,15 +17,28 @@ _bounds_payload="$TEST_TMPDIR/bounds-payload.json"
 
 # Run pre-bash on the command in $_bounds_command under a hard wall clock and
 # record the elapsed seconds in _BOUNDS_ELAPSED.
+# macOS runners ship neither GNU `timeout` nor (without coreutils) `gtimeout`.
+# The wall clock only guards the suite against a hung hook; the elapsed-time
+# assertions below still catch regressions, so run unwrapped when neither exists.
+if command -v timeout >/dev/null 2>&1; then
+  _bounds_wall=(timeout)
+elif command -v gtimeout >/dev/null 2>&1; then
+  _bounds_wall=(gtimeout)
+else
+  _bounds_wall=()
+fi
+
 _bounds_run() {
   local wall="$1"
   shift
   local start=$SECONDS out="$TEST_TMPDIR/bounds.out" err="$TEST_TMPDIR/bounds.err"
+  local -a wall_cmd=()
+  [ "${#_bounds_wall[@]}" -eq 0 ] || wall_cmd=("${_bounds_wall[@]}" "$wall")
   jq -n --rawfile c "$_bounds_command" \
     '{"tool_name":"Bash","tool_input":{"command":$c}}' >"$_bounds_payload"
   HOOK_EXIT=0
   env AGENTGUARD_SESSION_ID="$TEST_SID" TMPDIR="$TEST_TMPDIR" AGENTGUARD_NAME=claude "$@" \
-    timeout "$wall" "$PRE_BASH" <"$_bounds_payload" >"$out" 2>"$err" || HOOK_EXIT=$?
+    ${wall_cmd[@]+"${wall_cmd[@]}"} "$PRE_BASH" <"$_bounds_payload" >"$out" 2>"$err" || HOOK_EXIT=$?
   _BOUNDS_ELAPSED=$((SECONDS - start))
   HOOK_STDERR=$(cat "$err")
 }

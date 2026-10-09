@@ -52,13 +52,23 @@ _fuzz_command() {
 
 # Run one payload and check the contract. The payload file keeps oversized
 # commands out of argv.
+# macOS runners lack GNU `timeout`; the wall clock only guards the suite
+# against a hung hook, so fall back to `gtimeout` or run unwrapped.
+if command -v timeout >/dev/null 2>&1; then
+  _fuzz_wall_cmd=(timeout "$_fuzz_wall")
+elif command -v gtimeout >/dev/null 2>&1; then
+  _fuzz_wall_cmd=(gtimeout "$_fuzz_wall")
+else
+  _fuzz_wall_cmd=()
+fi
+
 _fuzz_check() {
   local desc="$1" hook="$2" payload_file="$3" status out err
   out="$TEST_TMPDIR/fuzz.out"
   err="$TEST_TMPDIR/fuzz.err"
   env AGENTGUARD_SESSION_ID="$TEST_SID" TMPDIR="$TEST_TMPDIR" \
     AGENTGUARD_NAME=claude AGENTGUARD_CLASSIFY_TIMEOUT=5 \
-    timeout "$_fuzz_wall" "$hook" <"$payload_file" >"$out" 2>"$err"
+    ${_fuzz_wall_cmd[@]+"${_fuzz_wall_cmd[@]}"} "$hook" <"$payload_file" >"$out" 2>"$err"
   status=$?
   case "$status" in
     0 | 2) ;;
