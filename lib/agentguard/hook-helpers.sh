@@ -968,6 +968,25 @@ _hook_tool_stdout() {
   ' 2>/dev/null
 }
 
+# Extracts shell stderr from PostToolUse-style payloads, mirroring
+# _hook_tool_stdout's runner-neutral field lookup.
+_hook_tool_stderr() {
+  _hook_read_input || return 0
+  printf '%s' "$_HOOK_INPUT" | jq -r '
+    def text_value(v):
+      if (v | type) == "string" then v else empty end;
+    [
+      text_value(.tool_response.stderr?),
+      text_value(.tool_result.stderr?),
+      text_value(.toolResult.stderr?),
+      text_value(.tool_output.stderr?),
+      text_value(.response.stderr?),
+      text_value(.result.stderr?),
+      text_value(.stderr?)
+    ] | map(select(. != "")) | .[0] // empty
+  ' 2>/dev/null
+}
+
 # Parses edited file paths from hook JSON input. Edit/Write style tools pass a
 # single file_path; Codex API apply_patch passes a patch body (in Codex hook
 # payloads, as tool_input.command), so extract the file headers from that
@@ -1060,6 +1079,16 @@ _hook_parse_mcp() {
   _HOOK_MCP_FAIL_FILE="$_HOOK_STATE_DIR/mcp-failures-${_HOOK_MCP_SERVER//\//_}"
 }
 
+# Loads the command classifier on first use. Hooks that classify only some
+# commands call this after a cheap text prefilter so ordinary commands never
+# pay for sourcing it.
+_hook_load_command_classifier() {
+  [ "$(type -t _hook_command_fragments)" = "function" ] && return 0
+  # shellcheck source=hook-command-classifier.sh
+  # shellcheck disable=SC1091 # sibling module resolved from this file's dir.
+  source "$_AGENTGUARD_LIB_DIR/hook-command-classifier.sh"
+}
+
 # Uses the command classifier to change into a leading `cd` target. Used by
 # pre-bash and post-bash local `-work` variants to resolve repo context when
 # the agent's command starts with cd. No-op if the first top-level command
@@ -1067,11 +1096,7 @@ _hook_parse_mcp() {
 _hook_cd_to_target() {
   local fragment="" fragments target_dir
 
-  if [ "$(type -t _hook_command_fragments)" != "function" ]; then
-    # shellcheck source=hook-command-classifier.sh
-    # shellcheck disable=SC1091 # sibling module resolved from this file's dir.
-    source "$_AGENTGUARD_LIB_DIR/hook-command-classifier.sh" || return 0
-  fi
+  _hook_load_command_classifier || return 0
 
   fragments="$(_hook_command_fragments "$AGENTGUARD_CMD_TRIMMED")" || return 0
   IFS= read -r fragment <<<"$fragments"

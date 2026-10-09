@@ -93,6 +93,122 @@ if [ -n "$_stdout" ]; then
   fi
 fi
 
+# A push or pull-request creation starts fresh checks on the pushed head
+# commit, and the command returns long before they finish, so an agent that
+# stops here reports work as done while CI is still running or red. Network
+# commands often run indirectly (a script, or a terminal multiplexer that has
+# network access the agent sandbox lacks), so a printed push summary or the
+# bare URL `gh pr create` prints counts as well as the command itself.
+
+# Whether a git push fragment updates remote refs: dry runs and deletions
+# (`--delete`, `-d`, clustered short flags, `:ref` refspecs) do not.
+_pr_checks_git_push_updates() {
+  local fragment="$1" word index
+  local -a words=()
+  while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$fragment")
+  index=$(_git_subcommand_index "$fragment" push) || return 1
+  for ((index++; index < ${#words[@]}; index++)); do
+    word=$(_clean_command_word "${words[$index]}")
+    case "$word" in
+      --) break ;;
+      --dry-run | --delete | :?*) return 1 ;;
+      --*) ;;
+      -*n* | -*d*) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+# Whether a gh fragment runs a pull-request subcommand that pushes or opens a
+# pull request for review: create, ready, reopen, or update-branch, judged by
+# the word in subcommand position rather than anywhere in the text.
+_pr_checks_gh_pr_starts_checks() {
+  local fragment="$1" word index
+  local -a words=()
+  while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$fragment")
+  index=$(_command_subcommand_index "$fragment" gh pr) || return 1
+  for ((index++; index < ${#words[@]}; index++)); do
+    word=$(_clean_command_word "${words[$index]}")
+    case "$word" in
+      -R | --repo) ((index++)) ;;
+      -*) ;;
+      create)
+        _command_subcommand_has_option "$fragment" gh pr --dry-run && return 1
+        return 0
+        ;;
+      ready)
+        _command_subcommand_has_option "$fragment" gh pr --undo && return 1
+        return 0
+        ;;
+      reopen | update-branch) return 0 ;;
+      *) return 1 ;;
+    esac
+  done
+  return 1
+}
+
+_pr_checks_command_pushed() {
+  local fragment
+  _hook_load_command_classifier || return 1
+  while IFS= read -r fragment; do
+    if _git_subcommand_is "$fragment" push; then
+      _pr_checks_git_push_updates "$fragment" && return 0
+    elif _command_subcommand_is "$fragment" gh pr; then
+      _pr_checks_gh_pr_starts_checks "$fragment" && return 0
+    fi
+  done < <(_hook_executable_fragments "$AGENTGUARD_CMD_TRIMMED")
+  return 1
+}
+
+# Prints the push evidence in `$1`: a bare pull-request URL line, or the
+# ref-update lines of a push summary (`To <remote>` followed by `* [new
+# branch] HEAD -> x`, `abc..def main -> main`, or a forced `+` update).
+# Rejected, up-to-date, and deleted refs carry no `->` update and print nothing.
+_pr_checks_output_evidence() {
+  printf '%s\n' "$1" |
+    grep -E '^https://github\.com/[^/[:space:]]+/[^/[:space:]]+/pull/[0-9]+[[:space:]]*$'
+  printf '%s\n' "$1" | grep -qE '^To [^[:space:]]+[[:space:]]*$' &&
+    printf '%s\n' "$1" |
+    grep -E '^[[:space:]]+([*+]|[0-9a-f]{7,}\.\.\.?[0-9a-f]{7,})[[:space:]].* -> [^[:space:]]+'
+}
+
+_pr_checks_key=''
+# In-process prefilters keep every other command free of extra subprocesses:
+# only `git ... push` or `gh ... pr` in command position (line start or after a
+# shell separator or quote, optionally behind assignments or common wrappers)
+# loads the classifier, so long text that merely mentions the words stays cheap.
+_pr_checks_separators=$';&|(`"\'\n'
+_pr_checks_wrappers='[[:alpha:]_][[:alnum:]_]*=[^[:space:]]*|sudo|env|command|nohup|exec|xargs|timeout[[:blank:]]+[^[:space:]]+'
+_pr_checks_lead="(^|[${_pr_checks_separators}]|\\\$\\()[[:blank:]]*((${_pr_checks_wrappers})[[:blank:]]+)*"
+_pr_checks_git_push="${_pr_checks_lead}git([[:blank:]]+[^[:space:]]+)*[[:blank:]]+push([[:space:]]|$)"
+_pr_checks_gh_pr="${_pr_checks_lead}gh([[:blank:]]+[^[:space:]]+)*[[:blank:]]+pr[[:space:]]"
+if [[ "$AGENTGUARD_CMD_TRIMMED" =~ $_pr_checks_git_push || "$AGENTGUARD_CMD_TRIMMED" =~ $_pr_checks_gh_pr ]] &&
+  _pr_checks_command_pushed; then
+  _pr_checks_key="command:$AGENTGUARD_CMD_TRIMMED"
+# Output evidence covers pushes run indirectly. Commands that are themselves
+# gh calls are skipped: their bare URLs come from reading or editing a pull
+# request, and a real `gh pr create` was already judged above.
+elif ! [[ "$AGENTGUARD_CMD_TRIMMED" =~ (^|[[:space:];\&\|\(])gh[[:space:]] ]]; then
+  _pr_checks_text="$_stdout"
+  # git push writes its summary to stderr; read it only when the raw payload
+  # could hold one.
+  case "${_HOOK_INPUT:-}" in
+    *"To "*" -> "*) _pr_checks_text="$_pr_checks_text"$'\n'"$(_hook_tool_stderr)" ;;
+  esac
+  case "$_pr_checks_text" in
+    *github.com/*/pull/* | *" -> "*)
+      _pr_checks_evidence=$(_pr_checks_output_evidence "$_pr_checks_text")
+      [ -n "$_pr_checks_evidence" ] && _pr_checks_key="output:$_pr_checks_evidence"
+      ;;
+  esac
+fi
+# Remind once per prompt for the same push: re-reading a captured pane or log
+# while monitoring must not repeat the reminder.
+if [ -n "$_pr_checks_key" ] && [ "$(_hook_hm_tool_status)" = "0" ] &&
+  _hook_once_per_prompt "pr-checks-$(printf '%s' "$_pr_checks_key" | cksum | tr -d ' ')"; then
+  _hook_remind "PR checks gate: if this pushed or opened a GitHub pull request, it is not done or green until its checks pass on the pushed commit. Watch them in the background (\`gh pr checks <pr> --repo <owner/repo> --watch\`) and report pending or failing checks instead of calling it green."
+fi
+
 # Let `hm` decide whether this completed tool event changes memory context.
 # The bash hook only passes the observed status/path facts.
 _hook_hm_tool_complete

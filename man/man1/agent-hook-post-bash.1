@@ -1,6 +1,6 @@
 .TH AGENT-HOOK-POST-BASH 1 "2026-06-30" "agentguard" "User Commands"
 .SH NAME
-agent-hook-post-bash \- scan agent shell command output after execution
+agent-hook-post-bash \- check agent shell commands and output after execution
 .SH SYNOPSIS
 .B agent-hook-post-bash
 .SH DESCRIPTION
@@ -9,12 +9,24 @@ reads an agent hook JSON payload from standard input, extracts command stdout
 from known agent payload shapes, and warns when output appears to contain
 high-confidence credentials such as private keys or common API token formats.
 .PP
+After a successful
+.B git push
+or
+.BR "gh pr create" ,
+.BR ready ,
+.BR reopen ,
+or
+.BR update-branch ,
+or output showing a push summary or a new pull-request URL, it reminds the
+agent once per prompt that the pull request is not done until its checks pass
+on the pushed commit.
+.PP
 The hook centralizes output extraction so agent-specific payload field names do
 not leak into local extension policy.
 .SH EXIT STATUS
 .TP
 .B 0
-The post-command scan completed. Credential findings are reported as warnings
-rather than blocks.
+The post-command checks completed. Credential findings and pull-request
+reminders are reported as warnings or reminders rather than blocks.
 .SH SEE ALSO
 .BR agent-hook-pre-bash (1)

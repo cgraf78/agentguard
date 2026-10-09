@@ -193,6 +193,33 @@ _assert_hook_median_under \
   "$PRE_MCP" \
   '{"tool_name":"functions.exec_command","tool_input":{"cmd":"true"}}'
 
+# Post-bash classifies only commands that pair `git`/`gh` with `push`/`pr` on
+# one line; everything else, including long text mentioning those words, must
+# stay off the classifier path.
+POST_BASH_HOOK="$BIN_DIR/agent-hook-post-bash"
+post_bash_heredoc=$(
+  printf 'python3 - <<EOF\n'
+  for _i in $(seq 1 80); do printf '# note %s: check git state, then push docs\n' "$_i"; done
+  printf 'EOF'
+)
+post_bash_heredoc_input=$(jq -cn --arg command "$post_bash_heredoc" \
+  '{tool_input:{command:$command},tool_response:{stdout:"",exit_code:0}}')
+
+_assert_hook_median_under \
+  "post-bash ordinary command stays fast" \
+  "$POST_BASH_HOOK" \
+  '{"tool_input":{"command":"ls"},"tool_response":{"stdout":"a b","exit_code":0}}'
+
+_assert_hook_median_under \
+  "post-bash push-named non-push command stays fast" \
+  "$POST_BASH_HOOK" \
+  '{"tool_input":{"command":"npm run push-docs"},"tool_response":{"stdout":"","exit_code":0}}'
+
+_assert_hook_median_under \
+  "post-bash long text mentioning git and push stays fast" \
+  "$POST_BASH_HOOK" \
+  "$post_bash_heredoc_input"
+
 # This synthetic 20-fragment path varied from 248ms to 513ms for the same hook
 # revision on hosted macOS runners. Keep enough host-load headroom to catch
 # gross classification regressions without failing on runner variance.
