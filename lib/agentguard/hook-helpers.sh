@@ -719,12 +719,41 @@ _hook_read_input() {
   fi
   [ ! -t 0 ] || return 1
   _HOOK_INPUT_ATTEMPTED=1
-  local input stdin_timeout stdin_drain_timeout chunk read_rc
+  local input stdin_timeout stdin_drain_timeout stdin_total_timeout stdin_drain_timeout_int
+  local chunk read_rc drain_deadline
   stdin_timeout="${AGENTGUARD_HOOK_STDIN_TIMEOUT:-0.05}"
   stdin_drain_timeout="${AGENTGUARD_HOOK_STDIN_DRAIN_TIMEOUT:-1}"
+  stdin_total_timeout="${AGENTGUARD_HOOK_STDIN_TOTAL_TIMEOUT:-30}"
+  case "$stdin_total_timeout" in
+    # More than 15 digits would overflow the $((10#...)) conversion below.
+    '' | *[!0-9]* | ????????????????*) stdin_total_timeout=30 ;;
+  esac
+  # Force base 10: without it, a value like 08 would be read as octal by
+  # $((...)) below and kill the hook with an arithmetic error.
+  stdin_total_timeout=$((10#$stdin_total_timeout))
+  # Bash 3.2 (still /bin/bash on macOS) rejects fractional `read -t`
+  # timeouts, so the bash-3-reachable branches below drain with an
+  # integer-coerced timeout; bash 4+ and the perl branch keep fractions.
+  stdin_drain_timeout_int="$stdin_drain_timeout"
+  if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+    case "$stdin_drain_timeout_int" in
+      '' | *[!0-9]*) stdin_drain_timeout_int=1 ;;
+    esac
+    stdin_drain_timeout_int=$((10#$stdin_drain_timeout_int))
+  fi
   # Some hook runners attach a non-tty stdin pipe before they have any payload
   # to send. A plain `cat` waits for EOF and can consume the runner's whole hook
   # timeout, so read at most the bytes that arrive promptly.
+  #
+  # Once the first byte arrives the producer is live, but on a loaded host it
+  # can be descheduled mid-payload for longer than one drain window (sixteen
+  # parallel 300 KB hook payloads did exactly this on macOS CI: one record
+  # landed truncated and its printf died with a broken pipe). An idle drain
+  # window is therefore not EOF: keep draining while bytes arrive, and stop
+  # on a real EOF or when the total bound below expires, so a producer
+  # stalled by the scheduler loses nothing and a dead one still cannot
+  # hang the hook. (A stall outlasting the total bound still truncates:
+  # the wait is bounded, not infinite.)
   if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] && [[ "$stdin_timeout" == *.* ]] &&
     command -v perl >/dev/null 2>&1; then
     input=$(
@@ -735,40 +764,94 @@ _hook_read_input() {
 
         my $timeout = shift @ARGV;
         my $drain_timeout = shift @ARGV;
+        my $total_timeout = shift @ARGV;
+        $total_timeout = 30 unless defined($total_timeout) && $total_timeout =~ /^\d+$/;
         my $select = IO::Select->new(*STDIN);
         my $input = "";
         if ($select->can_read($timeout)) {
           # The short timeout guards pipes with no payload. Once data starts,
-          # allow a bounded idle interval between chunks so large JSON is not
-          # truncated merely because the producer briefly loses the scheduler.
-          while ($select->can_read($drain_timeout)) {
-            my $chunk = "";
-            my $read = sysread(STDIN, $chunk, 65536);
-            last if !defined($read) || $read == 0;
-            $input .= $chunk;
+          # an idle drain window is not EOF: the producer may be descheduled
+          # on a loaded host, so keep waiting up to a bounded total instead
+          # of truncating the payload at the first quiet window.
+          my $deadline = time + $total_timeout;
+          while (1) {
+            if ($select->can_read($drain_timeout)) {
+              my $chunk = "";
+              my $read = sysread(STDIN, $chunk, 65536);
+              last if !defined($read) || $read == 0;
+              $input .= $chunk;
+              last if time >= $deadline;
+            } elsif (time >= $deadline) {
+              last;
+            }
           }
         }
         print $input;
-      ' "$stdin_timeout" "$stdin_drain_timeout"
+      ' "$stdin_timeout" "$stdin_drain_timeout" "$stdin_total_timeout"
     )
   elif [ "${BASH_VERSINFO[0]:-0}" -lt 4 ] && [[ "$stdin_timeout" == *.* ]]; then
     # Bash 3, still shipped as /bin/bash on macOS, rejects fractional timeouts.
     # Without Perl's `select`, fall back to an integer timeout only if bytes
     # are already ready so open-empty pipes still return promptly.
     IFS= read -r -t 0 -d '' input || return 1
-    IFS= read -r -t 1 -d '' input || true
+    drain_deadline=$((SECONDS + stdin_total_timeout))
+    while :; do
+      chunk=''
+      IFS= read -r -t "$stdin_drain_timeout_int" -d '' chunk
+      read_rc=$?
+      input+="$chunk"
+      if [ "$read_rc" -eq 0 ]; then
+        # Delimiter found: keep draining, but a producer that never
+        # pauses still cannot outrun the total bound (matches perl).
+        [ "$SECONDS" -lt "$drain_deadline" ] || break
+        continue
+      elif [ -n "$chunk" ]; then
+        # Partial chunk: EOF or a quiet window cut the read short. The next
+        # pass settles it, inside the total bound.
+        [ "$SECONDS" -lt "$drain_deadline" ] || break
+        continue
+      elif [ "$read_rc" -gt 128 ]; then
+        # Quiet window, no data: the producer may be descheduled. Wait on,
+        # but only inside the total bound.
+        [ "$SECONDS" -lt "$drain_deadline" ] && continue
+        break
+      else
+        break # EOF (or another read error): nothing more is coming
+      fi
+    done
   else
     # `read -t -d ''` applies one deadline to the entire payload. That can
     # truncate large command output on a loaded host even while bytes continue
-    # to arrive. Keep the short first-byte timeout, then reset a bounded
-    # per-chunk deadline. `-n` is supported by Bash 3.2; `-N` is not.
+    # to arrive. Keep the short first-byte timeout, then drain to EOF: a quiet
+    # drain window ends the read only once the total bound below expires.
+    # `-n` is supported by Bash 3.2; `-N` is not.
     IFS= read -r -t "$stdin_timeout" -d '' -n 1 input || return 1
+    drain_deadline=$((SECONDS + stdin_total_timeout))
     while :; do
       chunk=''
-      IFS= read -r -t "$stdin_drain_timeout" -d '' -n 4096 chunk
+      IFS= read -r -t "$stdin_drain_timeout_int" -d '' -n 4096 chunk
       read_rc=$?
       input+="$chunk"
-      [ "$read_rc" -eq 0 ] || break
+      if [ "$read_rc" -eq 0 ]; then
+        # Full chunk (or NUL delimiter): keep draining, but a producer
+        # that never pauses still cannot outrun the total bound
+        # (matches the perl branch).
+        [ "$SECONDS" -lt "$drain_deadline" ] || break
+        continue
+      elif [ -n "$chunk" ]; then
+        # Partial chunk: EOF or a quiet window cut the read short. The next
+        # pass settles it, inside the total bound.
+        [ "$SECONDS" -lt "$drain_deadline" ] || break
+        continue
+      elif [ "$read_rc" -gt 128 ]; then
+        # Quiet window, no data: the producer may be descheduled on a loaded
+        # host (the macOS CI truncation). Wait on, but only inside the total
+        # bound, so a dead producer cannot hang the hook.
+        [ "$SECONDS" -lt "$drain_deadline" ] && continue
+        break
+      else
+        break # EOF (or another read error): nothing more is coming
+      fi
     done
   fi
   # Non-interactive test shells and some hook launchers can present an already

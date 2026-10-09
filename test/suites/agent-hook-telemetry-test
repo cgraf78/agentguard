@@ -241,6 +241,35 @@ _assert_eq "concurrent: one record per hook" "16" "$(_record_count)"
 valid=$(for f in "$SESSION_DIR"/*.json; do jq -e '.payload.tool_response.stdout | length == 300000' "$f" >/dev/null && echo ok; done | wc -l | tr -d ' ')
 _assert_eq "concurrent: every record parses with full payload" "16" "$valid"
 
+# A producer descheduled mid-payload must not truncate the record: an idle
+# drain window is not EOF (macOS CI once lost one of sixteen 300 KB records
+# when a quiet 1 s window ended the stdin read early, and its printf died
+# with a broken pipe). The stall below is longer than the drain window, so
+# the old behavior truncates deterministically; the read must wait it out
+# inside its total bound instead. The timeout guard keeps a future
+# regression of that bound from hanging the suite.
+_fresh_root
+( { printf '%s' "${big_payload:0:150000}"; sleep 2; printf '%s' "${big_payload:150000}"; } 2>/dev/null |
+  AGENTGUARD_HOOK_STDIN_TIMEOUT=10 AGENTGUARD_HOOK_STDIN_DRAIN_TIMEOUT=1 \
+    AGENTGUARD_SESSION_ID="$TEST_SID" AGENTGUARD_NAME=agent \
+    _with_timeout 15 "$TELEMETRY_HOOK" >/dev/null 2>&1 )
+_assert_eq "stalled producer: one record" "1" "$(_record_count)"
+_assert_eq "stalled producer: full payload recorded" "300000" \
+  "$(_records | jq -r '.payload.tool_response.stdout | length')"
+
+# Same stall through the fractional-timeout path: on bash 3 (macOS
+# /bin/bash) with perl available this exercises the IO::Select drain loop,
+# which is where the production truncation happened (bash 3.2 with the
+# default fractional first-byte timeout).
+_fresh_root
+( { printf '%s' "${big_payload:0:150000}"; sleep 2; printf '%s' "${big_payload:150000}"; } 2>/dev/null |
+  AGENTGUARD_HOOK_STDIN_TIMEOUT=0.5 AGENTGUARD_HOOK_STDIN_DRAIN_TIMEOUT=1 \
+    AGENTGUARD_SESSION_ID="$TEST_SID" AGENTGUARD_NAME=agent \
+    _with_timeout 15 "$TELEMETRY_HOOK" >/dev/null 2>&1 )
+_assert_eq "stalled producer (fractional timeout): one record" "1" "$(_record_count)"
+_assert_eq "stalled producer (fractional timeout): full payload recorded" "300000" \
+  "$(_records | jq -r '.payload.tool_response.stdout | length')"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== retention ==="
