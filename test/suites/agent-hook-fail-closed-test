@@ -163,6 +163,38 @@ else
   _fail "stderr capture files are removed ($(ls -A "$_fc_capture_dir" 2>&1))"
 fi
 
+# A sandbox (Grok's Landlock workspace profile) can leave the capture dir in
+# place but refuse file creation inside it. Capture must then step aside
+# silently: a leaked redirection diagnostic is the first stderr line the host
+# shows, masking the real block reason. Root ignores mode bits, so skip there.
+if [ "$(id -u)" -ne 0 ]; then
+  chmod 500 "$_fc_capture_dir"
+  _fc_run agent-hook-pre-bash claude "$(_fc_bash_payload 'git push --force')"
+  chmod 700 "$_fc_capture_dir"
+  _assert_eq "unwritable capture dir: still blocks" "2" "$HOOK_EXIT"
+  _assert_contains "unwritable capture dir: block reason reaches host" \
+    "BLOCKED: git push --force" "$HOOK_STDERR"
+  _assert_not_contains "unwritable capture dir: no redirection diagnostic" \
+    "Permission denied" "$HOOK_STDERR"
+fi
+
+# Near the descriptor limit Bash creates the capture file, then fails to
+# allocate the spare descriptor for it. That failed open must not leave an
+# orphan behind: nothing else ever removes it. Sweep the limits around the
+# hook's own descriptor use so the failing window is hit on any Bash build.
+rm -f "$_fc_capture_dir"/* 2>/dev/null
+for _fc_nofile in 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  (
+    ulimit -n "$_fc_nofile" 2>/dev/null || exit 0
+    _fc_run agent-hook-pre-bash claude "$(_fc_bash_payload 'git push --force')"
+  ) >/dev/null 2>&1
+done
+if [ -z "$(ls -A "$_fc_capture_dir" 2>/dev/null)" ]; then
+  _pass "descriptor limit: no orphan capture files"
+else
+  _fail "descriptor limit: no orphan capture files ($(ls -A "$_fc_capture_dir" 2>&1))"
+fi
+
 # Telemetry must record the status the host actually received.
 _fc_install
 printf '%s\n' 'echo "$agentguard_fail_closed_unset_variable"' \
