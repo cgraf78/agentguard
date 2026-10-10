@@ -63,5 +63,6 @@ _hook_hm_session_start
 # the state-home tiers, so drop it at every session start. Runs after input
 # is read (above) so a JSON-only session id already refreshed the state dir.
 _hook_edit_churn_bypass_clear
+_hook_state_prune
 _hook_source_extensions
 _hook_finish

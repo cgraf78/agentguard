@@ -252,9 +252,14 @@ MOCK
 chmod +x "$MOCK_FAILED_STATE_STOP_DIR/bin/term-notify-sound"
 touch "$MOCK_FAILED_STATE_STOP_DIR/not-a-directory"
 FAILED_STATE_STOP_NOTIFY_MARKER="$MOCK_FAILED_STATE_STOP_DIR/stop-notify.log"
+# Every state tier must be unusable: the root resolver falls back past an
+# unwritable tier, so blocking only XDG_RUNTIME_DIR would land on (and write
+# into) the real ~/.local/state.
 XDG_RUNTIME_DIR="$MOCK_FAILED_STATE_STOP_DIR/not-a-directory" \
+  XDG_STATE_HOME="$MOCK_FAILED_STATE_STOP_DIR/not-a-directory" \
+  HOME="$MOCK_FAILED_STATE_STOP_DIR/not-a-directory" \
   AGENTGUARD_SESSION_ID="$TEST_SID-failed-state" \
-  TMPDIR="$TEST_TMPDIR" \
+  TMPDIR="$MOCK_FAILED_STATE_STOP_DIR/not-a-directory" \
   AGENTGUARD_NAME="agent" \
   TERM_NOTIFY_MARKER="$FAILED_STATE_STOP_NOTIFY_MARKER" \
   PATH="$MOCK_FAILED_STATE_STOP_DIR/bin:$PATH" \

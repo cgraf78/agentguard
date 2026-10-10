@@ -291,22 +291,94 @@ _hook_codex_process_key() {
 # available, so hooks never hard-fail. Threat model: HOME-present
 # deployments are supported; the tmp fallback has no ownership/symlink
 # validation (pre-existing hardening follow-up).
-_hook_state_root() {
-  local base=''
+#
+# A tier is used only if this process can write it. A sandboxed runtime can
+# deny writes to a tier that exists and looks writable: Grok's Landlock
+# workspace profile denies $XDG_RUNTIME_DIR while hooks still see it set, and
+# Landlock does not restrict access(2), so `test -w` passes there. Each
+# candidate is therefore probed with a real write (see _hook_state_tier_ok),
+# and the first writable tier in the fixed order wins. The sandbox is fixed
+# for a session's lifetime, so every hook of a session lands on the same
+# tier and counters never split; an unsandboxed session keeps the runtime
+# tier exactly as before, so a stale same-key dir in a later tier (pid keys
+# repeat after reboot) is never adopted. The tmp fallback is the last resort
+# and is never probed.
+#
+# Cost: probes are builtin redirections. The one exception is a missing,
+# denied runtime root (a sandboxed agent after reboot, before any
+# unsandboxed hook has created it), which pays a failing mkdir per hook.
+#
+# Sets _HOOK_STATE_ROOT and _HOOK_STATE_DURABLE (1 for the XDG_STATE_HOME and
+# ~/.local/state tiers, which nothing wipes at logout; never for the runtime
+# tier or the unhardened tmp fallback). Cached per session key and
+# environment.
+_hook_resolve_state_root() {
+  local key="$1" root runtime='' state_home='' cache
+  # The answer depends on the env as well as the key, and refreshes can run
+  # again after either changes.
+  cache="$key|${XDG_RUNTIME_DIR-}|${XDG_STATE_HOME-}|${HOME-}|${TMPDIR-}"
+  if [ -n "${_HOOK_STATE_ROOT:-}" ] && [ "${_HOOK_STATE_ROOT_KEY-}" = "$cache" ]; then
+    return 0
+  fi
   case "${XDG_RUNTIME_DIR:-}" in
-    /*) base="$XDG_RUNTIME_DIR" ;;
+    /*) runtime="$XDG_RUNTIME_DIR/agentguard/hook-state" ;;
   esac
-  if [ -z "$base" ]; then
-    case "${XDG_STATE_HOME:-}" in
-      /*) base="$XDG_STATE_HOME" ;;
-    esac
-  fi
-  [ -n "$base" ] || { [ -n "${HOME:-}" ] && base="$HOME/.local/state"; }
-  if [ -n "$base" ]; then
-    printf '%s/agentguard/hook-state' "$base"
+  case "${XDG_STATE_HOME:-}" in
+    /*) state_home="$XDG_STATE_HOME/agentguard/hook-state" ;;
+  esac
+  _HOOK_STATE_ROOT_KEY="$cache"
+  _HOOK_STATE_DURABLE=''
+  for root in "$runtime" "$state_home" "${HOME:+$HOME/.local/state/agentguard/hook-state}"; do
+    [ -n "$root" ] || continue
+    _hook_state_tier_ok "$root" "$key" || continue
+    _HOOK_STATE_ROOT="$root"
+    [ "$root" = "$runtime" ] || _HOOK_STATE_DURABLE=1
+    return 0
+  done
+  _HOOK_STATE_ROOT="${TMPDIR:-/tmp}/agentguard-hook-state-$(id -u 2>/dev/null || echo 0)"
+}
+
+# Whether this process can write hook state under ROOT for KEY. Probes the
+# nearest existing level with a zero-byte append: a builtin redirection, so
+# no fork on the hot path, and it never changes file contents. Only a missing
+# root is created, privately, as the first writer would create it anyway.
+_hook_state_tier_ok() {
+  local root="$1" key="$2" dir="$1/$2"
+  if [ -d "$dir" ]; then
+    { : >>"$dir/.writable"; } 2>/dev/null
+  elif [ -d "$root" ]; then
+    { : >>"$root/.writable"; } 2>/dev/null
   else
-    printf '%s/agentguard-hook-state-%s' "${TMPDIR:-/tmp}" "$(id -u 2>/dev/null || echo 0)"
+    _hook_mkstate "$root" && { : >>"$root/.writable"; } 2>/dev/null
   fi
+}
+
+# Durable-tier session state outlives logout, so session start removes
+# session dirs with nothing written for AGENTGUARD_STATE_PRUNE_DAYS (default
+# 30). There is deliberately no SessionEnd removal: Claude --resume, Codex
+# resume, and Grok reuse the session key and expect their markers (the Hive
+# Memory context marker, churn counters, the bypass) to survive. A session
+# idle past the window loses them, as a runtime-tier session does at logout.
+# Counter rewrites do not bump a session dir's mtime, so a dir is stale only
+# when nothing inside it is recent either. A live session that writes
+# nothing for the whole window is pruned too; it starts over, as a
+# runtime-tier session does after logout. Runs once per session start, never
+# on the per-tool hot path, and never under the tmp fallback, where the tree
+# may be another user's.
+_hook_state_prune() {
+  local days="${AGENTGUARD_STATE_PRUNE_DAYS:-30}" dir
+  [ -n "${_HOOK_STATE_DURABLE:-}" ] || return 0
+  [ -d "${_HOOK_STATE_ROOT:-}" ] || return 0
+  # 0 (or anything non-numeric) disables pruning: `-mtime -0` matches nothing,
+  # so every day-old dir would look stale however recently it was written.
+  case "$days" in '' | *[!0-9]* | 0 | 0*) return 0 ;; esac
+  while IFS= read -r dir; do
+    [ -n "$dir" ] || continue
+    [ "$dir" != "${_HOOK_STATE_DIR:-}" ] || continue
+    [ -z "$(find "$dir" -mtime -"$days" -print 2>/dev/null | head -n 1)" ] || continue
+    rm -rf -- "$dir" 2>/dev/null || true
+  done < <(find "$_HOOK_STATE_ROOT" -mindepth 1 -maxdepth 1 -type d \
+    -mtime +"$days" -print 2>/dev/null)
 }
 
 # Create a hook state directory (and parents) privately. XDG_RUNTIME_DIR is
@@ -527,7 +599,8 @@ _hook_refresh_state_dir() {
   _HOOK_INPUT_SESSION="$input_session"
   _HOOK_INPUT_EVENT="$input_event"
   _HOOK_SESSION_KEY="$session_key"
-  _HOOK_STATE_DIR="$(_hook_state_root)/$_HOOK_SESSION_KEY"
+  _hook_resolve_state_root "$_HOOK_SESSION_KEY"
+  _HOOK_STATE_DIR="$_HOOK_STATE_ROOT/$_HOOK_SESSION_KEY"
   if [ -n "${_HOOK_INPUT+x}" ]; then
     _HOOK_INPUT_STATE_REFRESHED=1
   else
@@ -741,7 +814,7 @@ _hook_edit_churn_bypass_clear() {
 # Every plausible per-user hook state root, most-preferred first. Hook
 # processes often run with XDG_* scrubbed from their environment, so an
 # agent-shell helper must probe each root instead of trusting its own env
-# (mirrors the _hook_state_root tiers without picking one).
+# (mirrors the _hook_resolve_state_root tiers without picking one).
 _hook_state_roots() {
   local root seen=' '
   for root in \

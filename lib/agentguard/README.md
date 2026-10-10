@@ -218,6 +218,18 @@ directory: an absolute `$XDG_RUNTIME_DIR/agentguard/hook-state` when available
 when neither an absolute XDG root nor `HOME` is available. Relative XDG roots
 are ignored as required by the XDG base-directory contract.
 
+A tier is used only when the hook can actually write it. A sandboxed agent can
+deny writes to a tier that exists and passes `test -w` (Grok's Landlock
+`workspace` profile denies `$XDG_RUNTIME_DIR` while hooks still see it set), so
+each hook probes with a real zero-byte append and takes the first tier that
+accepts it, in the fixed order above. The sandbox is fixed for a session's
+lifetime, so all of a session's hooks agree on the tier, and an unsandboxed
+session keeps the runtime tier as before. The `$XDG_STATE_HOME` and `~/.local/state` tiers survive logout,
+so SessionStart prunes their session directories with nothing written for
+`AGENTGUARD_STATE_PRUNE_DAYS` (default 30; `0` disables pruning). SessionEnd
+removes nothing, because resumed sessions reuse their key and expect their
+markers. The tmp fallback is never pruned.
+
 Launchers should set `AGENTGUARD_NAME` with `AGENTGUARD_SESSION_ID` when they know
 the concrete agent. `AGENTGUARD_SESSION_ID` alone falls back to the generic
 `agent` identity.
