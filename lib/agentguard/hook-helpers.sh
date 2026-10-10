@@ -113,16 +113,26 @@ _hook_capture_stderr() {
     return 0
   fi
   exec {_HOOK_STDERR_FD}>&2 || return 0
-  # noclobber makes the open exclusive, so a planted file or symlink at this
-  # name is refused instead of followed.
+  # Open the file on a spare descriptor first, then move stderr onto that
+  # same open file, so it is never reopened by name. noclobber makes the
+  # open exclusive: a planted file or symlink at this name is refused
+  # instead of followed. The group silences only the open's diagnostic and
+  # restores fd 2 afterwards; the spare descriptor stays open. A bare
+  # `exec 2>"$file"` would print a failure on the real stderr, and a sandbox
+  # that keeps the dir but denies creates in it (Grok's Landlock workspace
+  # profile vs. $XDG_RUNTIME_DIR) would show that line ahead of the block
+  # reason. A caller's own noclobber setting is kept.
+  local capture_fd noclobber=''
+  case $- in *C*) noclobber=1 ;; esac
   set -C
-  if exec 2>"$file"; then
+  if { exec {capture_fd}>"$file"; } 2>/dev/null; then
+    exec 2>&"$capture_fd" {capture_fd}>&-
     _HOOK_STDERR_FILE="$file"
   else
     exec {_HOOK_STDERR_FD}>&-
     _HOOK_STDERR_FD=''
   fi
-  set +C
+  [ -n "$noclobber" ] || set +C
 }
 
 # Restore the real stderr, replay what the hook wrote, and report whether any
