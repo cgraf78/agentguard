@@ -131,6 +131,10 @@ _hook_capture_stderr() {
   else
     exec {_HOOK_STDERR_FD}>&-
     _HOOK_STDERR_FD=''
+    # Near the descriptor limit Bash creates the file and then fails to
+    # allocate the spare descriptor, so a failed open can still leave an
+    # orphan. Unlinking never follows a planted symlink at this name.
+    rm -f -- "$file" 2>/dev/null
   fi
   [ -n "$noclobber" ] || set +C
 }
