@@ -478,4 +478,68 @@ rm -f "$out_file" "$err_file"
 _assert_exit "post-edit missing sley: exits broken" 2 "$HOOK_EXIT"
 _assert_contains "post-edit missing sley: reports install issue" "sley command missing" "$HOOK_STDERR"
 
+echo "=== state root: sandbox-denied runtime tier ==="
+
+# Grok's sandbox denies the runtime tier while XDG_RUNTIME_DIR stays set.
+# The counters must land in the writable state tier and keep counting there,
+# or the churn guard never sees a second edit. Mode bits stand in for the
+# sandbox; root ignores them.
+_sr_presence() { if [ -d "$1" ]; then echo present; else echo absent; fi; }
+if [ "$(id -u)" -ne 0 ]; then
+  sr_run="$TEST_TMPDIR/sr-run"
+  sr_state="$TEST_TMPDIR/sr-state"
+  sr_root="$sr_state/agentguard/hook-state"
+  mkdir -p "$sr_run/agentguard/hook-state" "$sr_state"
+  chmod 500 "$sr_run/agentguard/hook-state"
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  _RUN_HOOK_ENV=(
+    AGENTGUARD_SESSION_ID="sr-edit"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="agent"
+    CODEX_THREAD_ID=
+    XDG_RUNTIME_DIR="$sr_run"
+    XDG_STATE_HOME="$sr_state"
+  )
+  for _sr_i in 1 2 3; do
+    _run_hook_env "$POST_EDIT" '{"tool_input":{"file_path":"/a/sr.py"}}'
+  done
+  _sr_counter=$(cat "$sr_root"/sr-edit/edit-churn/* 2>/dev/null)
+  _assert_eq "denied runtime tier: churn counts in the state tier" "3" "$_sr_counter"
+  _assert_eq "denied runtime tier: state dir is private" "700" \
+    "$(stat -c '%a' "$sr_root/sr-edit" 2>/dev/null ||
+      stat -f '%Lp' "$sr_root/sr-edit")"
+
+  # Resume (Claude --resume, Codex, Grok) reuses the session key, so session
+  # end must leave durable state in place for it.
+  _run_hook_env "$BIN_DIR/agent-hook-session-end" '{"session_id":"sr-edit"}'
+  _assert_eq "session end: durable session state kept for resume" "3" \
+    "$(cat "$sr_root"/sr-edit/edit-churn/* 2>/dev/null)"
+
+  # Session start prunes durable-tier dirs nothing has written to for
+  # AGENTGUARD_STATE_PRUNE_DAYS. A dir whose own mtime is old but whose
+  # counters are recent is still live: counter rewrites leave the dir alone.
+  # The starting session's own dir is never pruned, however old.
+  mkdir -p "$sr_root/sr-stale/edit-churn" "$sr_root/sr-live/edit-churn" \
+    "$sr_root/sr-other"
+  printf '1\n' >"$sr_root/sr-stale/edit-churn/x"
+  printf '1\n' >"$sr_root/sr-live/edit-churn/x"
+  touch -t 202001010000 "$sr_root/sr-stale/edit-churn/x" \
+    "$sr_root/sr-stale/edit-churn" "$sr_root/sr-stale" "$sr_root/sr-live"
+  for _sr_entry in "$sr_root"/sr-edit/edit-churn/* "$sr_root/sr-edit/edit-churn" \
+    "$sr_root/sr-edit/.writable" "$sr_root/sr-edit"; do
+    [ -e "$_sr_entry" ] && touch -t 202001010000 "$_sr_entry"
+  done
+  _run_hook_env "$SESSION_START" '{"session_id":"sr-edit"}'
+  _assert_eq "session start: stale durable state pruned" "absent" \
+    "$(_sr_presence "$sr_root/sr-stale")"
+  _assert_eq "session start: old dir with recent counters kept" "present" \
+    "$(_sr_presence "$sr_root/sr-live")"
+  _assert_eq "session start: unrelated live session kept" "present" \
+    "$(_sr_presence "$sr_root/sr-other")"
+  _assert_eq "session start: own stale session dir kept" "present" \
+    "$(_sr_presence "$sr_root/sr-edit")"
+  unset _RUN_HOOK_ENV
+  chmod 700 "$sr_run/agentguard/hook-state"
+fi
+
 _test_summary
