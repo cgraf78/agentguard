@@ -29,6 +29,11 @@ unset XDG_RUNTIME_DIR XDG_STATE_HOME XDG_CACHE_HOME
 # where that contract is under test.
 unset AGENTGUARD_EDIT_CHURN_WARN AGENTGUARD_EDIT_CHURN_BLOCK \
   AGENTGUARD_EDIT_CHURN_BYPASS
+# The hooks under test are Bash scripts, so a non-interactive Bash sources the
+# caller's BASH_ENV (ENV under sh) at startup. A dotfiles env file there
+# re-exports the churn thresholds scrubbed above, and anything else it sets,
+# into every hook process. Suites that exercise BASH_ENV set it explicitly.
+unset BASH_ENV ENV
 # A machine that protects a bare-Git work tree exports these (e.g. a dotfiles
 # bare repo). Scrub them so non-protected fixtures stay hermetic regardless of
 # the running session; the protected-bare suites set them explicitly via
