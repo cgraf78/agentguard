@@ -200,6 +200,7 @@ printf '%s\n' '#!/usr/bin/env bash' 'source "$1"' \
 chmod +x "$_fake_probe"
 if _real_bash=$(command -v bash) && [ -x "$_real_bash" ] &&
   cp "$_real_bash" "$_fake_agent_dir/muse" 2>/dev/null &&
+  cp "$_real_bash" "$_fake_agent_dir/muse-bin-1.4.3-R5018.1" 2>/dev/null &&
   cp "$_real_bash" "$_fake_agent_dir/codex" 2>/dev/null &&
   cp "$_real_bash" "$_fake_agent_dir/grok" 2>/dev/null &&
   cp "$_real_bash" "$_fake_agent_dir/gemini" 2>/dev/null &&
@@ -216,6 +217,22 @@ if _real_bash=$(command -v bash) && [ -x "$_real_bash" ] &&
     "$_fake_agent_dir/muse" -c '"$0" "$1"; :' "$_fake_probe" "$HELPERS" 2>/dev/null)
   _assert_eq "ancestor key: muse resolves to parent pid" \
     "${_ancestor_result%%:*}" "${_ancestor_result##*:}"
+  # Versioned Muse installs run a versioned binary (muse-bin-<version>)
+  # whose comm truncates to 15 characters (muse-bin-1.4.3-); the
+  # resolver must still attribute the tool shell to that agent pid.
+  _fake_versioned_comm=$("$_fake_agent_dir/muse-bin-1.4.3-R5018.1" -c 'ps -o comm= -p "$$" 2>/dev/null' | tr -d '[:space:]')
+  case "$_fake_versioned_comm" in
+    muse-bin-*)
+      # shellcheck disable=SC2016 # Single quotes are intentional: expansion happens in the fake agent child, not here.
+      _ancestor_result=$(AGENTGUARD_PROCESS_DETECT=1 \
+        "$_fake_agent_dir/muse-bin-1.4.3-R5018.1" -c '"$0" "$1"; :' "$_fake_probe" "$HELPERS" 2>/dev/null)
+      _assert_eq "ancestor key: versioned muse-bin resolves to parent pid" \
+        "${_ancestor_result%%:*}" "${_ancestor_result##*:}"
+      ;;
+    *)
+      _pass "ancestor key: skipped versioned muse-bin (cannot fake versioned comm here)"
+      ;;
+  esac
   # shellcheck disable=SC2016 # Single quotes are intentional: expansion happens in the fake agent child, not here.
   _ancestor_result=$(AGENTGUARD_PROCESS_DETECT=1 \
     "$_fake_agent_dir/codex" -c '"$0" "$1"; :' "$_fake_probe" "$HELPERS" 2>/dev/null)
@@ -243,6 +260,7 @@ if _real_bash=$(command -v bash) && [ -x "$_real_bash" ] &&
 else
   _have_fake_agents=0
   _pass "ancestor key: skipped (cannot fake agent comm here)"
+  _pass "ancestor key: skipped versioned muse-bin variant"
   _pass "ancestor key: skipped codex variant"
   _pass "ancestor key: skipped grok variant"
   _pass "ancestor key: skipped gemini variant"
