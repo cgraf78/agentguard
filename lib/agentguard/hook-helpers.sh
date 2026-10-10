@@ -414,8 +414,11 @@ _hook_session_key_safe() {
 # tool-shell command and its hooks resolve different state dirs. Defined up
 # here because the source-time state refresh calls it. Muse has no stable
 # runtime id, so its key is the bare agent pid; Codex/Grok/Gemini namespace
-# theirs. Match on the executable name only, never argv (see detect.sh for why
-# argv lies). No `claude` branch: hooks never synthesize a claude-* key
+# theirs. Some Muse installs run a versioned binary (muse-bin-<version>)
+# whose comm truncates to 15 characters, so the bare muse-bin- prefix
+# matches every version. Match on the executable name only, never argv
+# (see detect.sh for why argv lies). No `claude` branch: hooks never
+# synthesize a claude-* key
 # (Claude sessions always carry a session id), so emitting one would plant
 # state no hook reads.
 _hook_agent_ancestor_key() {
@@ -439,7 +442,7 @@ _hook_agent_ancestor_key() {
       while (pid != "" && pid != "0" && !seen[pid]++) {
         name = command[pid]
         sub(/^.*\//, "", name)
-        if (name == "muse.real" || name == "muse") { print pid; exit 0 }
+        if (name == "muse.real" || name == "muse" || name ~ /^muse-bin-/) { print pid; exit 0 }
         if (name == "codex") { print "codex-" pid; exit 0 }
         if (name == "grok") { print "grok-" pid; exit 0 }
         if (name == "gemini") { print "gemini-" pid; exit 0 }
