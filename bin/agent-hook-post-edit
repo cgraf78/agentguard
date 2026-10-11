@@ -89,13 +89,22 @@ _post_edit_lint_dir() {
   ) || status=$?
   [ "$status" -eq 1 ] || return 0
   # Bound the context: a malformed generated file can produce many findings,
-  # and the first lines already tell the agent what to fix.
+  # and the first lines already tell the agent what to fix. Say when lines
+  # were cut so the agent knows the list is incomplete.
+  local total
+  total=$(printf '%s\n' "$output" | wc -l | tr -d ' ')
   output=$(printf '%s\n' "$output" | sed -n '1,40p')
-  _hook_warn "Schema or lint validation failed for edited config files. Fix these before continuing:
+  [ "$total" -le 40 ] || output="$output
+... $((total - 40)) more lines not shown; run checkrun lint on these files for the full report."
+  # Lint covers whole files, including spelling (typos), so findings can
+  # predate this edit. Steer the agent toward schema and syntax errors and
+  # away from renaming keys a tool reads just to satisfy a spell check.
+  _hook_warn "Lint reported findings in edited config files. Fix schema and syntax errors and anything this edit introduced; findings elsewhere may predate it, and do not rename keys or values a tool reads only to satisfy a spelling check:
 $output"
 }
 
-# Structured config formats whose lint is mainly parsing and schema validation.
+# Structured config formats that Checkrun may validate against a schema
+# association; their lint is mostly schema, syntax, and spelling checks.
 _post_edit_is_config() {
   case "$1" in
     *.json | *.jsonc | *.json5 | *.yaml | *.yml | *.toml) return 0 ;;

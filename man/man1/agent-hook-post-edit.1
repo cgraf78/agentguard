@@ -16,6 +16,10 @@ It then passes edited JSON, JSONC, JSON5, YAML, and TOML files to
 and returns its findings (exit status 1) as agent context, bounded to the
 first 40 lines, so schema errors surface at edit time even in configs no
 commit checks.
+Lint covers whole files, so findings can predate the edit.
+What it checks is Checkrun's policy: schema associations, syntax checks its
+linters perform, and spelling; a YAML or JSON5 file without a schema
+association is not parse-checked.
 Lint that cannot run is not reported.
 Code files and all other lint and verification remain native commit-hook
 responsibilities so human and agent commit workflows share the same

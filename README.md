@@ -416,8 +416,11 @@ To add a new managed agent runtime:
   matches the old per-file path. It then lints edited structured config files
   (JSON, JSONC, JSON5, YAML, TOML) with `sley hook lint --stdin` and returns
   findings as agent context, so a schema error surfaces at edit time, including
-  in generated or untracked configs no commit checks. Code files, and all
-  other lint and verification policy, stay with the native commit hooks.
+  in generated or untracked configs no commit checks. What is checked is
+  Checkrun's policy (schema associations, its linters' syntax checks, and
+  spelling), so findings can predate the edit, and a YAML or JSON5 file with
+  no schema association is not parse-checked. Code files, and all other lint
+  and verification policy, stay with the native commit hooks.
 - `agent-hook-pre-mcp` guards MCP calls: it blocks a server after repeated
   failures, warns on exact `search_files` leaf-tool calls without a path
   filter, and warns once on exact `knowledge_load` leaf-tool calls because

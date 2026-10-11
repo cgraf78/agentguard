@@ -573,6 +573,8 @@ _assert_contains "post-edit config: long reports keep their first findings" \
   "many.toml:40:1: finding 40" "$config_context"
 _assert_not_contains "post-edit config: long reports are bounded" \
   "many.toml:41:1: finding 41" "$config_context"
+_assert_contains "post-edit config: bounded reports say how much was cut" \
+  "20 more lines not shown" "$config_context"
 
 # A multi-file patch lints only its structured config files, in one batch.
 config_patch=$(jq -n --arg patch "$(printf '%s\n' \
