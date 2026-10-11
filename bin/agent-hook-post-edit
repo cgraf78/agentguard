@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # agent-hook-post-edit — PostToolUse handler for Edit|Write.
-# Auto-formats edited files.
+# Auto-formats edited files and validates edited structured config files.
 
 set -u
 _HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}" # captured before sourcing so _hook_source_extensions finds agent/local variants
@@ -71,6 +71,38 @@ _post_edit_format_dir() {
   )
 }
 
+# Lint one directory's edited structured config files with `sley hook lint
+# --stdin` and turn findings into agent context. Commit readiness stays in the
+# VCS hook; this only closes the gap where an agent edits a config that no
+# commit ever checks (a generated ~/.codex/config.toml, a self-written app
+# config) or would otherwise learn about a schema error only at commit time.
+# Code files keep deferring lint to the commit gate: whole-file lint there
+# would surface unrelated pre-existing findings and add latency to every edit.
+# Only exit 1 (findings) is reported. Exit 2 means lint did not run (no
+# autolint, a tool error), which the commit gate already reports.
+_post_edit_lint_dir() {
+  local dir="$1" files="$2" caller="$3" output status
+  status=0
+  output=$(
+    cd "$dir" || exit 2
+    SLEY_CALLER="$caller" NO_COLOR=1 sley hook lint --stdin <<<"$files" 2>&1
+  ) || status=$?
+  [ "$status" -eq 1 ] || return 0
+  # Bound the context: a malformed generated file can produce many findings,
+  # and the first lines already tell the agent what to fix.
+  output=$(printf '%s\n' "$output" | sed -n '1,40p')
+  _hook_warn "Schema or lint validation failed for edited config files. Fix these before continuing:
+$output"
+}
+
+# Structured config formats whose lint is mainly parsing and schema validation.
+_post_edit_is_config() {
+  case "$1" in
+    *.json | *.jsonc | *.json5 | *.yaml | *.yml | *.toml) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 _post_edit_format_all() {
   local fp abs_fp dir idx i
   local -a _dirs=() _lists=()
@@ -115,11 +147,19 @@ $abs_fp"
   # skipping save-time formatting.
   _hook_require_sley || return $?
 
-  local caller
+  local caller configs
   caller=$(_hook_agent_name)
   i=0
   while [ "$i" -lt "${#_dirs[@]}" ]; do
     _post_edit_format_dir "${_dirs[i]}" "${_lists[i]}" "$caller"
+    # Lint after formatting so findings describe the bytes left on disk.
+    configs=
+    while IFS= read -r fp; do
+      _post_edit_is_config "$fp" || continue
+      configs="${configs:+$configs
+}$fp"
+    done <<<"${_lists[i]}"
+    [ -z "$configs" ] || _post_edit_lint_dir "${_dirs[i]}" "$configs" "$caller"
     i=$((i + 1))
   done
 }

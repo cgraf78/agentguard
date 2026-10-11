@@ -478,6 +478,122 @@ rm -f "$out_file" "$err_file"
 _assert_exit "post-edit missing sley: exits broken" 2 "$HOOK_EXIT"
 _assert_contains "post-edit missing sley: reports install issue" "sley command missing" "$HOOK_STDERR"
 
+echo "=== post-edit: validates edited structured config files ==="
+
+# The mock lint reports a finding for files containing BAD, cannot run for
+# files containing NOLINT, and prints a 60-line report for files containing
+# MANY, so each case drives one lint outcome.
+config_home=$(_tmpdir)
+_install_hook_fixture "$config_home/.local" agent-hook-post-edit
+cat >"$config_home/.local/bin/sley" <<'MOCK'
+#!/usr/bin/env bash
+[ "$1" = hook ] || exit 2
+case "$2 ${3:-}" in
+  "format --stdin")
+    cat >/dev/null
+    ;;
+  "lint --stdin")
+    files=$(cat)
+    printf 'lint:%s:%s\n' "${SLEY_CALLER:-}" "$(printf '%s' "$files" | tr '\n' ',')" >>"$SLEY_HOOK_LOG"
+    status=0
+    while IFS= read -r file; do
+      if grep -q NOLINT "$file"; then
+        printf 'autolint unavailable\n'
+        exit 2
+      elif grep -q MANY "$file"; then
+        for line in $(seq 1 60); do printf '%s:%s:1: finding %s\n' "$file" "$line" "$line"; done
+        status=1
+      elif grep -q BAD "$file"; then
+        printf '%s:1:1: Test schema: value is not valid\n' "$file"
+        status=1
+      fi
+    done <<<"$files"
+    exit "$status"
+    ;;
+  *)
+    exit 2
+    ;;
+esac
+MOCK
+chmod +x "$config_home/.local/bin/sley"
+config_dir=$(_tmpdir)
+config_log="$config_dir/sley-hook.log"
+
+_post_edit_config() {
+  local payload="$1" agent="${2:-claude}" out_file err_file
+  : >"$config_log"
+  HOOK_EXIT=0
+  out_file=$(mktemp "$TEST_TMPDIR/out.XXXXXX")
+  err_file=$(mktemp "$TEST_TMPDIR/err.XXXXXX")
+  printf '%s' "$payload" |
+    HOME="$config_home" \
+      AGENTGUARD_SESSION_ID="$TEST_SID" \
+      AGENTGUARD_NAME="$agent" \
+      TMPDIR="$TEST_TMPDIR" \
+      CODEX_THREAD_ID="" \
+      SLEY_HOOK_LOG="$config_log" \
+      "$config_home/.local/bin/agent-hook-post-edit" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
+  HOOK_STDOUT=$(cat "$out_file")
+  rm -f "$out_file" "$err_file"
+}
+
+printf '{"ok": true}\n' >"$config_dir/valid.json"
+_post_edit_config "{\"tool_input\":{\"file_path\":\"$config_dir/valid.json\"}}"
+_assert_eq "post-edit config: valid config exits 0" "0" "$HOOK_EXIT"
+_assert_contains "post-edit config: lints the edited config" \
+  "lint:claude:$config_dir/valid.json" "$(cat "$config_log")"
+_assert_eq "post-edit config: valid config adds no context" "{}" "$HOOK_STDOUT"
+
+printf 'key = "BAD"\n' >"$config_dir/invalid.toml"
+_post_edit_config "{\"tool_input\":{\"file_path\":\"$config_dir/invalid.toml\"}}"
+_assert_eq "post-edit config: invalid config still exits 0" "0" "$HOOK_EXIT"
+_assert_contains "post-edit config: finding reaches the agent context" \
+  "$config_dir/invalid.toml:1:1: Test schema: value is not valid" \
+  "$(jq -r '.hookSpecificOutput.additionalContext' <<<"$HOOK_STDOUT")"
+
+_post_edit_config "{\"tool_input\":{\"file_path\":\"$config_dir/invalid.toml\"}}" codex
+_assert_eq "post-edit config: strict agents get only hookSpecificOutput" \
+  '["hookSpecificOutput"]' "$(jq -c 'keys' <<<"$HOOK_STDOUT")"
+_assert_contains "post-edit config: strict agents still get the finding" \
+  "value is not valid" "$(jq -r '.hookSpecificOutput.additionalContext' <<<"$HOOK_STDOUT")"
+
+printf 'x = "BAD"\n' >"$config_dir/code.py"
+_post_edit_config "{\"tool_input\":{\"file_path\":\"$config_dir/code.py\"}}"
+_assert_eq "post-edit config: code files are not linted" "" "$(cat "$config_log")"
+_assert_eq "post-edit config: code files add no context" "{}" "$HOOK_STDOUT"
+
+printf 'key: NOLINT\n' >"$config_dir/unavailable.yaml"
+_post_edit_config "{\"tool_input\":{\"file_path\":\"$config_dir/unavailable.yaml\"}}"
+_assert_eq "post-edit config: lint that cannot run adds no context" "{}" "$HOOK_STDOUT"
+
+printf 'key = "MANY"\n' >"$config_dir/many.toml"
+_post_edit_config "{\"tool_input\":{\"file_path\":\"$config_dir/many.toml\"}}"
+config_context=$(jq -r '.hookSpecificOutput.additionalContext' <<<"$HOOK_STDOUT")
+_assert_contains "post-edit config: long reports keep their first findings" \
+  "many.toml:40:1: finding 40" "$config_context"
+_assert_not_contains "post-edit config: long reports are bounded" \
+  "many.toml:41:1: finding 41" "$config_context"
+
+# A multi-file patch lints only its structured config files, in one batch.
+config_patch=$(jq -n --arg patch "$(printf '%s\n' \
+  "*** Begin Patch" \
+  "*** Update File: $config_dir/code.py" \
+  "@@" \
+  "-old" \
+  "+new" \
+  "*** Update File: $config_dir/valid.json" \
+  "@@" \
+  "-old" \
+  "+new" \
+  "*** Update File: $config_dir/invalid.toml" \
+  "@@" \
+  "-old" \
+  "+new" \
+  "*** End Patch")" '{"tool_input":$patch}')
+_post_edit_config "$config_patch"
+_assert_eq "post-edit config: multi-file edit lints only configs in one batch" \
+  "lint:claude:$config_dir/valid.json,$config_dir/invalid.toml" "$(cat "$config_log")"
+
 echo "=== state root: sandbox-denied runtime tier ==="
 
 # Grok's sandbox denies the runtime tier while XDG_RUNTIME_DIR stays set.

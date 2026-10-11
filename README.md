@@ -225,9 +225,11 @@ filter, compare its output, and prove a second reconciliation is unchanged.
 - `cgraf78/sley` is a hard runtime dependency for hooks that format files.
   `agent-hook-post-edit` invokes the PATH-visible `sley hook format --stdin`
   batch CLI (falling back to `sley hook format-file` per file on older
-  sley installs without the batch entry).
-  Commit readiness belongs in native VCS hooks so human and agent workflows
-  share one path.
+  sley installs without the batch entry), then `sley hook lint --stdin` on
+  edited JSON, JSONC, JSON5, YAML, and TOML files and returns findings as
+  agent context. Commit readiness belongs in native VCS hooks so human and
+  agent workflows share one path; the config lint only reports earlier, and
+  covers configs that no commit checks.
 
 Optional integrations are detected at runtime: `hm` enables Hive Memory hook
 context when its config is available through `HIVE_MEMORY_CONFIG`, an absolute
@@ -411,8 +413,11 @@ To add a new managed agent runtime:
   room for environment-specific generated-file or readonly-file guards.
 - `agent-hook-post-edit` formats changed files through
   `sley hook format --stdin`, one batch per directory so repo detection
-  matches the old per-file path. Broader lint and verification policy stays
-  in the native commit hooks.
+  matches the old per-file path. It then lints edited structured config files
+  (JSON, JSONC, JSON5, YAML, TOML) with `sley hook lint --stdin` and returns
+  findings as agent context, so a schema error surfaces at edit time, including
+  in generated or untracked configs no commit checks. Code files, and all
+  other lint and verification policy, stay with the native commit hooks.
 - `agent-hook-pre-mcp` guards MCP calls: it blocks a server after repeated
   failures, warns on exact `search_files` leaf-tool calls without a path
   filter, and warns once on exact `knowledge_load` leaf-tool calls because
