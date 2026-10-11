@@ -1,6 +1,6 @@
 .TH AGENT-HOOK-POST-EDIT 1 "2026-06-30" "agentguard" "User Commands"
 .SH NAME
-agent-hook-post-edit \- format edited files through Sley
+agent-hook-post-edit \- format edited files and validate edited configs through Sley
 .SH SYNOPSIS
 .B agent-hook-post-edit
 .SH DESCRIPTION
@@ -11,13 +11,25 @@ files to
 one batch per directory (with a per-file
 .BR "sley hook format-file"
 fallback for older Sley installs).
-Broader lint and verification remain native commit-hook responsibilities so
-human and agent commit workflows share the same readiness path.
+It then passes edited JSON, JSONC, JSON5, YAML, and TOML files to
+.BR "sley hook lint --stdin"
+and returns its findings (exit status 1) as agent context, bounded to the
+first 40 lines, so schema errors surface at edit time even in configs no
+commit checks.
+Lint covers whole files, so findings can predate the edit.
+What it checks is Checkrun's policy: schema associations, syntax checks its
+linters perform, and spelling; a YAML or JSON5 file without a schema
+association is not parse-checked.
+Lint that cannot run is not reported.
+Code files and all other lint and verification remain native commit-hook
+responsibilities so human and agent commit workflows share the same
+readiness path.
 .SH EXIT STATUS
 .TP
 .B 0
 Formatting completed, selected formatter failures were ignored after Sley
 surfaced them, or no format target was selected.
+Config lint findings do not change the exit status.
 .TP
 .B 2
 The local install is missing required dependencies such as
