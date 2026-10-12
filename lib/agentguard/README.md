@@ -120,10 +120,10 @@ their JSON payload, so their richer session-state precedence remains in
   `agent-hook-post-edit` invokes the PATH-visible `sley hook format --stdin`
   batch CLI (falling back to `sley hook format-file` per file on older
   sley installs without the batch entry), then `sley hook lint --stdin` on
-  edited JSON, JSONC, JSON5, YAML, and TOML files and returns findings as
-  agent context. Commit readiness belongs in native VCS hooks so human and
-  agent workflows share one path; the config lint only reports earlier, and
-  covers configs that no commit checks.
+  every edited file, the same checks the commit gate runs, and returns findings
+  as agent context. Commit readiness belongs in native VCS hooks so human and
+  agent workflows share one path; edit-time lint only reports earlier, and
+  also covers files that no commit checks.
 
 Optional integrations are detected at runtime: `hm` enables Hive Memory hook
 context when its config is available through `HIVE_MEMORY_CONFIG`, an absolute

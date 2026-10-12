@@ -448,8 +448,6 @@ rm -f "$out_file" "$err_file"
 _assert_eq "post-edit sley delegation: exits 0" "0" "$HOOK_EXIT"
 _assert_contains "post-edit sley delegation: formats through CLI from file repo" \
   "format:claude:$repo:$repo/edited.py" "$(cat "$SLEY_HOOK_LOG" 2>/dev/null)"
-_assert_not_contains "post-edit sley delegation: defers lint to commit gate" \
-  "lint:claude:$repo/edited.py" "$(cat "$SLEY_HOOK_LOG" 2>/dev/null)"
 _assert_file_content "post-edit sley delegation: churn still tracked" "1" \
   "$(_churn_file "$repo/edited.py")"
 
@@ -478,7 +476,7 @@ rm -f "$out_file" "$err_file"
 _assert_exit "post-edit missing sley: exits broken" 2 "$HOOK_EXIT"
 _assert_contains "post-edit missing sley: reports install issue" "sley command missing" "$HOOK_STDERR"
 
-echo "=== post-edit: validates edited structured config files ==="
+echo "=== post-edit: lints edited files like the commit gate ==="
 
 # The mock lint reports a finding for files containing BAD, cannot run for
 # files containing NOLINT, and prints a 60-line report for files containing
@@ -557,10 +555,14 @@ _assert_eq "post-edit config: strict agents get only hookSpecificOutput" \
 _assert_contains "post-edit config: strict agents still get the finding" \
   "value is not valid" "$(jq -r '.hookSpecificOutput.additionalContext' <<<"$HOOK_STDOUT")"
 
+# Edit-time lint matches the commit gate, so code is linted like config.
 printf 'x = "BAD"\n' >"$config_dir/code.py"
 _post_edit_config "{\"tool_input\":{\"file_path\":\"$config_dir/code.py\"}}"
-_assert_eq "post-edit config: code files are not linted" "" "$(cat "$config_log")"
-_assert_eq "post-edit config: code files add no context" "{}" "$HOOK_STDOUT"
+_assert_eq "post-edit config: code files are linted too" \
+  "lint:claude:$config_dir/code.py" "$(cat "$config_log")"
+_assert_contains "post-edit config: code findings reach the agent context" \
+  "$config_dir/code.py:1:1: Test schema: value is not valid" \
+  "$(jq -r '.hookSpecificOutput.additionalContext' <<<"$HOOK_STDOUT")"
 
 printf 'key: NOLINT\n' >"$config_dir/unavailable.yaml"
 _post_edit_config "{\"tool_input\":{\"file_path\":\"$config_dir/unavailable.yaml\"}}"
@@ -576,7 +578,7 @@ _assert_not_contains "post-edit config: long reports are bounded" \
 _assert_contains "post-edit config: bounded reports say how much was cut" \
   "20 more lines not shown" "$config_context"
 
-# A multi-file patch lints only its structured config files, in one batch.
+# A multi-file patch lints every edited file in its directory in one batch.
 config_patch=$(jq -n --arg patch "$(printf '%s\n' \
   "*** Begin Patch" \
   "*** Update File: $config_dir/code.py" \
@@ -593,8 +595,9 @@ config_patch=$(jq -n --arg patch "$(printf '%s\n' \
   "+new" \
   "*** End Patch")" '{"tool_input":$patch}')
 _post_edit_config "$config_patch"
-_assert_eq "post-edit config: multi-file edit lints only configs in one batch" \
-  "lint:claude:$config_dir/valid.json,$config_dir/invalid.toml" "$(cat "$config_log")"
+_assert_eq "post-edit config: multi-file edit lints every file in one batch" \
+  "lint:claude:$config_dir/code.py,$config_dir/valid.json,$config_dir/invalid.toml" \
+  "$(cat "$config_log")"
 
 echo "=== state root: sandbox-denied runtime tier ==="
 
