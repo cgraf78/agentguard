@@ -744,6 +744,15 @@ _hook_flag_enabled() {
   esac
 }
 
+# The false spellings for a default-on knob. An unset or unrecognized value is
+# not "disabled", so the default holds.
+_hook_flag_disabled() {
+  case "${1:-}" in
+    0 | false | FALSE | no | NO | off | OFF) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 _hook_edit_churn_file() {
   local path="$1" key
   key=$(printf '%s' "$path" | cksum | cut -d' ' -f1)

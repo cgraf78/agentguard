@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # agent-hook-post-edit — PostToolUse handler for Edit|Write.
-# Auto-formats edited files and validates edited structured config files.
+# Auto-formats edited files, then lints them the way the commit gate does.
 
 set -u
 _HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}" # captured before sourcing so _hook_source_extensions finds agent/local variants
@@ -71,15 +71,16 @@ _post_edit_format_dir() {
   )
 }
 
-# Lint one directory's edited structured config files with `sley hook lint
-# --stdin` and turn findings into agent context. Commit readiness stays in the
-# VCS hook; this only closes the gap where an agent edits a config that no
+# Lint one directory's edited files with `sley hook lint --stdin`, the same
+# checks the commit gate runs, and turn findings into agent context. Edit time
+# and commit time therefore agree on what is wrong with a file, and files no
 # commit ever checks (a generated ~/.codex/config.toml, a self-written app
-# config) or would otherwise learn about a schema error only at commit time.
-# Code files keep deferring lint to the commit gate: whole-file lint there
-# would surface unrelated pre-existing findings and add latency to every edit.
-# Only exit 1 (findings) is reported. Exit 2 means lint did not run (no
-# autolint, a tool error), which the commit gate already reports.
+# config) are checked too. Commit readiness itself stays in the VCS hook.
+# Statuses follow autolint(1): a linter's own nonzero status other than 2 is
+# passed through and means findings (git config exits 128, php -l 255), so
+# report every status except the ones that mean lint did not run or finish:
+# 2 (could not run), 125 (internal failure), 127 (missing dependency), and
+# 129, 130, 143 (cancelled). The commit gate already reports those.
 _post_edit_lint_dir() {
   local dir="$1" files="$2" caller="$3" output status
   status=0
@@ -87,7 +88,9 @@ _post_edit_lint_dir() {
     cd "$dir" || exit 2
     SLEY_CALLER="$caller" NO_COLOR=1 sley hook lint --stdin <<<"$files" 2>&1
   ) || status=$?
-  [ "$status" -eq 1 ] || return 0
+  case $status in
+    0 | 2 | 125 | 127 | 129 | 130 | 143) return 0 ;;
+  esac
   # Bound the context: a malformed generated file can produce many findings,
   # and the first lines already tell the agent what to fix. Say when lines
   # were cut so the agent knows the list is incomplete.
@@ -97,19 +100,20 @@ _post_edit_lint_dir() {
   [ "$total" -le 40 ] || output="$output
 ... $((total - 40)) more lines not shown; run checkrun lint on these files for the full report."
   # Lint covers whole files, including spelling (typos), so findings can
-  # predate this edit. Steer the agent toward schema and syntax errors and
-  # away from renaming keys a tool reads just to satisfy a spell check.
-  _hook_warn "Lint reported findings in edited config files. Fix schema and syntax errors and anything this edit introduced; findings elsewhere may predate it, and do not rename keys or values a tool reads only to satisfy a spelling check:
+  # predate this edit. Steer the agent toward what its edit introduced and
+  # toward real errors, and away from renaming keys or identifiers a tool or
+  # caller reads just to satisfy a spell check.
+  _hook_warn "Lint reported findings in edited files. Fix errors and anything this edit introduced; findings elsewhere may predate it, and do not rename keys, values, or identifiers something else reads only to satisfy a spelling check:
 $output"
 }
 
-# Structured config formats that Checkrun may validate against a schema
-# association; their lint is mostly schema, syntax, and spelling checks.
-_post_edit_is_config() {
-  case "$1" in
-    *.json | *.jsonc | *.json5 | *.yaml | *.yml | *.toml) return 0 ;;
-    *) return 1 ;;
-  esac
+# Edit-time lint is on unless AGENTGUARD_POST_EDIT_LINT is set to a false
+# value. It costs a lint run per edit, so hosts where that latency matters can
+# turn it off; the commit gate still lints every file either way. Like the
+# churn knobs, it is read from the hook's environment (the agent launcher), not
+# from an agent tool shell, which cannot reach hook processes.
+_post_edit_lint_enabled() {
+  ! _hook_flag_disabled "${AGENTGUARD_POST_EDIT_LINT:-}"
 }
 
 _post_edit_format_all() {
@@ -156,19 +160,13 @@ $abs_fp"
   # skipping save-time formatting.
   _hook_require_sley || return $?
 
-  local caller configs
+  local caller
   caller=$(_hook_agent_name)
   i=0
   while [ "$i" -lt "${#_dirs[@]}" ]; do
     _post_edit_format_dir "${_dirs[i]}" "${_lists[i]}" "$caller"
     # Lint after formatting so findings describe the bytes left on disk.
-    configs=
-    while IFS= read -r fp; do
-      _post_edit_is_config "$fp" || continue
-      configs="${configs:+$configs
-}$fp"
-    done <<<"${_lists[i]}"
-    [ -z "$configs" ] || _post_edit_lint_dir "${_dirs[i]}" "$configs" "$caller"
+    _post_edit_lint_enabled && _post_edit_lint_dir "${_dirs[i]}" "${_lists[i]}" "$caller"
     i=$((i + 1))
   done
 }
