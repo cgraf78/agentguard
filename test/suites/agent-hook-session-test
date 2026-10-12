@@ -532,8 +532,18 @@ _assert_file_missing "busy: telemetry for a payload mentioning an abort keeps th
   "$busy_log"
 
 # The mark is optional: without term-pane-mark a hook still answers normally.
+# Drop every PATH entry that provides it (this suite's no-op stub, a host
+# install) and keep the rest, whose layout differs by platform (Termux).
+no_mark_path=''
+IFS=: read -r -a busy_path_dirs <<<"$PATH"
+for busy_dir in "${busy_path_dirs[@]}"; do
+  [ -x "$busy_dir/term-pane-mark" ] || no_mark_path+="${no_mark_path:+:}$busy_dir"
+done
+_assert_eq "busy: the filtered PATH lacks term-pane-mark" "" \
+  "$(PATH="$no_mark_path" command -v term-pane-mark)"
+# shellcheck disable=SC2016 # the child shell expands the script's variables
 busy_out=$(
-  PATH=/usr/bin:/bin bash -c '
+  PATH="$no_mark_path" "$BASH" -c '
     _HOOK_SELF=agent-hook-test
     source "$1"
     _hook_pane_busy set
