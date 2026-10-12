@@ -76,8 +76,11 @@ _post_edit_format_dir() {
 # and commit time therefore agree on what is wrong with a file, and files no
 # commit ever checks (a generated ~/.codex/config.toml, a self-written app
 # config) are checked too. Commit readiness itself stays in the VCS hook.
-# Only exit 1 (findings) is reported. Exit 2 means lint did not run (no
-# autolint, a tool error), which the commit gate already reports.
+# Statuses follow autolint(1): a linter's own nonzero status other than 2 is
+# passed through and means findings (git config exits 128, php -l 255), so
+# report every status except the ones that mean lint did not run or finish:
+# 2 (could not run), 125 (internal failure), 127 (missing dependency), and
+# 129, 130, 143 (cancelled). The commit gate already reports those.
 _post_edit_lint_dir() {
   local dir="$1" files="$2" caller="$3" output status
   status=0
@@ -85,7 +88,9 @@ _post_edit_lint_dir() {
     cd "$dir" || exit 2
     SLEY_CALLER="$caller" NO_COLOR=1 sley hook lint --stdin <<<"$files" 2>&1
   ) || status=$?
-  [ "$status" -eq 1 ] || return 0
+  case $status in
+    0 | 2 | 125 | 127 | 129 | 130 | 143) return 0 ;;
+  esac
   # Bound the context: a malformed generated file can produce many findings,
   # and the first lines already tell the agent what to fix. Say when lines
   # were cut so the agent knows the list is incomplete.

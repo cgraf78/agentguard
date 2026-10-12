@@ -498,6 +498,12 @@ case "$2 ${3:-}" in
       if grep -q NOLINT "$file"; then
         printf 'autolint unavailable\n'
         exit 2
+      elif grep -q INTERNAL "$file"; then
+        printf 'autolint lost a worker status\n'
+        exit 125
+      elif grep -q PASSTHRU "$file"; then
+        printf 'fatal: bad config line 1 in file %s\n' "$file"
+        exit 128
       elif grep -q MANY "$file"; then
         for line in $(seq 1 60); do printf '%s:%s:1: finding %s\n' "$file" "$line" "$line"; done
         status=1
@@ -567,6 +573,17 @@ _assert_contains "post-edit config: code findings reach the agent context" \
 printf 'key: NOLINT\n' >"$config_dir/unavailable.yaml"
 _post_edit_config "{\"tool_input\":{\"file_path\":\"$config_dir/unavailable.yaml\"}}"
 _assert_eq "post-edit config: lint that cannot run adds no context" "{}" "$HOOK_STDOUT"
+
+# autolint passes a linter's own nonzero status through as findings, so a
+# status like git config's 128 must reach the agent; 125 is an internal
+# failure, not a finding.
+printf '[core\nPASSTHRU\n' >"$config_dir/gitconfig"
+_post_edit_config "{\"tool_input\":{\"file_path\":\"$config_dir/gitconfig\"}}"
+_assert_contains "post-edit config: a passed-through linter status is reported" \
+  "fatal: bad config line 1" "$(jq -r '.hookSpecificOutput.additionalContext' <<<"$HOOK_STDOUT")"
+printf 'INTERNAL\n' >"$config_dir/internal.yaml"
+_post_edit_config "{\"tool_input\":{\"file_path\":\"$config_dir/internal.yaml\"}}"
+_assert_eq "post-edit config: an internal autolint failure adds no context" "{}" "$HOOK_STDOUT"
 
 printf 'key = "MANY"\n' >"$config_dir/many.toml"
 _post_edit_config "{\"tool_input\":{\"file_path\":\"$config_dir/many.toml\"}}"
