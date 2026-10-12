@@ -759,17 +759,6 @@ _hook_stop_continues() {
   [ "$(_hook_agent_name)" != codex ]
 }
 
-# Return whether a Notification reports that the agent sits idle at its prompt.
-# A user interrupt ends a turn without any Stop, and runtimes without an
-# Interrupt hook (Claude) report nothing else later that the turn is over.
-_hook_notification_is_idle() {
-  _hook_hm_read_input
-  [ -n "${_HOOK_INPUT:-}" ] || return 1
-  command -v jq >/dev/null 2>&1 || return 1
-  printf '%s' "$_HOOK_INPUT" |
-    jq -e '(.notification_type // .notificationType) == "idle_prompt"' >/dev/null 2>&1
-}
-
 # Return whether this event ends the foreground turn without a Stop callback:
 # a failed request (StopFailure) or a user interrupt (Interrupt). A subagent's
 # event (OpenCode reports one under the root session with agent_id) ends only

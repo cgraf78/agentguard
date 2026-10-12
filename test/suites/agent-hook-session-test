@@ -473,16 +473,11 @@ _assert_file_content "busy: a fail-open Codex Stop still clears the mark" \
   "$(_busy_mark "$busy_log" clear)" "$busy_log"
 rm -f "$MOCK_BUSY_DIR/bin/agent-hook-stop-codex"
 
-# A user interrupt fires no Stop; the later idle-prompt notification clears.
-for idle_payload in '{"notification_type":"idle_prompt"}' \
-  '{"notificationType":"idle_prompt"}'; do
-  busy_log="$MOCK_BUSY_DIR/notify-idle.log"
-  _busy_hook agent-hook-notification claude "$busy_log" "$idle_payload" >/dev/null
-  _assert_file_content "busy: idle notification $idle_payload clears the mark" \
-    "$(_busy_mark "$busy_log" clear)" "$busy_log"
-  rm -f "$busy_log"
-done
-for waiting_payload in '' '{"notification_type":"permission_prompt"}' 'not-json'; do
+# Notifications never touch the busy mark: in recorded Claude sessions,
+# idle_prompt followed only Stops, which already cleared it, and never an
+# interrupted turn.
+for waiting_payload in '' '{"notification_type":"permission_prompt"}' \
+  '{"notification_type":"idle_prompt"}' 'not-json'; do
   busy_log="$MOCK_BUSY_DIR/notify-waiting.log"
   _busy_hook agent-hook-notification claude "$busy_log" "$waiting_payload" >/dev/null
   _assert_file_missing "busy: notification ${waiting_payload:-without a payload} keeps the mark" \

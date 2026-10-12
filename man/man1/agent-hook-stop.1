@@ -26,7 +26,9 @@ A subagent Stop, or one an extension blocks to keep the agent working, leaves
 the mark set; because Codex Stop is always fail-open, an extension block does
 not keep it on Codex. Only the pane terminal's foreground agent changes the
 mark, so the Stop of an agent it launched, which runs without that terminal,
-leaves it alone.
+leaves it alone. A Claude Code interrupt fires no Stop or other turn-ending
+hook, so after one the mark stays set until the next prompt's turn ends or the
+session ends.
 .SH EXIT STATUS
 .TP
 .B 0

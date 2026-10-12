@@ -9,16 +9,8 @@ reads an agent notification hook payload from standard input and plays the
 configured terminal notification sound through
 .BR "term-notify-sound \-\-owner" ,
 naming the agent process so that an agent it launched cannot mark its pane
-pending. When the payload reports an idle
-prompt
-.RB ( notification_type
-.BR idle_prompt ),
-it also clears the agent's busy tmux pane mark with
-.BR "term-pane-mark clear busy" :
-a user interrupt ends a turn without a Stop callback, and on runtimes without
-an Interrupt event, such as Claude Code, nothing else later reports that the
-turn is over. It does not add workflow warnings or
-blocks.
+pending. It leaves the busy tmux pane mark alone and does not add workflow
+warnings or blocks.
 .SH EXIT STATUS
 .TP
 .B 0
