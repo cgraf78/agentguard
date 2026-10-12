@@ -577,22 +577,13 @@ _assert_eq "post-edit config: lint that cannot run adds no context" "{}" "$HOOK_
 # AGENTGUARD_POST_EDIT_LINT turns edit-time lint off for every file type;
 # formatting still runs. Any other value, or none, leaves it on.
 for value in 0 false off no; do
-  : >"$config_log"
-  HOOK_EXIT=0
-  HOOK_STDOUT=$(printf '%s' "{\"tool_input\":{\"file_path\":\"$config_dir/invalid.toml\"}}" |
-    HOME="$config_home" AGENTGUARD_SESSION_ID="$TEST_SID" AGENTGUARD_NAME=claude \
-      TMPDIR="$TEST_TMPDIR" CODEX_THREAD_ID="" SLEY_HOOK_LOG="$config_log" \
-      AGENTGUARD_POST_EDIT_LINT="$value" \
-      "$config_home/.local/bin/agent-hook-post-edit" 2>/dev/null) || HOOK_EXIT=$?
+  AGENTGUARD_POST_EDIT_LINT=$value \
+    _post_edit_config "{\"tool_input\":{\"file_path\":\"$config_dir/invalid.toml\"}}"
   _assert_eq "post-edit lint knob: $value skips lint" "" "$(cat "$config_log")"
   _assert_eq "post-edit lint knob: $value adds no context" "{}" "$HOOK_STDOUT"
 done
-: >"$config_log"
-HOOK_STDOUT=$(printf '%s' "{\"tool_input\":{\"file_path\":\"$config_dir/invalid.toml\"}}" |
-  HOME="$config_home" AGENTGUARD_SESSION_ID="$TEST_SID" AGENTGUARD_NAME=claude \
-    TMPDIR="$TEST_TMPDIR" CODEX_THREAD_ID="" SLEY_HOOK_LOG="$config_log" \
-    AGENTGUARD_POST_EDIT_LINT=1 \
-    "$config_home/.local/bin/agent-hook-post-edit" 2>/dev/null)
+AGENTGUARD_POST_EDIT_LINT=1 \
+  _post_edit_config "{\"tool_input\":{\"file_path\":\"$config_dir/invalid.toml\"}}"
 _assert_contains "post-edit lint knob: an explicit 1 keeps lint on" \
   "lint:claude:$config_dir/invalid.toml" "$(cat "$config_log")"
 

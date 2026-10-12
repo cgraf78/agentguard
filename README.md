@@ -421,7 +421,8 @@ To add a new managed agent runtime:
   whole files, so findings can predate the edit. Commit readiness and
   verification stay with the native commit hooks.
   **Edit-time lint is on by default.** It adds a lint run to every edit
-  (about 0.2-0.4 s per batch); set `AGENTGUARD_POST_EDIT_LINT=0` in the
+  (about 0.2 s per batch, more for large shell scripts, where shellcheck
+  dominates); set `AGENTGUARD_POST_EDIT_LINT=0` in the
   hook/launcher environment to turn it off for all file types. Formatting still
   runs, and the commit gate still lints. Like the churn knobs, an `export` in
   an agent tool shell cannot reach hook processes.
