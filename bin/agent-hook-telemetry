@@ -52,7 +52,7 @@ _hook_read_input || true
 # a terminal display effect, not a guard, so the observe-only contract holds.
 # With recording disabled the hook exits above without reading its payload, to
 # stay free on every tool call; the mark then lasts until the next Stop or
-# idle prompt.
+# session end.
 if _hook_turn_aborted; then
   _hook_pane_busy clear
 fi
