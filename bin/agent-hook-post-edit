@@ -107,6 +107,18 @@ _post_edit_lint_dir() {
 $output"
 }
 
+# Edit-time lint is on unless AGENTGUARD_POST_EDIT_LINT is set to a false
+# value. It costs a lint run per edit, so hosts where that latency matters can
+# turn it off; the commit gate still lints every file either way. Like the
+# churn knobs, it is read from the hook's environment (the agent launcher), not
+# from an agent tool shell, which cannot reach hook processes.
+_post_edit_lint_enabled() {
+  case "${AGENTGUARD_POST_EDIT_LINT:-1}" in
+    0 | false | FALSE | no | NO | off | OFF) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 _post_edit_format_all() {
   local fp abs_fp dir idx i
   local -a _dirs=() _lists=()
@@ -157,7 +169,7 @@ $abs_fp"
   while [ "$i" -lt "${#_dirs[@]}" ]; do
     _post_edit_format_dir "${_dirs[i]}" "${_lists[i]}" "$caller"
     # Lint after formatting so findings describe the bytes left on disk.
-    _post_edit_lint_dir "${_dirs[i]}" "${_lists[i]}" "$caller"
+    _post_edit_lint_enabled && _post_edit_lint_dir "${_dirs[i]}" "${_lists[i]}" "$caller"
     i=$((i + 1))
   done
 }

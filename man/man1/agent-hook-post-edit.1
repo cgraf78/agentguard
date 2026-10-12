@@ -20,6 +20,21 @@ Lint covers whole files, so findings can predate the edit.
 Lint that cannot run is not reported.
 Commit readiness and verification remain native commit-hook responsibilities
 so human and agent commit workflows share the same readiness path.
+.SH ENVIRONMENT
+.TP
+.B AGENTGUARD_POST_EDIT_LINT
+Edit-time lint is on by default.
+Set to
+.BR 0 ,
+.BR false ,
+.BR no ,
+or
+.B off
+to skip it for every file type, for example where the extra lint run per edit
+is too slow.
+Formatting still runs, and the commit gate still lints every file.
+It is read from the hook's environment (the agent launcher), not from an agent
+tool shell.
 .SH EXIT STATUS
 .TP
 .B 0

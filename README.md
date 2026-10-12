@@ -227,9 +227,10 @@ filter, compare its output, and prove a second reconciliation is unchanged.
   batch CLI (falling back to `sley hook format-file` per file on older
   sley installs without the batch entry), then `sley hook lint --stdin` on
   every edited file, the same checks the commit gate runs, and returns findings
-  as agent context. Commit readiness belongs in native VCS hooks so human and
-  agent workflows share one path; edit-time lint only reports earlier, and
-  also covers files that no commit checks.
+  as agent context (`AGENTGUARD_POST_EDIT_LINT=0` turns that lint off).
+  Commit readiness belongs in native VCS hooks so human and agent workflows
+  share one path; edit-time lint only reports earlier, and also covers files
+  that no commit checks.
 
 Optional integrations are detected at runtime: `hm` enables Hive Memory hook
 context when its config is available through `HIVE_MEMORY_CONFIG`, an absolute
@@ -419,6 +420,11 @@ To add a new managed agent runtime:
   including in generated or untracked files no commit checks. Lint covers
   whole files, so findings can predate the edit. Commit readiness and
   verification stay with the native commit hooks.
+  **Edit-time lint is on by default.** It adds a lint run to every edit
+  (about 0.2-0.4 s per batch); set `AGENTGUARD_POST_EDIT_LINT=0` in the
+  hook/launcher environment to turn it off for all file types. Formatting still
+  runs, and the commit gate still lints. Like the churn knobs, an `export` in
+  an agent tool shell cannot reach hook processes.
 - `agent-hook-pre-mcp` guards MCP calls: it blocks a server after repeated
   failures, warns on exact `search_files` leaf-tool calls without a path
   filter, and warns once on exact `knowledge_load` leaf-tool calls because
