@@ -335,6 +335,224 @@ _assert_file_content "notification: invokes the shared terminal notifier" \
   "$MOCK_NOTIFICATION_DIR/bin/term-notify-sound" "$NOTIFICATION_MARKER"
 
 echo ""
+echo "=== busy pane mark ==="
+
+MOCK_BUSY_DIR=$(_tmpdir)
+_install_hook_fixture "$MOCK_BUSY_DIR" agent-hook-prompt-submit agent-hook-stop \
+  agent-hook-notification agent-hook-session-end
+cat >"$MOCK_BUSY_DIR/bin/term-pane-mark" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TERM_PANE_MARK_LOG"
+printf '%s\n' "mark noise"
+MOCK
+cat >"$MOCK_BUSY_DIR/bin/term-notify-sound" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TERM_PANE_MARK_LOG.notify"
+MOCK
+chmod +x "$MOCK_BUSY_DIR/bin/term-pane-mark" "$MOCK_BUSY_DIR/bin/term-notify-sound"
+
+# Run one busy-fixture hook with optional JSON on stdin and return its stdout.
+# A wrapper process stands in for the agent: it records its PID in LOG.owner
+# and runs the hook as its child (the trailing no-op prevents an exec), so the
+# mark's expected owner is the hook's parent, as under a real agent.
+_busy_hook() {
+  local hook="$1" agent="$2" log="$3" payload="${4-}"
+  printf '%s' "$payload" |
+    AGENTGUARD_SESSION_ID="$TEST_SID-busy-$agent" \
+      TMPDIR="$TEST_TMPDIR" \
+      AGENTGUARD_NAME="$agent" \
+      TERM_PANE_MARK_LOG="$log" \
+      PATH="$MOCK_BUSY_DIR/bin:$PATH" \
+      bash -c 'printf "%s" "$$" >"$1.owner"; "$2"; :' _ "$log" \
+      "$MOCK_BUSY_DIR/bin/$hook" 2>/dev/null
+}
+
+# _busy_mark LOG ACTION prints the mark call expected from the hook run that
+# wrote LOG.
+_busy_mark() {
+  printf '%s busy --owner %s' "$2" "$(cat "$1.owner")"
+}
+
+busy_log="$MOCK_BUSY_DIR/prompt.log"
+busy_out=$(_busy_hook agent-hook-prompt-submit claude "$busy_log" \
+  '{"prompt":"Do the thing."}')
+_assert_file_content "busy: a submitted prompt marks the pane busy" \
+  "$(_busy_mark "$busy_log" set)" "$busy_log"
+_assert_not_contains "busy: mark output stays out of the hook response" \
+  "mark noise" "$busy_out"
+
+for invalid_prompt in '' '{}' '{"prompt":""}'; do
+  busy_log="$MOCK_BUSY_DIR/invalid-prompt.log"
+  _busy_hook agent-hook-prompt-submit claude "$busy_log" "$invalid_prompt" >/dev/null
+  _assert_file_missing "busy: no prompt text (${invalid_prompt:-empty}) marks nothing" \
+    "$busy_log"
+done
+
+# A prompt an extension blocks never starts a turn, so nothing would clear it.
+printf '%s\n' '_hook_block "not this prompt"' \
+  >"$MOCK_BUSY_DIR/bin/agent-hook-prompt-submit-blockfixture"
+busy_log="$MOCK_BUSY_DIR/blocked-prompt.log"
+_busy_hook agent-hook-prompt-submit blockfixture "$busy_log" \
+  '{"prompt":"Do the thing."}' >/dev/null
+_assert_file_missing "busy: a blocked prompt marks nothing" "$busy_log"
+
+for stop_agent in claude codex gemini grok muse; do
+  busy_log="$MOCK_BUSY_DIR/stop-$stop_agent.log"
+  busy_out=$(_busy_hook agent-hook-stop "$stop_agent" "$busy_log")
+  _assert_file_content "busy: foreground Stop ($stop_agent) clears the mark" \
+    "$(_busy_mark "$busy_log" clear)" "$busy_log"
+  _assert_not_contains "busy: Stop ($stop_agent) response omits mark output" \
+    "mark noise" "$busy_out"
+done
+
+# Codex's background memory agent is an ephemeral session (no transcript) in
+# the user's Codex process; its turns neither mark nor clear the pane.
+for codex_hook in 'agent-hook-prompt-submit:{"prompt":"Consolidate memories.","transcript_path":null}' \
+  'agent-hook-stop:{"transcript_path":null}' \
+  'agent-hook-session-end:{"session_id":"memory","transcript_path":null}'; do
+  busy_log="$MOCK_BUSY_DIR/codex-ephemeral.log"
+  _busy_hook "${codex_hook%%:*}" codex "$busy_log" "${codex_hook#*:}" >/dev/null
+  _assert_file_missing "busy: Codex ephemeral session ${codex_hook%%:*} leaves the mark alone" \
+    "$busy_log"
+done
+AGENTGUARD_TELEMETRY_DIR="$MOCK_BUSY_DIR/telemetry" \
+  _busy_hook agent-hook-telemetry codex "$busy_log" \
+  '{"hook_event_name":"Interrupt","transcript_path":null}' >/dev/null
+_assert_file_missing "busy: Codex ephemeral Interrupt leaves the mark alone" "$busy_log"
+busy_log="$MOCK_BUSY_DIR/codex-transcript-prompt.log"
+_busy_hook agent-hook-prompt-submit codex "$busy_log" \
+  '{"prompt":"Do the thing.","transcript_path":"/tmp/rollout.jsonl"}' >/dev/null
+_assert_file_content "busy: a Codex prompt with a transcript marks the pane" \
+  "$(_busy_mark "$busy_log" set)" "$busy_log"
+busy_log="$MOCK_BUSY_DIR/codex-transcript.log"
+_busy_hook agent-hook-stop codex "$busy_log" '{"transcript_path":"/tmp/rollout.jsonl"}' >/dev/null
+_assert_file_content "busy: a Codex session with a transcript clears the mark" \
+  "$(_busy_mark "$busy_log" clear)" "$busy_log"
+busy_log="$MOCK_BUSY_DIR/claude-no-transcript.log"
+_busy_hook agent-hook-prompt-submit claude "$busy_log" \
+  '{"prompt":"Do the thing.","transcript_path":null}' >/dev/null
+_assert_file_content "busy: the ephemeral rule is Codex-only" \
+  "$(_busy_mark "$busy_log" set)" "$busy_log"
+
+# The notifier's pending mark gets the same owner, so an agent this one
+# launched cannot mark its pane pending either.
+for notify_hook in agent-hook-stop agent-hook-notification; do
+  busy_log="$MOCK_BUSY_DIR/notify-owner-$notify_hook.log"
+  _busy_hook "$notify_hook" claude "$busy_log" >/dev/null
+  _assert_file_content "busy: $notify_hook passes its agent to term-notify-sound" \
+    "--owner $(cat "$busy_log.owner")" "$busy_log.notify"
+done
+
+# A runtime continuation Stop still ends a foreground turn unless it blocks.
+busy_log="$MOCK_BUSY_DIR/stop-active.log"
+_busy_hook agent-hook-stop claude "$busy_log" '{"stop_hook_active":true}' >/dev/null
+_assert_file_content "busy: a continuation Stop clears the mark" \
+  "$(_busy_mark "$busy_log" clear)" "$busy_log"
+
+for subagent_payload in \
+  '{"hook_event_name":"SubagentStop"}' \
+  '{"hookEventName":"SubagentStop"}' \
+  '{"subagent_type":"general-purpose"}'; do
+  busy_log="$MOCK_BUSY_DIR/stop-subagent.log"
+  _busy_hook agent-hook-stop grok "$busy_log" "$subagent_payload" >/dev/null
+  _assert_file_missing "busy: subagent Stop $subagent_payload keeps the mark" \
+    "$busy_log"
+done
+
+# An extension that blocks Stop keeps the turn going, except on Codex, whose
+# Stop stays fail-open.
+printf '%s\n' '_hook_block "keep going"' \
+  >"$MOCK_BUSY_DIR/bin/agent-hook-stop-blockfixture"
+busy_log="$MOCK_BUSY_DIR/stop-blocked.log"
+_busy_hook agent-hook-stop blockfixture "$busy_log" >/dev/null
+_assert_file_missing "busy: a blocked Stop keeps the mark" "$busy_log"
+printf '%s\n' '_hook_block "keep going"' >"$MOCK_BUSY_DIR/bin/agent-hook-stop-codex"
+busy_log="$MOCK_BUSY_DIR/stop-blocked-codex.log"
+_busy_hook agent-hook-stop codex "$busy_log" >/dev/null
+_assert_file_content "busy: a fail-open Codex Stop still clears the mark" \
+  "$(_busy_mark "$busy_log" clear)" "$busy_log"
+rm -f "$MOCK_BUSY_DIR/bin/agent-hook-stop-codex"
+
+# A user interrupt fires no Stop; the later idle-prompt notification clears.
+for idle_payload in '{"notification_type":"idle_prompt"}' \
+  '{"notificationType":"idle_prompt"}'; do
+  busy_log="$MOCK_BUSY_DIR/notify-idle.log"
+  _busy_hook agent-hook-notification claude "$busy_log" "$idle_payload" >/dev/null
+  _assert_file_content "busy: idle notification $idle_payload clears the mark" \
+    "$(_busy_mark "$busy_log" clear)" "$busy_log"
+  rm -f "$busy_log"
+done
+for waiting_payload in '' '{"notification_type":"permission_prompt"}' 'not-json'; do
+  busy_log="$MOCK_BUSY_DIR/notify-waiting.log"
+  _busy_hook agent-hook-notification claude "$busy_log" "$waiting_payload" >/dev/null
+  _assert_file_missing "busy: notification ${waiting_payload:-without a payload} keeps the mark" \
+    "$busy_log"
+done
+
+for end_payload in '' '{"session_id":"sess-busy-end"}'; do
+  busy_log="$MOCK_BUSY_DIR/session-end.log"
+  _busy_hook agent-hook-session-end claude "$busy_log" "$end_payload" >/dev/null
+  _assert_file_content "busy: session end ${end_payload:-without a payload} clears the mark" \
+    "$(_busy_mark "$busy_log" clear)" "$busy_log"
+  rm -f "$busy_log"
+done
+
+# StopFailure and Interrupt end a turn without Stop; only telemetry sees them.
+_install_hook_fixture "$MOCK_BUSY_DIR" agent-hook-telemetry
+for turn_end in StopFailure Interrupt; do
+  busy_log="$MOCK_BUSY_DIR/telemetry-$turn_end.log"
+  busy_out=$(AGENTGUARD_TELEMETRY_DIR="$MOCK_BUSY_DIR/telemetry" \
+    _busy_hook agent-hook-telemetry muse "$busy_log" \
+    "{\"hook_event_name\":\"$turn_end\"}")
+  _assert_file_content "busy: telemetry for $turn_end clears the mark" \
+    "$(_busy_mark "$busy_log" clear)" "$busy_log"
+  _assert_eq "busy: telemetry for $turn_end still answers empty JSON" \
+    "{}" "$busy_out"
+done
+for other_payload in \
+  '{"hook_event_name":"Stop"}' \
+  '{"hook_event_name":"PostToolUse"}' \
+  '{"hook_event_name":"SubagentStop"}' \
+  '{"hook_event_name":"InterruptedWork"}' \
+  '{"hook_event_name":"Interrupt","reason":"superseded"}' \
+  '{"hook_event_name":"StopFailure","agent_id":"child-1"}' \
+  '{"hookEventName":"Interrupt","agentId":"child-1"}'; do
+  busy_log="$MOCK_BUSY_DIR/telemetry-other.log"
+  AGENTGUARD_TELEMETRY_DIR="$MOCK_BUSY_DIR/telemetry" \
+    _busy_hook agent-hook-telemetry muse "$busy_log" "$other_payload" >/dev/null
+  _assert_file_missing "busy: telemetry for $other_payload keeps the mark" "$busy_log"
+done
+# A tool payload that merely mentions an abort is not one.
+busy_log="$MOCK_BUSY_DIR/telemetry-mention.log"
+AGENTGUARD_TELEMETRY_DIR="$MOCK_BUSY_DIR/telemetry" \
+  _busy_hook agent-hook-telemetry muse "$busy_log" \
+  '{"hook_event_name":"PostToolUse","tool_input":{"command":"echo Interrupt StopFailure"}}' \
+  >/dev/null
+_assert_file_missing "busy: telemetry for a payload mentioning an abort keeps the mark" \
+  "$busy_log"
+
+# The mark is optional: without term-pane-mark a hook still answers normally.
+# Drop every PATH entry that provides it (this suite's no-op stub, a host
+# install) and keep the rest, whose layout differs by platform (Termux).
+no_mark_path=''
+IFS=: read -r -a busy_path_dirs <<<"$PATH"
+for busy_dir in "${busy_path_dirs[@]}"; do
+  [ -x "$busy_dir/term-pane-mark" ] || no_mark_path+="${no_mark_path:+:}$busy_dir"
+done
+_assert_eq "busy: the filtered PATH lacks term-pane-mark" "" \
+  "$(PATH="$no_mark_path" command -v term-pane-mark)"
+# shellcheck disable=SC2016 # the child shell expands the script's variables
+busy_out=$(
+  PATH="$no_mark_path" "$BASH" -c '
+    _HOOK_SELF=agent-hook-test
+    source "$1"
+    _hook_pane_busy set
+    printf "status=%s\n" "$?"
+  ' _ "$HELPERS" 2>&1
+)
+_assert_contains "busy: a missing term-pane-mark is skipped" "status=0" "$busy_out"
+
+echo ""
 echo "=== session-end: extension dispatch ==="
 
 MOCK_END_EXTENSION_DIR=$(_tmpdir)

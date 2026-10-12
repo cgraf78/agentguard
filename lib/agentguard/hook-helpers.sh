@@ -23,6 +23,8 @@ _HOOK_INPUT_EVENT=''
 # wait on an empty or held-open pipe a second time.
 _HOOK_INPUT_ATTEMPTED=''
 _HOOK_PROMPT_SUBMITTED=''
+# Cached _hook_stop_is_foreground answer (1 or 0); a Stop hook asks twice.
+_HOOK_STOP_FOREGROUND=''
 # Telemetry accumulators: block/warn/remind messages joined by ASCII record
 # separators so multi-line messages survive intact into the audit record.
 _HOOK_TELEMETRY_BLOCKS=''
@@ -716,25 +718,105 @@ _hook_stop_claim_notification() {
   mkdir "$dir/stop-notified" 2>/dev/null
 }
 
+# Return whether this Stop ends the user's foreground turn. SubagentStop does
+# not: Grok still delivers it through agent-hook-stop because that launcher is
+# the empty-JSON gate.
+_hook_stop_is_foreground() {
+  local child_type='' event_name=''
+  if [ -z "$_HOOK_STOP_FOREGROUND" ]; then
+    _HOOK_STOP_FOREGROUND=1
+    _hook_hm_read_input
+    if [ -n "${_HOOK_INPUT+x}" ]; then
+      child_type=$(printf '%s' "$_HOOK_INPUT" | jq -r '.subagent_type // .subagentType // empty' 2>/dev/null) || child_type=''
+      if [ -n "$child_type" ]; then
+        _HOOK_STOP_FOREGROUND=0
+      else
+        event_name=$(printf '%s' "$_HOOK_INPUT" | jq -r '.hookEventName // .hook_event_name // empty' 2>/dev/null) || event_name=''
+        case "$event_name" in
+          SubagentStop | subagent_stop | SubagentEnd | subagent_end) _HOOK_STOP_FOREGROUND=0 ;;
+        esac
+      fi
+    fi
+  fi
+  [ "$_HOOK_STOP_FOREGROUND" = 1 ]
+}
+
 # Return success once per foreground prompt cycle so a completed response can
 # notify without repeated Stop callbacks ringing for background continuations.
 # AgentGuard state is canonical across runtimes; stop_hook_active is only an
 # additional recursion guard when a host exposes that compatible field.
 _hook_stop_should_notify() {
-  local child_type='' event_name=''
-  _hook_hm_read_input
+  _hook_stop_is_foreground || return 1
   _hook_stop_active && return 1
-  # SubagentStop is not the user's foreground turn. Grok still delivers it
-  # through agent-hook-stop because that launcher is the empty-JSON gate.
-  if [ -n "${_HOOK_INPUT+x}" ]; then
-    child_type=$(printf '%s' "$_HOOK_INPUT" | jq -r '.subagent_type // .subagentType // empty' 2>/dev/null) || child_type=''
-    [ -n "$child_type" ] && return 1
-    event_name=$(printf '%s' "$_HOOK_INPUT" | jq -r '.hookEventName // .hook_event_name // empty' 2>/dev/null) || event_name=''
-    case "$event_name" in
-      SubagentStop | subagent_stop | SubagentEnd | subagent_end) return 1 ;;
-    esac
-  fi
   _hook_stop_claim_notification
+}
+
+# Return whether this Stop hook's response keeps the agent working. A block
+# exits 2, which continues the turn, except on Codex, where _hook_finish keeps
+# Stop fail-open.
+_hook_stop_continues() {
+  [ -n "$_HOOK_BLOCKED" ] || return 1
+  [ "$(_hook_agent_name)" != codex ]
+}
+
+# Return whether a Notification reports that the agent sits idle at its prompt.
+# A user interrupt ends a turn without any Stop, and runtimes without an
+# Interrupt hook (Claude) report nothing else later that the turn is over.
+_hook_notification_is_idle() {
+  _hook_hm_read_input
+  [ -n "${_HOOK_INPUT:-}" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  printf '%s' "$_HOOK_INPUT" |
+    jq -e '(.notification_type // .notificationType) == "idle_prompt"' >/dev/null 2>&1
+}
+
+# Return whether this event ends the foreground turn without a Stop callback:
+# a failed request (StopFailure) or a user interrupt (Interrupt). A subagent's
+# event (OpenCode reports one under the root session with agent_id) ends only
+# the child, and OpenCode's "superseded" Interrupt arrives after the steering
+# prompt that replaced the turn, so neither ends it. The telemetry hook runs on
+# every tool call, so a substring prefilter skips jq for ordinary payloads.
+_hook_turn_aborted() {
+  case "${_HOOK_INPUT:-}" in
+    *StopFailure* | *Interrupt*) ;;
+    *) return 1 ;;
+  esac
+  command -v jq >/dev/null 2>&1 || return 1
+  printf '%s' "$_HOOK_INPUT" | jq -e '
+    ((.hook_event_name // .hookEventName) | . == "StopFailure" or . == "Interrupt")
+    and (.agent_id // .agentId) == null
+    and .reason != "superseded"
+  ' >/dev/null 2>&1
+}
+
+# Return whether this hook's session is foreground work whose turns the busy
+# mark tracks. Codex runs background agents (memory consolidation, task-title
+# generation) as ephemeral sessions inside the user's Codex process: the same
+# process and pane, their own prompts, Stops, and Interrupts, and no
+# transcript. They must neither mark an idle pane nor clear the user's turn.
+# The cost is that `codex exec --ephemeral` run directly in a pane, also
+# transcript-less, is not marked either.
+_hook_busy_tracked() {
+  [ "$(_hook_agent_name)" = codex ] || return 0
+  _hook_hm_read_input
+  [ -n "${_HOOK_INPUT:-}" ] || return 0
+  ! printf '%s' "$_HOOK_INPUT" |
+    jq -e 'has("transcript_path") and .transcript_path == null' >/dev/null 2>&1
+}
+
+# Set or clear the busy mark on the agent's tmux pane, so the terminal can show
+# which agents are working. cmdblocks' term-pane-mark owns the mark and finds
+# the hook's pane even when an agent strips the tmux variables. --owner names
+# the agent process that runs this hook, and term-pane-mark changes the mark
+# only while that process is the pane terminal's foreground program: an agent
+# the outer one launches (a reviewer, Hive Memory's classifier) inherits the
+# pane but not its terminal, so it cannot set or clear the outer agent's mark.
+# Optional and best effort: without the command, or outside tmux, nothing is
+# marked.
+_hook_pane_busy() {
+  command -v term-pane-mark >/dev/null 2>&1 || return 0
+  _hook_busy_tracked || return 0
+  term-pane-mark "$1" busy --owner "$PPID" >/dev/null 2>&1 || true
 }
 
 _hook_flag_enabled() {

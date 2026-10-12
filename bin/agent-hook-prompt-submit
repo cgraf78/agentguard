@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # agent-hook-prompt-submit — UserPromptSubmit handler.
-# Delegates durable-memory reminders and context freshness to `hm hook`.
+# Delegates durable-memory reminders and context freshness to `hm hook`, and
+# marks the agent's tmux pane busy until the turn ends.
 # Local `-work` variants can still add environment-specific prompt context afterward.
 
 set -u
@@ -42,4 +43,8 @@ if [ -n "$_HOOK_PROMPT_SUBMITTED" ]; then
   _hook_prompt_cycle_reset
 fi
 _hook_source_extensions
+# A blocked prompt never starts a turn, so no Stop would clear the mark.
+if [ -n "$_HOOK_PROMPT_SUBMITTED" ] && [ -z "$_HOOK_BLOCKED" ]; then
+  _hook_pane_busy set
+fi
 _hook_finish
