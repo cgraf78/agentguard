@@ -236,7 +236,10 @@ Optional integrations are detected at runtime: `hm` enables Hive Memory hook
 context when its config is available through `HIVE_MEMORY_CONFIG`, an absolute
 `XDG_CONFIG_HOME`, or `~/.config`; `sl`, `git`, and `jj` enable repository
 status context; `term-notify-sound` plays the `agent-hook-stop` and
-`agent-hook-notification` terminal notifications; and
+`agent-hook-notification` terminal notifications; `term-pane-mark` marks the
+agent's tmux pane busy from a submitted prompt until the turn ends, changed
+only by the pane terminal's foreground agent so agents it launches cannot
+clear it early; and
 `claude-templates` enables a Claude-specific maintenance hook when that
 command is installed.
 

@@ -76,6 +76,18 @@ TEST_SID="agent-hook-test-$$"
 export XDG_RUNTIME_DIR="$TEST_TMPDIR"
 export XDG_CACHE_HOME="$TEST_TMPDIR"
 
+# Lifecycle hooks mark the agent's tmux pane busy through PATH-visible
+# term-pane-mark, which finds a pane from the tmux variables or the controlling
+# terminal. Drop the variables and shadow the command with a no-op so a suite
+# run from a tmux pane never marks it busy; suites that assert marks install
+# their own logging stub ahead of this one. Fixtures that run the host's real
+# term-notify-sound can still ring and mark a pane pending, as before.
+unset TMUX TMUX_PANE
+mkdir -p "$TEST_TMPDIR/hermetic-bin"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$TEST_TMPDIR/hermetic-bin/term-pane-mark"
+chmod +x "$TEST_TMPDIR/hermetic-bin/term-pane-mark"
+export PATH="$TEST_TMPDIR/hermetic-bin:$PATH"
+
 PRE_MCP="$BIN_DIR/agent-hook-pre-mcp"
 POST_MCP="$BIN_DIR/agent-hook-post-mcp"
 PRE_BASH="$BIN_DIR/agent-hook-pre-bash"

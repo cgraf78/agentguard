@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-PROMPT-SUBMIT 1 "2026-06-30" "agentguard" "User Commands"
+.TH AGENT-HOOK-PROMPT-SUBMIT 1 "2026-10-12" "agentguard" "User Commands"
 .SH NAME
 agent-hook-prompt-submit \- handle prompt-time agent context refresh
 .SH SYNOPSIS
@@ -9,7 +9,19 @@ reads a prompt-submit hook JSON payload from standard input and delegates
 memory-intent reminders and prompt-time context refresh policy to
 .BR "hm hook prompt-submit" .
 It then resets once-per-prompt AgentGuard state used by edit and command
-guidance.
+guidance. Unless an extension blocks the prompt, a prompt with text also marks
+the agent's tmux pane busy with
+.BR "term-pane-mark set busy" ,
+when that command is installed. It changes the mark only while the agent
+process that runs the hook is the pane terminal's foreground program, so an
+agent it launches, which inherits the pane but not its terminal, can neither
+set nor clear it. A Codex session without a transcript is not tracked: that
+covers Codex's in-process background agents (memory consolidation, task
+titles), and also a
+.B codex exec \-\-ephemeral
+run directly in a pane;
+.BR agent-hook-stop (1)
+clears the mark when the turn ends.
 .SH ENVIRONMENT
 .TP
 .B AGENTGUARD_HIVE_MEMORY_HOOKS
@@ -22,4 +34,5 @@ to disable Hive Memory hook integration.
 Prompt handling completed.
 .SH SEE ALSO
 .BR hm (1),
-.BR agent-hook-session-start (1)
+.BR agent-hook-session-start (1),
+.BR term-pane-mark (1)

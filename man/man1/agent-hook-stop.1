@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-STOP 1 "2026-09-29" "agentguard" "User Commands"
+.TH AGENT-HOOK-STOP 1 "2026-10-12" "agentguard" "User Commands"
 .SH NAME
 agent-hook-stop \- run end-of-turn agent checks and notifications
 .SH SYNOPSIS
@@ -6,7 +6,10 @@ agent-hook-stop \- run end-of-turn agent checks and notifications
 .SH DESCRIPTION
 .B agent-hook-stop
 reads a stop hook JSON payload from standard input, asks Hive Memory for any
-pending-memory reminder, and plays a terminal notification for the first
+pending-memory reminder, and plays a terminal notification (naming the agent
+process with
+.BR "term-notify-sound \-\-owner" )
+for the first
 non-reentrant Stop callback after a valid prompt. Repeated callbacks stay silent
 until another valid prompt re-arms the shared AgentGuard state. On Codex, the
 Hive Memory check and notification still run, but the response is replaced
@@ -15,6 +18,15 @@ affected Codex releases persist their synthetic messages with replay-invalid
 item IDs. Prompt-submit still surfaces memory reminders before Stop. On Grok,
 the response is always empty JSON because Grok treats Stop context as
 keep-working feedback; an extension block still exits with status 2.
+.PP
+A foreground Stop that lets the turn end also clears the agent's busy tmux
+pane mark with
+.BR "term-pane-mark clear busy" .
+A subagent Stop, or one an extension blocks to keep the agent working, leaves
+the mark set; because Codex Stop is always fail-open, an extension block does
+not keep it on Codex. Only the pane terminal's foreground agent changes the
+mark, so the Stop of an agent it launched, which runs without that terminal,
+leaves it alone.
 .SH EXIT STATUS
 .TP
 .B 0
@@ -25,4 +37,5 @@ On runtimes other than Codex, the hook asks the agent runtime to continue
 because a block must be surfaced.
 .SH SEE ALSO
 .BR agent-hook-notification (1),
-.BR hm (1)
+.BR hm (1),
+.BR term-pane-mark (1)

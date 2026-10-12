@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-TELEMETRY 1 "2026-10-07" "agentguard" "User Commands"
+.TH AGENT-HOOK-TELEMETRY 1 "2026-10-12" "agentguard" "User Commands"
 .SH NAME
 agent-hook-telemetry \- record an agent hook event in the audit trail
 .SH SYNOPSIS
@@ -29,6 +29,24 @@ When the payload looks like a session start, a background pass deletes
 sessions idle for longer than
 .B AGENTGUARD_TELEMETRY_RETENTION_DAYS
 days.
+.PP
+A
+.B StopFailure
+or
+.B Interrupt
+event for the foreground turn ends it without a Stop callback, and only this hook is wired to
+those events, so while recording is enabled it also clears the agent's busy
+tmux pane mark with
+.BR "term-pane-mark clear busy" .
+A subagent's event (one carrying
+.BR agent_id )
+and an
+.B Interrupt
+whose
+.B reason
+is
+.B superseded
+(sent after the steering prompt that replaced the turn) leave the mark set.
 .SH ENVIRONMENT
 .TP
 .B AGENTGUARD_TELEMETRY
@@ -51,4 +69,5 @@ in the AgentGuard checkout.
 .SH EXIT STATUS
 Always 0.
 .SH SEE ALSO
-.BR agentguard-telemetry (1)
+.BR agentguard-telemetry (1),
+.BR term-pane-mark (1)

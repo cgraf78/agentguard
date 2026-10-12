@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # agent-hook-session-end — SessionEnd hook.
-# Parses session metadata. Agent-specific extensions handle naming.
+# Clears the agent's busy pane mark and parses session metadata.
+# Agent-specific extensions handle naming.
 
 set -u
 _HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}" # captured before sourcing so _hook_source_extensions finds agent/local variants
@@ -36,6 +37,8 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
 }
 # END GENERATED LAUNCHER BOOTSTRAP
 
+# The agent is exiting, so whatever turn it was in is over.
+_hook_pane_busy clear
 _hook_read_input || exit 0
 sid=$(printf '%s' "$_HOOK_INPUT" | jq -r '.session_id // .sessionId // empty')
 tp=$(printf '%s' "$_HOOK_INPUT" | jq -r '.transcript_path // .transcriptPath // empty')

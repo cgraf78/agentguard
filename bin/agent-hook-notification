@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # agent-hook-notification — Notification hook.
-# Audible alert on permission prompts and other attention requests.
+# Audible alert on permission prompts and other attention requests. An idle
+# prompt also clears the busy pane mark a user interrupt left behind.
 
 set -u
 _HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}" # captured before sourcing so _hook_source_extensions finds agent/local variants
@@ -36,7 +37,11 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
 }
 # END GENERATED LAUNCHER BOOTSTRAP
 
-term-notify-sound 2>/dev/null || true
+# --owner: an agent this one launched cannot mark this agent's pane pending.
+term-notify-sound --owner "$PPID" 2>/dev/null || true
+if _hook_notification_is_idle; then
+  _hook_pane_busy clear
+fi
 
 _hook_source_extensions
 _hook_finish
