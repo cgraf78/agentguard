@@ -3,10 +3,21 @@
 # Sourced by agent-hook-session-end via _hook_source_agent.
 # Auto-names untitled sessions using claude-session-name.
 
-_AGENTGUARD_CUSTOM_TITLE_JQ='try fromjson catch empty | select(.type == "custom-title")'
+# jq arguments for the "already titled" check: true when any transcript line
+# is a top-level custom-title record. The predicate must reduce the whole file
+# to one boolean. Under jq 1.6, `-e` reflects only the last input line, so a
+# per-line `select` reported "untitled" whenever the title was not the final
+# line — normally the case at SessionEnd — and naming overwrote existing
+# titles, including the user's own /rename. Avoid any/2 and first/1 here too:
+# jq 1.6 implements them with label/break, and the `fromjson?` error handler
+# swallows the break, so they miss titles separated by other records (Claude
+# re-emits its title throughout a session). Collecting the matches keeps only
+# the title records in memory. Both checks below share this array so the
+# flags and the expression cannot drift apart.
+_AGENTGUARD_CUSTOM_TITLE_JQ=(-n -e -R '[inputs | fromjson? | objects | select(.type == "custom-title")] | length > 0')
 
 _agentguard_transcript_has_custom_title() {
-  jq -e -R "$_AGENTGUARD_CUSTOM_TITLE_JQ" "$1" >/dev/null 2>&1
+  jq "${_AGENTGUARD_CUSTOM_TITLE_JQ[@]}" "$1" >/dev/null 2>&1
 }
 
 _agentguard_claude_session_end() {
@@ -21,19 +32,20 @@ _agentguard_claude_session_end() {
   _hook_timeout_prefix 60
 
   # Fire-and-forget: nohup so naming survives hook exit, with a timeout when
-  # the platform provides one.
+  # the platform provides one. Naming takes seconds, so re-check for a title
+  # (a concurrent /rename) right before appending.
   # shellcheck disable=SC2016
   nohup "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '
   transcript_has_custom_title() {
-    jq -e -R "$2" "$1" >/dev/null 2>&1
+    jq "${@:2}" "$1" >/dev/null 2>&1
   }
 
   NAME=$(claude-session-name "$1")
   [ -z "$NAME" ] && exit 0
-  transcript_has_custom_title "$1" "$3" && exit 0
+  transcript_has_custom_title "$1" "${@:3}" && exit 0
   jq -nc --arg t "$NAME" --arg s "$2" \
     "{\"type\":\"custom-title\",\"customTitle\":\$t,\"sessionId\":\$s}" >> "$1"
-' _ "$transcript_path" "$session_id" "$_AGENTGUARD_CUSTOM_TITLE_JQ" >/dev/null 2>&1 &
+' _ "$transcript_path" "$session_id" "${_AGENTGUARD_CUSTOM_TITLE_JQ[@]}" >/dev/null 2>&1 &
   disown
 }
 

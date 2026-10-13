@@ -650,22 +650,183 @@ title_count=$(_wait_for_session_end_title_count "$SESSION_END_TRANSCRIPT" 1)
 _assert_eq "session-end: user text mentioning custom-title does not suppress naming" \
   "1" "$title_count"
 
-SESSION_END_TITLED_TRANSCRIPT="$MOCK_END_DIR/titled-transcript.jsonl"
-cat >"$SESSION_END_TITLED_TRANSCRIPT" <<'JSONL'
+# Run the Claude SessionEnd extension from a fixture install on one
+# transcript and wait for its background naming child (BASH_ENV turns disown
+# into wait). The mock namer touches the marker, so a missing marker proves
+# naming was never attempted. Args: transcript, marker, [fixture dir].
+_run_session_end_naming() {
+  local transcript="$1" marker="$2" fixture="${3:-$MOCK_END_DIR}"
+  printf '{"session_id":"sess-detect","transcript_path":"%s"}' "$transcript" |
+    AGENTGUARD_SESSION_ID="$TEST_SID" \
+      TMPDIR="$TEST_TMPDIR" \
+      AGENTGUARD_NAME="claude" \
+      BASH_ENV="$SESSION_END_BASH_ENV" \
+      SESSION_END_NAME_MARKER="$marker" \
+      PATH="$fixture/bin:$PATH" \
+      "$fixture/bin/agent-hook-session-end" >/dev/null 2>/dev/null
+}
+
+_session_end_titles() {
+  jq -r -R 'fromjson? | objects | select(.type == "custom-title") | .customTitle' "$1" |
+    paste -sd, -
+}
+
+# Claude keeps writing records after a /rename or auto-title, so at
+# SessionEnd the title is normally not the last line. Under jq 1.6 a per-line
+# `jq -e` check missed it and overwrote the existing title.
+SESSION_END_TITLE_NOT_LAST="$MOCK_END_DIR/title-not-last.jsonl"
+cat >"$SESSION_END_TITLE_NOT_LAST" <<'JSONL'
 {"type":"user","message":{"content":"Existing title should be preserved."}}
-{"type":"custom-title","customTitle":"existing-title","sessionId":"sess-titled"}
+{"type":"custom-title","customTitle":"existing-title","sessionId":"sess-detect"}
+{"type":"user","message":{"content":"Later turn."}}
+{"type":"last-prompt","lastPrompt":"Later turn.","sessionId":"sess-detect"}
 JSONL
+SESSION_END_NAME_MARKER="$MOCK_END_DIR/title-not-last-named.log"
+_run_session_end_naming "$SESSION_END_TITLE_NOT_LAST" "$SESSION_END_NAME_MARKER"
+_assert_file_missing "session-end: title before the last line skips naming" \
+  "$SESSION_END_NAME_MARKER"
+_assert_eq "session-end: title before the last line is preserved" \
+  "existing-title" \
+  "$(_session_end_titles "$SESSION_END_TITLE_NOT_LAST")"
 
-printf '{"session_id":"sess-titled","transcript_path":"%s"}' "$SESSION_END_TITLED_TRANSCRIPT" |
-  AGENTGUARD_SESSION_ID="$TEST_SID" \
-    TMPDIR="$TEST_TMPDIR" \
-    AGENTGUARD_NAME="claude" \
-    PATH="$MOCK_END_DIR/bin:$PATH" \
-    "$MOCK_END" >/dev/null 2>/dev/null
+# Claude re-emits the current title throughout a session, so real
+# transcripts hold several title records separated by other lines. jq 1.6's
+# label/break-based any/first lose matches after the first one here.
+SESSION_END_TITLES_SEPARATED="$MOCK_END_DIR/titles-separated.jsonl"
+cat >"$SESSION_END_TITLES_SEPARATED" <<'JSONL'
+{"type":"user","message":{"content":"First turn."}}
+{"type":"custom-title","customTitle":"existing-title","sessionId":"sess-detect"}
+{"type":"user","message":{"content":"Second turn."}}
+{"type":"custom-title","customTitle":"existing-title","sessionId":"sess-detect"}
+{"type":"last-prompt","lastPrompt":"Second turn.","sessionId":"sess-detect"}
+JSONL
+SESSION_END_NAME_MARKER="$MOCK_END_DIR/titles-separated-named.log"
+_run_session_end_naming "$SESSION_END_TITLES_SEPARATED" "$SESSION_END_NAME_MARKER"
+_assert_file_missing "session-end: repeated separated titles skip naming" \
+  "$SESSION_END_NAME_MARKER"
+_assert_eq "session-end: repeated separated titles are preserved" \
+  "existing-title,existing-title" "$(_session_end_titles "$SESSION_END_TITLES_SEPARATED")"
 
-title_count=$(_session_end_title_count "$SESSION_END_TITLED_TRANSCRIPT")
-_assert_eq "session-end: real custom-title event still suppresses naming" \
-  "1" "$title_count"
+SESSION_END_TITLE_LAST="$MOCK_END_DIR/title-last.jsonl"
+cat >"$SESSION_END_TITLE_LAST" <<'JSONL'
+{"type":"user","message":{"content":"Existing title should be preserved."}}
+{"type":"custom-title","customTitle":"existing-title","sessionId":"sess-detect"}
+JSONL
+SESSION_END_NAME_MARKER="$MOCK_END_DIR/title-last-named.log"
+_run_session_end_naming "$SESSION_END_TITLE_LAST" "$SESSION_END_NAME_MARKER"
+_assert_file_missing "session-end: title on the last line skips naming" \
+  "$SESSION_END_NAME_MARKER"
+_assert_eq "session-end: title on the last line is preserved" \
+  "1" "$(_session_end_title_count "$SESSION_END_TITLE_LAST")"
+
+SESSION_END_UNTITLED="$MOCK_END_DIR/untitled.jsonl"
+cat >"$SESSION_END_UNTITLED" <<'JSONL'
+{"type":"user","message":{"content":"Name this session."}}
+{"type":"assistant","message":{"content":"ok"}}
+JSONL
+SESSION_END_NAME_MARKER="$MOCK_END_DIR/untitled-named.log"
+_run_session_end_naming "$SESSION_END_UNTITLED" "$SESSION_END_NAME_MARKER"
+_assert_file_exists "session-end: untitled transcript is named" \
+  "$SESSION_END_NAME_MARKER"
+_assert_eq "session-end: untitled transcript gets the generated title" \
+  "structured-title" \
+  "$(_session_end_titles "$SESSION_END_UNTITLED")"
+
+# Malformed JSON, non-object JSON, and title-shaped values that are not
+# top-level records must neither break detection nor count as a title.
+SESSION_END_MIXED_TITLED="$MOCK_END_DIR/mixed-titled.jsonl"
+cat >"$SESSION_END_MIXED_TITLED" <<'JSONL'
+{"type":"user"
+"custom-title"
+42
+null
+[{"type":"custom-title","customTitle":"in-array"}]
+
+{"type":"custom-title","customTitle":"existing-title","sessionId":"sess-detect"}
+{not json
+{"type":"user","message":{"content":"Later turn."}}
+JSONL
+SESSION_END_NAME_MARKER="$MOCK_END_DIR/mixed-titled-named.log"
+_run_session_end_naming "$SESSION_END_MIXED_TITLED" "$SESSION_END_NAME_MARKER"
+_assert_file_missing "session-end: title among malformed lines skips naming" \
+  "$SESSION_END_NAME_MARKER"
+
+SESSION_END_MIXED_UNTITLED="$MOCK_END_DIR/mixed-untitled.jsonl"
+cat >"$SESSION_END_MIXED_UNTITLED" <<'JSONL'
+{"type":"custom-title","customTitle":"truncated"
+"custom-title"
+42
+[{"type":"custom-title","customTitle":"in-array"}]
+{"type":"user","message":{"content":[{"type":"custom-title","text":"nested"}]}}
+{not json
+JSONL
+SESSION_END_NAME_MARKER="$MOCK_END_DIR/mixed-untitled-named.log"
+_run_session_end_naming "$SESSION_END_MIXED_UNTITLED" "$SESSION_END_NAME_MARKER"
+_assert_file_exists "session-end: malformed lines without a title still name" \
+  "$SESSION_END_NAME_MARKER"
+_assert_eq "session-end: malformed lines without a title get one title" \
+  "1" "$(_session_end_title_count "$SESSION_END_MIXED_UNTITLED")"
+
+# An empty transcript is not titled, so it reaches the real namer, which
+# finds no user messages: no model call and nothing appended. A wrapper
+# records that the namer was reached, distinguishing this from a skip.
+EMPTY_END_DIR=$(_tmpdir)
+_install_hook_fixture "$EMPTY_END_DIR" agent-hook-session-end \
+  agent-hook-session-end-claude
+cp "$BIN_DIR/claude-session-name" "$EMPTY_END_DIR/real-claude-session-name"
+SESSION_END_REACHED_MARKER="$EMPTY_END_DIR/empty-reached.log"
+cat >"$EMPTY_END_DIR/bin/claude-session-name" <<MOCK
+#!/usr/bin/env bash
+: >$(printf '%q' "$SESSION_END_REACHED_MARKER")
+exec $(printf '%q' "$EMPTY_END_DIR/real-claude-session-name") "\$@"
+MOCK
+chmod +x "$EMPTY_END_DIR/bin/claude-session-name" \
+  "$EMPTY_END_DIR/real-claude-session-name"
+cat >"$EMPTY_END_DIR/bin/claude" <<'MOCK'
+#!/usr/bin/env bash
+cat >/dev/null
+: >"$SESSION_END_NAME_MARKER"
+printf '%s\n' "unexpected-title"
+MOCK
+chmod +x "$EMPTY_END_DIR/bin/claude"
+SESSION_END_EMPTY="$EMPTY_END_DIR/empty.jsonl"
+: >"$SESSION_END_EMPTY"
+SESSION_END_NAME_MARKER="$EMPTY_END_DIR/empty-named.log"
+_run_session_end_naming "$SESSION_END_EMPTY" "$SESSION_END_NAME_MARKER" \
+  "$EMPTY_END_DIR"
+_assert_file_exists "session-end: empty transcript reaches the namer" \
+  "$SESSION_END_REACHED_MARKER"
+_assert_file_missing "session-end: empty transcript makes no model call" \
+  "$SESSION_END_NAME_MARKER"
+_assert_eq "session-end: empty transcript stays empty" \
+  "0" "$(wc -c <"$SESSION_END_EMPTY" | tr -d ' ')"
+
+# Naming takes seconds, so the background child re-checks for a title right
+# before appending. This namer simulates a /rename (plus a later record)
+# landing while the model call runs; the generated name must be dropped.
+RENAME_END_DIR=$(_tmpdir)
+_install_hook_fixture "$RENAME_END_DIR" agent-hook-session-end \
+  agent-hook-session-end-claude
+cat >"$RENAME_END_DIR/bin/claude-session-name" <<'MOCK'
+#!/usr/bin/env bash
+: >"$SESSION_END_NAME_MARKER"
+printf '%s\n' \
+  '{"type":"custom-title","customTitle":"user-rename","sessionId":"sess-detect"}' \
+  '{"type":"last-prompt","lastPrompt":"x","sessionId":"sess-detect"}' >>"$1"
+printf '%s\n' "generated-title"
+MOCK
+chmod +x "$RENAME_END_DIR/bin/claude-session-name"
+SESSION_END_RACE="$RENAME_END_DIR/race.jsonl"
+cat >"$SESSION_END_RACE" <<'JSONL'
+{"type":"user","message":{"content":"Untitled at SessionEnd."}}
+JSONL
+SESSION_END_NAME_MARKER="$RENAME_END_DIR/race-named.log"
+_run_session_end_naming "$SESSION_END_RACE" "$SESSION_END_NAME_MARKER" \
+  "$RENAME_END_DIR"
+_assert_file_exists "session-end: re-check case reaches the namer" \
+  "$SESSION_END_NAME_MARKER"
+_assert_eq "session-end: title written during naming is not overwritten" \
+  "user-rename" "$(_session_end_titles "$SESSION_END_RACE")"
 
 echo ""
 echo "=== claude-session-name ==="
