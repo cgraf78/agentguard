@@ -52,6 +52,9 @@ assets through shdeps, or use their absolute paths in this checkout.
   records. See [Audit Telemetry](#audit-telemetry).
 - `bin/claude-session-name` names Claude transcript sessions for
   `agent-hook-session-end-claude` and for manual transcript backfills.
+- `bin/wait-until` waits for one concrete condition with a bounded deadline,
+  the replacement `agent-hook-pre-bash` suggests for long foreground sleeps.
+  See [Script Notes](#script-notes).
 - `lib/agentguard/agentguard.sh` is the sourceable detection API for non-hook
   callers. It exposes `agentguard_is_session`, `agentguard_agent_name`, and
   `agentguard_session_id` so launchers share one runtime-identity contract.
@@ -396,6 +399,21 @@ To add a new managed agent runtime:
   reminds agents to run a review/simplify pass and inspect the final diff
   before commit-class commands (metadata-only changes skip that reminder), and
   adds commit-message format and public-repo leak reminders for `git commit`.
+  It warns, never blocks, on a foreground `sleep` totalling 60 seconds or more
+  (GNU operands such as `300`, `5m`, `1h`, or `1.5m`, summed), pointing at
+  `wait-until` or the runtime's background execution: a fixed sleep holds the
+  whole agent turn, and polling the agent's own background-task output is
+  pointless when the host notifies on completion. A sleep backgrounded with
+  `&` (alone or in a backgrounded list or pipeline), a tool call the host runs
+  in the background (Claude Code `run_in_background`, Gemini CLI
+  `is_background`), and `sleep` text inside quotes, heredocs, or `echo` stay
+  silent. The check is pure Bash string work on the fast path; the background
+  flag costs one `jq` call, and only after a long sleep has matched.
+  Background detection is a deliberate heuristic with known misses in both
+  directions (for example, `timeout 30 sleep 300` still warns), acceptable
+  because it only gates advice. `wait-until --cmd`
+  payloads get the same guards as `bash -c` payloads, since `wait-until` runs
+  them with `bash -c`.
 - `agent-hook-pre-search` dispatches file-search tool calls to agent-specific
   extensions and enforces nothing itself. `agent-hook-pre-search-muse` blocks
   Muse file searches that do not follow symlinks; uninspectable payloads fail
@@ -471,6 +489,30 @@ Claude-specific extensions auto-name untitled sessions and run the daily
 `claude-templates update` refresh in the background.
 
 ## Script Notes
+
+`wait-until` polls exactly one condition and returns as soon as it holds:
+
+```text
+wait-until [--timeout SECS] [--interval SECS] --file PATH
+wait-until [...] --pattern REGEX --in FILE   # FILE may appear later
+wait-until [...] --pid PID                   # process has exited
+wait-until [...] --cmd 'COMMAND'             # bash -c COMMAND exits 0
+```
+
+`--timeout` defaults to 90 seconds, under Claude Code's default 120-second Bash
+tool timeout, and `--interval` to 2. Longer waits need an explicit `--timeout`
+and should run as a background tool call (`run_in_background`) so the agent's
+tool timeout cannot kill them first. It exits 0 when the condition holds, 124
+on timeout with a one-line diagnostic of the last observed state, and 2 on
+usage errors. Each `--cmd` probe runs in its own process group, which is
+stopped (TERM, then KILL after a short grace period) when the probe finishes or
+its budget expires, so a hung probe cannot outlive the deadline by more than
+that; a probe started at the deadline still gets two seconds to finish. `--pid`
+decides existence from `kill -0` and its error (no such process versus not
+permitted), so a hidepid `/proc` or a missing `ps` cannot hide an exit, and
+spots zombies through `/proc` on Linux or `ps` elsewhere; it never reports an
+exit it cannot confirm. Older Bash (macOS `/bin/bash` 3.2) measures the
+deadline in whole seconds and can end up to a second early.
 
 `claude-session-name` is a PATH-visible helper used by
 `agent-hook-session-end-claude`. It can also name older transcripts in batch:

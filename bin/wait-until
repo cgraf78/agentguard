@@ -1,0 +1,350 @@
+#!/usr/bin/env bash
+# wait-until — poll one concrete condition with a bounded deadline.
+#
+# Agents that need to wait tend to run `sleep 300; cat log`, which blocks the
+# whole turn for the full duration even when the awaited state arrived after
+# five seconds, and silently hits the tool timeout when it never arrives. This
+# returns as soon as the condition holds and fails with a diagnostic at the
+# deadline, so the wait is both shorter and bounded.
+#
+# Usage: wait-until [--timeout SECS] [--interval SECS] CONDITION
+#   CONDITION is exactly one of:
+#     --file PATH                 PATH exists
+#     --pattern REGEX --in FILE   FILE contains a line matching extended REGEX
+#     --pid PID                   process PID has exited
+#     --cmd 'COMMAND'             bash -c COMMAND exits 0
+#
+# Exit status: 0 condition held, 124 timed out (same as timeout(1)), 2 usage.
+
+set -u
+
+prog="${0##*/}"
+# 90 s stays under Claude Code's default 120 s Bash tool timeout, so a call
+# with defaults reports its own timeout instead of being killed by the tool.
+timeout=90
+interval=2
+mode=""
+target=""
+pattern=""
+pattern_file=""
+# Last observed state, reported on timeout so the caller can tell "never
+# appeared" from "appeared but never matched" without another round trip.
+last=""
+child=""
+sleeper=""
+
+usage() {
+  cat <<EOF
+Usage: $prog [--timeout SECS] [--interval SECS] CONDITION
+
+Wait until exactly one CONDITION holds, polling every --interval seconds
+(default 2) for at most --timeout seconds (default 90).
+
+Longer waits need an explicit --timeout and should run as a background tool
+call (run_in_background) so the agent's tool timeout cannot kill them first.
+
+Conditions:
+  --file PATH                 PATH exists
+  --pattern REGEX --in FILE   FILE contains a line matching extended REGEX
+  --pid PID                   process PID has exited
+  --cmd 'COMMAND'             bash -c COMMAND exits 0
+
+Exit status: 0 when the condition holds, 124 on timeout, 2 on usage error.
+EOF
+}
+
+die_usage() {
+  printf '%s: %s\n' "$prog" "$1" >&2
+  printf "Try '%s --help'.\n" "$prog" >&2
+  exit 2
+}
+
+set_mode() {
+  [ -z "$mode" ] || die_usage "give exactly one condition (--file, --pattern, --pid, or --cmd)"
+  mode="$1"
+  target="$2"
+}
+
+# Reads the value of option $1 from $2, which must be present. Sets `optval`
+# and `shift_by` so the caller handles both `--opt VALUE` and `--opt=VALUE`.
+take_value() {
+  local opt="$1"
+  if [[ "$opt" == *=* ]]; then
+    optval="${opt#*=}"
+    shift_by=1
+  else
+    [ "$#" -ge 2 ] || die_usage "${opt} needs a value"
+    optval="$2"
+    shift_by=2
+  fi
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --timeout | --timeout=*)
+      take_value "$@"
+      timeout="$optval"
+      ;;
+    --interval | --interval=*)
+      take_value "$@"
+      interval="$optval"
+      ;;
+    --file | --file=*)
+      take_value "$@"
+      set_mode file "$optval"
+      ;;
+    --pattern | --pattern=*)
+      take_value "$@"
+      [ -z "$pattern" ] || die_usage "--pattern given twice"
+      pattern="$optval"
+      ;;
+    --in | --in=*)
+      take_value "$@"
+      [ -z "$pattern_file" ] || die_usage "--in given twice"
+      pattern_file="$optval"
+      ;;
+    --pid | --pid=*)
+      take_value "$@"
+      set_mode pid "$optval"
+      ;;
+    --cmd | --cmd=*)
+      take_value "$@"
+      set_mode cmd "$optval"
+      ;;
+    *)
+      die_usage "unknown argument: $1"
+      ;;
+  esac
+  shift "$shift_by"
+done
+
+if [ -n "$pattern" ] || [ -n "$pattern_file" ]; then
+  [ -n "$pattern" ] && [ -n "$pattern_file" ] || die_usage "--pattern and --in must be used together"
+  set_mode pattern "$pattern_file"
+fi
+[ -n "$mode" ] || die_usage "missing condition (--file, --pattern, --pid, or --cmd)"
+[ -n "$target" ] || die_usage "empty condition value"
+
+# Ten digits bound the millisecond arithmetic below.
+[[ "$timeout" =~ ^[0-9]{1,10}$ ]] || die_usage "--timeout must be a whole number of seconds"
+timeout=$((10#$timeout))
+[[ "$interval" =~ ^[0-9]{1,10}(\.[0-9]+)?$ ]] && [[ "$interval" =~ [1-9] ]] ||
+  die_usage "--interval must be a positive number of seconds"
+interval_frac=""
+[[ "$interval" == *.* ]] && interval_frac="${interval#*.}"
+interval_frac="${interval_frac}000"
+interval_ms=$((10#${interval%%.*} * 1000 + 10#${interval_frac:0:3}))
+[ "$interval_ms" -gt 0 ] || interval_ms=1
+if [ "$mode" = pid ]; then
+  [[ "$target" =~ ^[1-9][0-9]{0,9}$ ]] || die_usage "--pid must be a positive process id"
+fi
+
+# A --cmd probe runs as its own background job so a hung probe cannot hold
+# wait-until past its deadline. Job control puts the probe in its own process
+# group, so stopping it also stops anything the probe spawned. TERM comes
+# first; CONT lets a member stopped by job control (SIGTTIN from reading the
+# terminal) act on it; KILL after a short grace period means a probe that
+# ignores TERM still cannot outlive the deadline. Safe after the probe has
+# exited: an empty group only makes kill fail.
+stop_child() {
+  local i
+  [ -n "$child" ] || return 0
+  kill -TERM -- "-$child" 2>/dev/null
+  kill -CONT -- "-$child" 2>/dev/null
+  for ((i = 0; i < 20; i++)); do
+    kill -0 -- "-$child" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -KILL -- "-$child" 2>/dev/null
+  wait "$child" 2>/dev/null
+  child=""
+}
+
+on_signal() {
+  stop_child
+  [ -z "$sleeper" ] || kill "$sleeper" 2>/dev/null
+  exit "$1"
+}
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+trap 'on_signal 129' HUP
+
+check_file() {
+  if [ -e "$target" ]; then
+    return 0
+  fi
+  last="missing"
+  return 1
+}
+
+check_pattern() {
+  if [ ! -e "$target" ]; then
+    last="missing"
+    return 1
+  fi
+  grep -Eq -- "$pattern" "$target" 2>/dev/null
+  case "$?" in
+    0) return 0 ;;
+    1) last="no match" ;;
+    *) last="unreadable or invalid regex" ;;
+  esac
+  return 1
+}
+
+# Sets `state` to the process state of $target, empty when the table shows
+# none, and succeeds when a process table is available. Linux /proc needs no
+# ps, which minimal containers lack and busybox cannot query with `-o stat`;
+# ps (same flags on macOS and BSD) covers the rest. An empty state is never
+# evidence of an exit: the entry can be unreadable (hidepid=1), hidden, or
+# from another PID namespace. Only `kill -0` decides that.
+process_state() {
+  local line own
+  if [ -r /proc/self/stat ]; then
+    state=""
+    { IFS= read -r line <"/proc/$target/stat"; } 2>/dev/null || return 0
+    # comm (field 2) may contain spaces or parens; the state follows the
+    # last ") ".
+    line="${line##*) }"
+    state="${line%% *}"
+    return 0
+  fi
+  own=$(ps -p "$$" -o stat= 2>/dev/null) && [ -n "$own" ] || return 1
+  state=$(ps -p "$target" -o stat= 2>/dev/null) || state=""
+  state="${state#"${state%%[![:space:]]*}"}"
+}
+
+check_pid() {
+  local state err
+  # `kill -0` settles existence: it sees every live pid, even one that a
+  # hidepid /proc (Android, hardened Linux) or a missing ps would hide. Its
+  # failure reason tells "gone" (ESRCH) from "another user's live process"
+  # (EPERM); the builtin reports only strerror text, so pin the C locale to
+  # read it. The process table is only needed to spot a zombie, which still
+  # answers `kill -0`. Whenever the answer is uncertain, keep waiting: a late
+  # success is safe, a false "exited" is not.
+  if err=$(
+    LC_ALL=C
+    export LC_ALL
+    kill -0 "$target" 2>&1
+  ); then
+    if ! process_state; then
+      last="running (no process table to spot a zombie)"
+      return 1
+    fi
+    case "$state" in
+      Z*) return 0 ;;
+    esac
+    # Only ESRCH from `kill -0` or a readable zombie state ends the wait. An
+    # empty state (unreadable, hidden, or foreign-namespace entry, or an
+    # exit between the two looks) waits for the next poll's `kill -0`.
+    last="running${state:+ (state $state)}"
+    return 1
+  fi
+  case "$err" in
+    *"No such process"*) return 0 ;;
+  esac
+  # EPERM: alive, unless it is another user's zombie the table can show.
+  if process_state; then
+    case "$state" in
+      Z*) return 0 ;;
+    esac
+  fi
+  last="running (kill -0: ${err##*- })"
+  return 1
+}
+
+# Runs one --cmd probe bounded by the overall deadline. A probe started at or
+# near the deadline (the final check, or `--timeout 0`) still gets
+# PROBE_MIN_MS to finish; otherwise the last check could never run. Returns
+# the probe's status, or 124 when its budget expired while it still ran.
+PROBE_MIN_MS=2000
+check_cmd() {
+  local rc probe_deadline
+  now_ms
+  probe_deadline=$((now + PROBE_MIN_MS))
+  [ "$probe_deadline" -ge "$deadline" ] || probe_deadline="$deadline"
+  set -m
+  bash -c "$target" </dev/null >/dev/null 2>&1 &
+  child=$!
+  set +m
+  while kill -0 "$child" 2>/dev/null; do
+    now_ms
+    if [ "$now" -ge "$probe_deadline" ]; then
+      stop_child
+      last="probe still running at deadline"
+      return 124
+    fi
+    sleep 0.1
+  done
+  wait "$child"
+  rc=$?
+  # A probe such as `cmd &` can leave members behind; a probe never owns
+  # anything past its own check.
+  stop_child
+  [ "$rc" -eq 0 ] && return 0
+  last="exit $rc"
+  return "$rc"
+}
+
+describe() {
+  case "$mode" in
+    file) printf 'file %s' "$target" ;;
+    pattern) printf '/%s/ in %s' "$pattern" "$target" ;;
+    pid) printf 'pid %s to exit' "$target" ;;
+    cmd) printf 'command to succeed: %s' "$target" ;;
+  esac
+}
+
+# Sets `now` to a monotonic-enough millisecond clock without forking. Bash 5
+# has EPOCHREALTIME; older Bash (macOS /bin/bash 3.2) only has the
+# whole-second SECONDS counter, whose first tick can come early, so there a
+# deadline can end up to a second short.
+if [ "${BASH_VERSINFO[0]}" -ge 5 ]; then
+  now_ms() {
+    local t="$EPOCHREALTIME" us
+    # The separator follows LC_NUMERIC, so accept a comma too.
+    us="${t#*[.,]}000"
+    now=$((${t%%[.,]*} * 1000 + 10#${us:0:3}))
+  }
+else
+  now_ms() {
+    now=$((SECONDS * 1000))
+  }
+fi
+
+# Sleeps one poll interval, cut short so the final check lands on the
+# deadline instead of up to a whole interval past it. The sleep runs as a
+# tracked background child so a TERM is handled at once rather than after
+# the current interval.
+nap() {
+  local duration="$interval_ms" seconds
+  now_ms
+  [ "$((deadline - now))" -ge "$duration" ] || duration=$((deadline - now))
+  [ "$duration" -gt 0 ] || return 0
+  printf -v seconds '%d.%03d' "$((duration / 1000))" "$((duration % 1000))"
+  sleep "$seconds" &
+  sleeper=$!
+  wait "$sleeper"
+  sleeper=""
+}
+
+SECONDS=0
+now_ms
+start="$now"
+deadline=$((start + timeout * 1000))
+while :; do
+  "check_$mode" && exit 0
+  now_ms
+  if [ "$now" -ge "$deadline" ]; then
+    elapsed=$((now - start))
+    printf '%s: timed out after %d.%01ds waiting for %s (last: %s)\n' \
+      "$prog" "$((elapsed / 1000))" "$((elapsed % 1000 / 100))" \
+      "$(describe)" "$last" >&2
+    exit 124
+  fi
+  nap
+done

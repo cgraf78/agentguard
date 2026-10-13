@@ -1,0 +1,374 @@
+#!/usr/bin/env bash
+# wait-until-test — bounded condition polling CLI.
+
+set -o pipefail
+export NO_COLOR=1
+
+AGENTGUARD_TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+AGENTGUARD_REPO_ROOT="$(cd -- "$AGENTGUARD_TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=../helpers.sh
+. "$AGENTGUARD_TEST_DIR/helpers.sh"
+
+WAIT_UNTIL="$AGENTGUARD_REPO_ROOT/bin/wait-until"
+WORK=$(_tmpdir)
+
+# Runs wait-until under an outer safety timeout so a regression that loops
+# forever fails the suite instead of hanging it. Sets WU_EXIT and WU_STDERR.
+_wait_until() {
+  local err_file="$WORK/stderr"
+  WU_EXIT=0
+  _with_timeout 30 "$WAIT_UNTIL" "$@" >/dev/null 2>"$err_file" || WU_EXIT=$?
+  WU_STDERR=$(cat "$err_file")
+}
+
+# Succeeds when pid $1 is a zombie. Reads /proc where it exists (minimal Linux
+# containers ship no ps) and falls back to ps elsewhere.
+_pid_is_zombie() {
+  local pid="$1" line state
+  if [ -r /proc/self/stat ]; then
+    { IFS= read -r line <"/proc/$pid/stat"; } 2>/dev/null || return 1
+    line="${line##*) }"
+    state="${line%% *}"
+  else
+    state=$(ps -p "$pid" -o stat= 2>/dev/null) || return 1
+    state="${state#"${state%%[![:space:]]*}"}"
+  fi
+  [[ "$state" == Z* ]]
+}
+
+# Polls until pid $1 has stopped running; prints 0 when it has, 1 after about
+# 5 seconds. A killed orphan counts once it is a zombie: container init
+# processes such as `tail -f /dev/null` never reap, so it may never vanish.
+_pid_gone() {
+  local pid="$1" i
+  for ((i = 0; i < 50; i++)); do
+    if ! kill -0 "$pid" 2>/dev/null || _pid_is_zombie "$pid"; then
+      echo 0
+      return
+    fi
+    sleep 0.1
+  done
+  echo 1
+}
+
+# Polls for a background helper's own side effect with a bounded deadline, so
+# setup never relies on a guessed sleep.
+_await_file() {
+  local file="$1" i
+  for ((i = 0; i < 100; i++)); do
+    [ -e "$file" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+echo ""
+echo "=== wait-until: usage errors exit 2 ==="
+
+_wait_until
+_assert_eq "no condition: usage" "2" "$WU_EXIT"
+_wait_until --file "$WORK/a" --pid 1
+_assert_eq "two conditions: usage" "2" "$WU_EXIT"
+_wait_until --pattern READY
+_assert_eq "--pattern without --in: usage" "2" "$WU_EXIT"
+_wait_until --in "$WORK/log"
+_assert_eq "--in without --pattern: usage" "2" "$WU_EXIT"
+_wait_until --file
+_assert_eq "missing option value: usage" "2" "$WU_EXIT"
+_wait_until --timeout soon --file "$WORK/a"
+_assert_eq "non-numeric timeout: usage" "2" "$WU_EXIT"
+_wait_until --timeout 1.5 --file "$WORK/a"
+_assert_eq "fractional timeout: usage" "2" "$WU_EXIT"
+_wait_until --interval 0 --file "$WORK/a"
+_assert_eq "zero interval: usage" "2" "$WU_EXIT"
+_wait_until --pid 0
+_assert_eq "pid 0: usage" "2" "$WU_EXIT"
+_wait_until --pid abc
+_assert_eq "non-numeric pid: usage" "2" "$WU_EXIT"
+_wait_until --bogus
+_assert_eq "unknown option: usage" "2" "$WU_EXIT"
+_assert_contains "unknown option: names it" "--bogus" "$WU_STDERR"
+
+help_out=$("$WAIT_UNTIL" --help)
+_assert_eq "--help: exit 0" "0" "$?"
+_assert_contains "--help: shows usage" "Usage: wait-until" "$help_out"
+# The default must stay under Claude Code's 120 s default Bash tool timeout.
+_assert_contains "--help: documents the 90 s default timeout" "--timeout seconds (default 90)" "$help_out"
+
+echo ""
+echo "=== wait-until: --file ==="
+
+touch "$WORK/present"
+_wait_until --timeout 5 --file "$WORK/present"
+_assert_eq "existing file: immediate success" "0" "$WU_EXIT"
+
+(
+  sleep 0.5
+  touch "$WORK/appears"
+) &
+appear_pid=$!
+_wait_until --timeout 10 --interval 0.1 --file "$WORK/appears"
+_assert_eq "file created later: success" "0" "$WU_EXIT"
+wait "$appear_pid"
+
+_wait_until --timeout 1 --interval 0.2 --file "$WORK/never"
+_assert_eq "missing file: timeout 124" "124" "$WU_EXIT"
+_assert_contains "missing file: diagnoses last state" "missing" "$WU_STDERR"
+_assert_eq "missing file: diagnostic is one line" "1" "$(printf '%s\n' "$WU_STDERR" | wc -l | tr -d ' ')"
+
+_wait_until --timeout=1 --interval=0.2 --file="$WORK/never"
+_assert_eq "--opt=value forms: timeout 124" "124" "$WU_EXIT"
+
+_wait_until --timeout 0 --file "$WORK/never"
+_assert_eq "zero timeout: checks once then 124" "124" "$WU_EXIT"
+_wait_until --timeout 0 --file "$WORK/present"
+_assert_eq "zero timeout: condition already true" "0" "$WU_EXIT"
+
+# A poll interval longer than the timeout must not overshoot the deadline.
+start=$SECONDS
+_wait_until --timeout 1 --interval 60 --file "$WORK/never"
+_assert_eq "long interval: still times out" "124" "$WU_EXIT"
+_assert_eq "long interval: deadline caps the sleep" "1" "$(((SECONDS - start) < 10))"
+
+echo ""
+echo "=== wait-until: --pattern --in ==="
+
+printf 'starting\nREADY on :8080\n' >"$WORK/ready.log"
+_wait_until --timeout 5 --pattern '^READY on :[0-9]+$' --in "$WORK/ready.log"
+_assert_eq "extended regex match: success" "0" "$WU_EXIT"
+
+printf 'starting\n' >"$WORK/later.log"
+(
+  sleep 0.5
+  printf 'DONE\n' >>"$WORK/later.log"
+) &
+append_pid=$!
+_wait_until --timeout 10 --interval 0.1 --pattern DONE --in "$WORK/later.log"
+_assert_eq "line appended later: success" "0" "$WU_EXIT"
+wait "$append_pid"
+
+_wait_until --timeout 1 --interval 0.2 --pattern DONE --in "$WORK/ready.log"
+_assert_eq "no match: timeout 124" "124" "$WU_EXIT"
+_assert_contains "no match: diagnoses last state" "no match" "$WU_STDERR"
+
+_wait_until --timeout 1 --interval 0.2 --pattern DONE --in "$WORK/absent.log"
+_assert_eq "absent file: keeps waiting then 124" "124" "$WU_EXIT"
+_assert_contains "absent file: diagnoses last state" "missing" "$WU_STDERR"
+
+# A pattern that starts with a dash is a pattern, not a grep option.
+printf -- '-x flag\n' >"$WORK/dash.log"
+_wait_until --timeout 5 --pattern '-x' --in "$WORK/dash.log"
+_assert_eq "leading-dash pattern: matched literally" "0" "$WU_EXIT"
+
+echo ""
+echo "=== wait-until: --pid ==="
+
+sleep 0.5 &
+short_pid=$!
+_wait_until --timeout 10 --interval 0.1 --pid "$short_pid"
+_assert_eq "process exits: success" "0" "$WU_EXIT"
+wait "$short_pid"
+
+sleep 30 &
+long_pid=$!
+_wait_until --timeout 1 --interval 0.2 --pid "$long_pid"
+_assert_eq "live process: timeout 124" "124" "$WU_EXIT"
+_assert_contains "live process: diagnoses last state" "running" "$WU_STDERR"
+kill "$long_pid" 2>/dev/null
+wait "$long_pid" 2>/dev/null
+
+# An unreaped zombie child has exited even though its pid still answers
+# `kill -0`. The parent outlives the whole check so the zombie cannot be
+# reaped (and vanish) before wait-until looks at it.
+zombie_ready="$WORK/zombie-ready"
+(
+  sleep 0.1 &
+  zombie=$!
+  printf '%s\n' "$zombie" >"$WORK/zombie.pid"
+  touch "$zombie_ready"
+  # Hold the parent without reaping so the child stays a zombie.
+  exec sleep 30
+) &
+zombie_parent=$!
+_await_file "$zombie_ready"
+_assert_eq "zombie fixture: ready" "0" "$?"
+sleep 0.3
+_wait_until --timeout 2 --interval 0.2 --pid "$(cat "$WORK/zombie.pid")"
+_assert_eq "zombie process: treated as exited" "0" "$WU_EXIT"
+
+# Without a usable ps, a failed `kill -0` (EPERM on another user's process,
+# such as pid 1) cannot be told from an exit, so it must not report success.
+fake_ps_bin=$(_tmpdir)
+printf '#!/bin/sh\nexit 1\n' >"$fake_ps_bin/ps"
+chmod +x "$fake_ps_bin/ps"
+WU_EXIT=0
+PATH="$fake_ps_bin:$PATH" _with_timeout 30 "$WAIT_UNTIL" --timeout 1 --interval 0.2 --pid 1 \
+  >/dev/null 2>"$WORK/stderr" || WU_EXIT=$?
+_assert_eq "failing ps: no false exit for pid 1" "124" "$WU_EXIT"
+
+# Existence comes from `kill -0`, not the process table, so an exited pid
+# returns promptly even where the table cannot see it (a hidepid /proc on
+# Android or hardened Linux, or no ps at all).
+sleep 0.2 &
+own_pid=$!
+wait "$own_pid"
+start=$SECONDS
+WU_EXIT=0
+PATH="$fake_ps_bin:$PATH" _with_timeout 30 "$WAIT_UNTIL" --timeout 10 --interval 0.2 \
+  --pid "$own_pid" >/dev/null 2>"$WORK/stderr" || WU_EXIT=$?
+_assert_eq "exited own pid: success without a process table" "0" "$WU_EXIT"
+_assert_eq "exited own pid: returns promptly" "1" "$(((SECONDS - start) < 3))"
+
+# Only ESRCH or a readable zombie state ends the wait. A fake /proc mounted
+# in a private user and mount namespace stands in for an unreadable stat
+# (hidepid=1) and a missing entry (a foreign PID namespace) of a live pid.
+if [ -r /proc/self/stat ] && command -v unshare >/dev/null 2>&1 &&
+  unshare -Urm sh -c 'mount --make-rprivate /' >/dev/null 2>&1; then
+  # shellcheck disable=SC2016 # The inner script expands in the namespace.
+  fake_proc_out=$(
+    unshare -Urm env WAIT_UNTIL="$WAIT_UNTIL" FAKE_PROC="$(_tmpdir)" \
+      /bin/bash --noprofile --norc -c '
+        mount --make-rprivate / || exit 1
+        sleep 30 &
+        pid=$!
+        mkdir -p "$FAKE_PROC/self" && printf "1 (bash) S\n" >"$FAKE_PROC/self/stat"
+        mount --bind "$FAKE_PROC" /proc || exit 1
+        echo setup=ok
+        probe() {
+          "$WAIT_UNTIL" --timeout 1 --interval 0.2 --pid "$pid" >/dev/null 2>&1
+          printf "%s=%s\n" "$1" "$?"
+        }
+        mkdir -p "/proc/$pid/stat"
+        probe unreadable
+        rm -rf "/proc/$pid"
+        probe missing
+        mkdir -p "/proc/$pid"
+        printf "%s (sleep) Z 1\n" "$pid" >"/proc/$pid/stat"
+        probe zombie
+        kill "$pid"
+      '
+  )
+  if [[ "$fake_proc_out" == *setup=ok* ]]; then
+    _assert_contains "unreadable stat of a live pid: keeps waiting" "unreadable=124" "$fake_proc_out"
+    _assert_contains "no /proc entry for a live pid: keeps waiting" "missing=124" "$fake_proc_out"
+    _assert_contains "readable zombie state: ends the wait" "zombie=0" "$fake_proc_out"
+  else
+    # Some hosts allow the namespace but refuse a mount over /proc.
+    echo "  SKIP: fake /proc checks (bind mount over /proc refused)"
+  fi
+else
+  echo "  SKIP: fake /proc checks require /proc and unprivileged user namespaces"
+fi
+
+# EPERM from `kill -0` means another user's live process: keep waiting.
+if [ "$(id -u)" != 0 ]; then
+  _wait_until --timeout 1 --interval 0.2 --pid 1
+  _assert_eq "EPERM pid: keeps waiting" "124" "$WU_EXIT"
+  _assert_contains "EPERM pid: names the kill error" "not permitted" "$WU_STDERR"
+else
+  echo "  SKIP: EPERM pid check (running as root reaches every pid)"
+fi
+
+# Minimal Linux containers ship no ps at all; /proc must still answer both
+# "exited" and "zombie" there.
+if [ -r /proc/self/stat ]; then
+  sleep 0.3 &
+  gone_pid=$!
+  wait "$gone_pid"
+  WU_EXIT=0
+  PATH="$fake_ps_bin:$PATH" _with_timeout 30 "$WAIT_UNTIL" --timeout 5 --interval 0.2 \
+    --pid "$gone_pid" >/dev/null 2>"$WORK/stderr" || WU_EXIT=$?
+  _assert_eq "no ps, /proc: exited process detected" "0" "$WU_EXIT"
+  WU_EXIT=0
+  PATH="$fake_ps_bin:$PATH" _with_timeout 30 "$WAIT_UNTIL" --timeout 5 --interval 0.2 \
+    --pid "$(cat "$WORK/zombie.pid")" >/dev/null 2>"$WORK/stderr" || WU_EXIT=$?
+  _assert_eq "no ps, /proc: zombie detected" "0" "$WU_EXIT"
+else
+  echo "  SKIP: no-ps /proc checks (no /proc on this platform)"
+fi
+kill "$zombie_parent" 2>/dev/null
+wait "$zombie_parent" 2>/dev/null
+
+echo ""
+echo "=== wait-until: --cmd ==="
+
+_wait_until --timeout 5 --cmd 'true'
+_assert_eq "succeeding command: success" "0" "$WU_EXIT"
+
+_wait_until --timeout 10 --interval 0.1 --cmd "test -e '$WORK/appears'"
+_assert_eq "command over shell syntax: success" "0" "$WU_EXIT"
+
+_wait_until --timeout 1 --interval 0.2 --cmd 'exit 3'
+_assert_eq "failing command: timeout 124" "124" "$WU_EXIT"
+_assert_contains "failing command: diagnoses last exit" "exit 3" "$WU_STDERR"
+
+# The final probe gets to run even when the deadline has already arrived:
+# `--timeout 0` checks once, and an interval longer than the timeout still
+# lands one real check on the deadline.
+_wait_until --timeout 0 --cmd 'true'
+_assert_eq "zero timeout, succeeding command: success" "0" "$WU_EXIT"
+_wait_until --timeout 0 --cmd 'false'
+_assert_eq "zero timeout, failing command: timeout 124" "124" "$WU_EXIT"
+_assert_contains "zero timeout, failing command: reports its exit" "exit 1" "$WU_STDERR"
+(
+  sleep 0.5
+  touch "$WORK/late-probe"
+) &
+late_pid=$!
+_wait_until --timeout 2 --interval 30 --cmd "test -e '$WORK/late-probe'"
+_assert_eq "interval longer than timeout: final probe succeeds" "0" "$WU_EXIT"
+wait "$late_pid"
+
+# A probe that hangs must not hold wait-until past its deadline, and must not
+# be left running (with its descendants) afterwards.
+start=$SECONDS
+_wait_until --timeout 1 --interval 0.2 \
+  --cmd "sleep 30 & echo \$! >'$WORK/probe-child.pid'; exec sleep 30"
+_assert_eq "hung probe: timeout 124" "124" "$WU_EXIT"
+_assert_contains "hung probe: diagnoses running probe" "still running" "$WU_STDERR"
+_assert_eq "hung probe: bounded by the deadline" "1" "$(((SECONDS - start) < 10))"
+probe_child=$(cat "$WORK/probe-child.pid" 2>/dev/null)
+_assert_eq "hung probe: descendant pid recorded" "0" "$([ -n "$probe_child" ] && echo 0 || echo 1)"
+_assert_eq "hung probe: descendant stopped" "0" "$(_pid_gone "$probe_child")"
+
+# A probe that ignores TERM is killed after the grace period instead of
+# holding wait-until for its full runtime.
+start=$SECONDS
+_wait_until --timeout 1 --interval 0.2 \
+  --cmd "trap '' TERM; echo \$\$ >'$WORK/stubborn.pid'; sleep 30"
+_assert_eq "TERM-ignoring probe: timeout 124" "124" "$WU_EXIT"
+_assert_eq "TERM-ignoring probe: bounded by deadline plus grace" "1" "$(((SECONDS - start) < 10))"
+_assert_eq "TERM-ignoring probe: stopped" "0" "$(_pid_gone "$(cat "$WORK/stubborn.pid")")"
+
+# A stopped probe (as job control stops a background reader of the terminal)
+# cannot act on TERM until it is continued.
+start=$SECONDS
+_wait_until --timeout 1 --interval 0.2 \
+  --cmd "echo \$\$ >'$WORK/stopped.pid'; kill -STOP \$\$"
+_assert_eq "stopped probe: timeout 124" "124" "$WU_EXIT"
+_assert_eq "stopped probe: bounded by deadline plus grace" "1" "$(((SECONDS - start) < 10))"
+_assert_eq "stopped probe: stopped" "0" "$(_pid_gone "$(cat "$WORK/stopped.pid")")"
+
+# A successful probe does not leave its background members running.
+_wait_until --timeout 5 \
+  --cmd "sleep 30 & echo \$! >'$WORK/leftover.pid'"
+_assert_eq "probe with leftover job: success" "0" "$WU_EXIT"
+_assert_eq "probe with leftover job: member stopped" "0" "$(_pid_gone "$(cat "$WORK/leftover.pid")")"
+
+echo ""
+echo "=== wait-until: TERM stops a running probe ==="
+
+ready="$WORK/term-probe.pid"
+"$WAIT_UNTIL" --timeout 30 --interval 0.2 \
+  --cmd "echo \$\$ >'$ready'; exec sleep 30" >/dev/null 2>&1 &
+wu_pid=$!
+_await_file "$ready"
+_assert_eq "TERM probe: started" "0" "$?"
+probe_pid=$(cat "$ready")
+kill -TERM "$wu_pid"
+wait "$wu_pid"
+_assert_eq "TERM: exits 143" "143" "$?"
+_assert_eq "TERM: probe stopped" "0" "$(_pid_gone "$probe_pid")"
+
+_test_summary

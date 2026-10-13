@@ -105,4 +105,25 @@ _run_hook_with_classifier_marker "$fast_install/bin/agent-hook-pre-bash" \
   '{"tool_input":{"command":"sleep 5 &"}}'
 _assert_eq "trailing background job: allowed" "0" "$HOOK_EXIT"
 
+echo ""
+echo "=== pre-bash: wait-until runs a command only through --cmd ==="
+
+for _wait_command in 'wait-until --file done --timeout 90' 'wait-until --pid 123'; do
+  rm -f "$classifier_marker"
+  _run_hook_with_classifier_marker "$fast_install/bin/agent-hook-pre-bash" \
+    "$(jq -nc --arg c "$_wait_command" '{"tool_input":{"command":$c}}')"
+  _assert_eq "$_wait_command: allowed" "0" "$HOOK_EXIT"
+  _assert_file_missing "$_wait_command: stays on the fast path" "$classifier_marker"
+done
+
+# A quote can spell the option in pieces, so quoted waits are classified too.
+for _wait_command in "wait-until --cmd 'test -f done'" "wait-until --cmd=true" \
+  "wait-until --c''md true" "wait-until --pattern 'READY' --in log"; do
+  rm -f "$classifier_marker"
+  _run_hook_with_classifier_marker "$fast_install/bin/agent-hook-pre-bash" \
+    "$(jq -nc --arg c "$_wait_command" '{"tool_input":{"command":$c}}')"
+  _assert_eq "$_wait_command: allowed" "0" "$HOOK_EXIT"
+  _assert_file_exists "$_wait_command: classified" "$classifier_marker"
+done
+
 _test_summary

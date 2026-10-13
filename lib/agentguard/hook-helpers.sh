@@ -1359,6 +1359,21 @@ _hook_tool_stderr() {
   ' 2>/dev/null
 }
 
+# Succeeds when the shell tool call itself runs detached from the agent turn:
+# Claude Code's Bash tool sets tool_input.run_in_background, and Gemini CLI's
+# shell tool sets is_background (taken from the Gemini CLI tool schema, not
+# verified against a local install; a wrong field name only fails to suppress
+# advice). Runners without such a flag (Codex, OpenCode)
+# background only through shell syntax, which the command classifier sees.
+# Costs a jq fork, so callers ask only after a guard has already matched.
+_hook_tool_runs_in_background() {
+  _hook_read_input || return 1
+  printf '%s' "$_HOOK_INPUT" | jq -e '
+    (.tool_input? // .toolInput?) | objects |
+      .run_in_background == true or .is_background == true
+  ' >/dev/null 2>&1
+}
+
 # Parses edited file paths from hook JSON input. Edit/Write style tools pass a
 # single file_path; Codex API apply_patch passes a patch body (in Codex hook
 # payloads, as tool_input.command), so extract the file headers from that

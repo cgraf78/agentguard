@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# agent-hook-bash-sleep-test — pre-bash long foreground sleep warning.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+# The warning names wait-until; that pointer is the contract agents act on.
+SLEEP_WARNING="wait-until"
+
+_sleep_payload() {
+  jq -nc --arg c "$1" '{"tool_input":{"command":$c}}'
+}
+
+_assert_sleep_warns() {
+  local command="$1"
+  _run_hook "$PRE_BASH" "$(_sleep_payload "$command")"
+  _assert_eq "$command: allowed" "0" "$HOOK_EXIT"
+  _assert_contains "$command: warns" "WARNING" "$HOOK_STDERR"
+  _assert_contains "$command: points at wait-until" "$SLEEP_WARNING" "$HOOK_STDERR"
+}
+
+_assert_sleep_silent() {
+  local command="$1" input="${2:-}"
+  [ -n "$input" ] || input=$(_sleep_payload "$command")
+  _run_hook "$PRE_BASH" "$input"
+  _assert_eq "$command: allowed" "0" "$HOOK_EXIT"
+  _assert_not_contains "$command: no sleep warning" "$SLEEP_WARNING" "$HOOK_STDERR"
+}
+
+echo ""
+echo "=== pre-bash: long foreground sleep warns ==="
+
+# Fast path (a single simple command) and classifier path (separators) must
+# agree, so each duration form appears both bare and inside a list.
+for _sleep_command in \
+  'sleep 60' \
+  'sleep 300' \
+  'sleep 5m' \
+  'sleep 1h' \
+  'sleep 1d' \
+  'sleep 1.5m' \
+  'sleep 30 30' \
+  'sleep 59 1s' \
+  "sleep '300'" \
+  '/bin/sleep 120' \
+  'sleep infinity' \
+  'sleep 99999999999' \
+  'sleep 00060' \
+  'sleep 0.5 59.5' \
+  'sleep 300; cat out.log' \
+  'sleep 240 && tail -5 /tmp/task.output' \
+  'ls; sleep 2; sleep 200' \
+  'sleep 300 2>&1 | tail -1' \
+  'sleep 300 >&2; ls' \
+  'sleep 300 &>/dev/null' \
+  'timeout 900 sleep 300; ls' \
+  'sleep 300; ls &' \
+  'until test -f done; do sleep 120; done' \
+  'bash -c "sleep 300"' \
+  'server & sleep 120; curl localhost'; do
+  _assert_sleep_warns "$_sleep_command"
+done
+
+# Warnings travel through the protocol context too, not only stderr.
+_run_hook "$PRE_BASH" "$(_sleep_payload 'sleep 300')"
+_assert_contains "sleep 300: warning reaches context" "$SLEEP_WARNING" "$HOOK_STDOUT"
+
+echo ""
+echo "=== pre-bash: short, backgrounded, or inert sleep stays silent ==="
+
+# shellcheck disable=SC2016 # Commands are literal hook input, never expanded here.
+for _sleep_command in \
+  'sleep 59' \
+  'sleep 0.9m' \
+  'sleep 0000000000001' \
+  'sleep 30 29.9' \
+  'sleep 5; ls' \
+  'sleep' \
+  'sleep $DELAY; ls' \
+  'sleep --help' \
+  'sleep 300 &' \
+  'sleep 300 & wait $!' \
+  'sleep 300 2>&1 &' \
+  'sleep 300 >/dev/null 2>&1 &' \
+  'sleep 300 &>/dev/null &' \
+  'sleep 300 >&2 &' \
+  'sleep 300 &> sleep.log &' \
+  'sleep 120 && curl localhost &' \
+  'sleep 300 2>&1 | tee sleep.log &' \
+  'nohup sleep 300 &' \
+  '(sleep 300; touch done) &' \
+  '{ sleep 300; touch done; } &' \
+  'echo sleep 300' \
+  'echo "sleep 300"; ls' \
+  "printf '%s\n' 'sleep 600' > notes.txt" \
+  'rg "sleep 300" bin' \
+  './sleep 300' \
+  'ls; ./bin/sleep 300'; do
+  _assert_sleep_silent "$_sleep_command"
+done
+
+# Heredoc bodies are data, not commands.
+_assert_sleep_silent "heredoc body" \
+  "$(_sleep_payload "$(printf 'cat <<EOF >plan.txt\nsleep 300\nEOF')")"
+
+echo ""
+echo "=== pre-bash: background tool calls stay silent ==="
+
+# Claude Code's Bash tool detaches the whole call with run_in_background;
+# the host notifies on completion, so a long sleep there costs no turn time.
+for _sleep_command in 'sleep 300' 'sleep 300; cat out.log'; do
+  _assert_sleep_silent "run_in_background: $_sleep_command" \
+    "$(jq -nc --arg c "$_sleep_command" \
+      '{"tool_input":{"command":$c,"run_in_background":true}}')"
+done
+# Gemini CLI's shell tool spells the same flag is_background.
+_assert_sleep_silent "is_background: sleep 300" \
+  '{"tool_input":{"command":"sleep 300","is_background":true}}'
+# An explicit false is still a foreground call.
+_run_hook "$PRE_BASH" '{"tool_input":{"command":"sleep 300","run_in_background":false}}'
+_assert_contains "run_in_background false: warns" "$SLEEP_WARNING" "$HOOK_STDERR"
+
+echo ""
+echo "=== pre-bash: sleep warning never masks a block ==="
+
+_run_hook "$PRE_BASH" "$(_sleep_payload 'sleep 300; git reset --hard')"
+_assert_eq "sleep then git reset --hard: blocked" "2" "$HOOK_EXIT"
+_assert_contains "sleep then git reset --hard: still warns" "$SLEEP_WARNING" "$HOOK_STDERR"
+
+_test_summary

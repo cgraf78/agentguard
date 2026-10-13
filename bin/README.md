@@ -18,3 +18,7 @@ hook internals. It emits JSON command facts for policy audits and wiring tests;
 hook block/warn policy remains in the hook entry points. Use `--json-lines`
 for audits that have already filtered down to plausible command-bearing
 strings and need one JSON record per candidate.
+
+`wait-until` is a standalone, dependency-free polling command (no hook
+runtime, no generated launcher). It is the bounded replacement that
+`agent-hook-pre-bash` suggests for long foreground `sleep` calls.

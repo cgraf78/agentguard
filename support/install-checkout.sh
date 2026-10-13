@@ -33,6 +33,7 @@ commands=(
   agentguard-classify-command
   agentguard-telemetry
   claude-session-name
+  wait-until
 )
 
 die() {

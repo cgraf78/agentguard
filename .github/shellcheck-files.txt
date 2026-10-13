@@ -19,6 +19,7 @@ program	bin/agentguard-churn-bypass
 program	bin/agentguard-classify-command
 program	bin/agentguard-telemetry
 program	bin/claude-session-name
+program	bin/wait-until
 program	examples/hooks/agent-hook-pre-bash-work
 program	install.sh
 program	scripts/checkout-installer.conf
@@ -54,6 +55,7 @@ program	test/suites/agent-hook-bash-protected-git-scoped-test
 program	test/suites/agent-hook-bash-protected-git-state-test
 program	test/suites/agent-hook-bash-protected-git-substitution-test
 program	test/suites/agent-hook-bash-safety-test
+program	test/suites/agent-hook-bash-sleep-test
 program	test/suites/agent-hook-cmdline-test
 program	test/suites/agent-hook-edit-test
 program	test/suites/agent-hook-fail-closed-test
@@ -79,3 +81,4 @@ program	test/suites/manpage-test
 program	test/suites/opencode-agentguard-test
 program	test/suites/runner-test
 program	test/suites/timeout-test
+program	test/suites/wait-until-test

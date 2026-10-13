@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # agent-hook-bash-guards-test — pre-bash destructive-operation guards:
 #   sudo, git reset --hard, git clean -f, git push --force,
-#   TTY-required commands, broad kills, chmod overreach.
+#   TTY-required commands, broad kills, chmod overreach, and the same guards
+#   inside `wait-until --cmd` payloads.
 # pre-edit secrets file guard.
 
 # shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
@@ -492,6 +493,61 @@ _assert_not_contains "chmod g=rwx: no WARNING" "WARNING" "$HOOK_STDERR"
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"echo chmod 777 foo"}}'
 _assert_eq "echo chmod 777: allowed" "0" "$HOOK_EXIT"
 _assert_not_contains "echo chmod 777: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+
+# ---------------------------------------------------------------------------
+# Tests: wait-until --cmd payloads
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-bash: wait-until --cmd payloads are guarded ==="
+
+# wait-until runs its --cmd payload with `bash -c` on every poll, and the
+# sleep warning recommends it, so the payload gets the same guards as a
+# `bash -c` payload instead of becoming a bypass.
+for _wait_command in \
+  "wait-until --cmd 'git push --force origin main'" \
+  'wait-until --timeout 30 --cmd "sudo ls"' \
+  "wait-until --cmd='git reset --hard'" \
+  'wait-until "--cmd=grep -r foo /"' \
+  "/opt/agentguard/bin/wait-until --cmd 'git clean -fd'" \
+  "timeout 100 wait-until --cmd 'git push -f'" \
+  "ls; wait-until --cmd 'sudo true'" \
+  "wait-until --cmd 'bash -c \"git reset --hard\"'" \
+  "w\\ait-until --cmd 'git reset --hard'" \
+  "wait\"\"-until --cmd 'git reset --hard'" \
+  "'wait-until' --cmd 'git reset --hard'" \
+  "wait-until --c\"\"md 'git reset --hard'" \
+  "wait-until --pattern --cmd --in f --cmd 'git reset --hard'" \
+  "wait-until --cmd true --cmd 'sudo ls'"; do
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c "$_wait_command" '{"tool_input":{"command":$c}}')"
+  _assert_eq "$_wait_command: blocked" "2" "$HOOK_EXIT"
+  _assert_contains "$_wait_command: BLOCKED msg" "BLOCKED" "$HOOK_STDERR"
+done
+
+_run_hook "$PRE_BASH" "$(jq -nc --arg c "wait-until --cmd 'rm -rf build'" '{"tool_input":{"command":$c}}')"
+_assert_eq "wait-until --cmd rm -rf: allowed" "0" "$HOOK_EXIT"
+_assert_contains "wait-until --cmd rm -rf: warns" "rm -rf detected" "$HOOK_STDERR"
+
+for _wait_command in \
+  "wait-until --cmd 'test -f done' --timeout 90" \
+  "wait-until --cmd='curl -fs localhost:8080/health'" \
+  'wait-until --file done --timeout 90' \
+  'wait-until --pattern READY --in server.log' \
+  "wait-until --pattern '--cmd' --in server.log"; do
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c "$_wait_command" '{"tool_input":{"command":$c}}')"
+  _assert_eq "$_wait_command: allowed" "0" "$HOOK_EXIT"
+  _assert_not_contains "$_wait_command: no BLOCKED" "BLOCKED" "$HOOK_STDERR"
+  _assert_not_contains "$_wait_command: no WARNING" "WARNING" "$HOOK_STDERR"
+done
+
+# Option values are consumed as wait-until's own parser consumes them: a
+# pattern spelled `--cmd` is not a probe, while a later real --cmd still is.
+_wait_facts=$("$BIN_DIR/agentguard-classify-command" "wait-until --pattern '--cmd' --in server.log")
+_assert_eq "pattern spelled --cmd: no nested command" \
+  "wait-until" "$(printf '%s' "$_wait_facts" | jq -r '[.commands[].basename] | join(" ")')"
+_wait_facts=$("$BIN_DIR/agentguard-classify-command" "wait-until --pattern --cmd --in f --cmd 'git status'")
+_assert_eq "real --cmd after a pattern spelled --cmd: payload classified" \
+  "wait-until git" "$(printf '%s' "$_wait_facts" | jq -r '[.commands[].basename] | join(" ")')"
 
 # ---------------------------------------------------------------------------
 # Tests: pre-edit secrets file guard

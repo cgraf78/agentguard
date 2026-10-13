@@ -516,6 +516,15 @@ case "$-" in
           coproc | time | command | builtin | nohup | nice | timeout | xargs)
           return 0
           ;;
+        wait-until)
+          # Only a --cmd probe runs a command. Any quote could spell the
+          # option in pieces (`--c""md`), so quoted text goes to the full
+          # classifier too; plain --file/--pattern/--pid waits stay cheap.
+          case "$text" in
+            *cmd* | *"'"* | *\"*) return 0 ;;
+          esac
+          return 1
+          ;;
       esac
       return 1
     }
@@ -579,6 +588,91 @@ case "$-" in
         _pre_bash_block_unbounded "classification did not finish within ${_PRE_BASH_CLASSIFY_TIMEOUT}s"
     }
 
+    # --- Long foreground sleep warning ---
+    # A foreground `sleep N; cat log` holds the whole agent turn for N seconds
+    # even when the awaited state arrived early, and is the usual cause of tool
+    # timeouts. Polling the agent's own background-task output this way is
+    # pointless: the host already notifies when a background task completes.
+    # This is advice, never a block, and it stays on pure-Bash string work so
+    # the common path gains no forks.
+    _PRE_BASH_LONG_SLEEP_MS=60000
+
+    # Succeeds when the sleep(1) operands $@ add up to at least the threshold.
+    # Follows GNU sleep: each operand is a decimal number with an optional
+    # s/m/h/d suffix, and multiple operands are summed. Anything else (options,
+    # variables, substitutions) contributes nothing, so unknown input stays
+    # silent rather than guessing.
+    _pre_bash_sleep_is_long() {
+      local arg int frac mult total=0
+      local re='^0*([0-9]*)(\.([0-9]*))?([smhd]?)$'
+      for arg in "$@"; do
+        # No duration needs this many characters. The cap runs before any
+        # string rewrite because the fast path has no command size limit and
+        # pattern substitution over a huge operand is superlinear.
+        [ "${#arg}" -le 32 ] || continue
+        arg="${arg//[\'\"]/}"
+        case "$arg" in
+          inf | infinity | inf[smhd] | infinity[smhd]) return 0 ;;
+        esac
+        [[ "$arg" =~ $re ]] || continue
+        int="${BASH_REMATCH[1]}"
+        frac="${BASH_REMATCH[3]}"
+        # Leading zeros are stripped by the regex, so `0` itself leaves an
+        # empty integer part; only a bare `.` or suffix has no digits at all.
+        [[ "$arg" == *[0-9]* ]] || continue
+        # Over nine digits is far past the threshold in any unit; returning
+        # early also keeps the millisecond arithmetic below from overflowing.
+        [ "${#int}" -le 9 ] || return 0
+        case "${BASH_REMATCH[4]}" in
+          d) mult=86400 ;;
+          h) mult=3600 ;;
+          m) mult=60 ;;
+          *) mult=1 ;;
+        esac
+        frac="${frac}000"
+        total=$((total + (10#${int:-0} * 1000 + 10#${frac:0:3}) * mult))
+        [ "$total" -lt "$_PRE_BASH_LONG_SLEEP_MS" ] || return 0
+      done
+      return 1
+    }
+
+    # Succeeds when classifier fragment $1 runs as a background job. Fragments
+    # drop their separators, so look at the rest of its list in the command
+    # text, up to the next `;` or newline: a lone `&` there (not `&&`, `>&`,
+    # or `&>`) backgrounds the whole and-or list or pipeline, sleep included.
+    # The splitter cuts `2>&1` at its `&`, leaving the fragment ending in `>`
+    # and the text resuming at `&1`; that remnant belongs to the redirection.
+    # A grouped fragment such as `(sleep 300` is judged after the group's
+    # close. Heuristic by design: it finds the fragment's first occurrence and
+    # ignores quoting after it, and either miss only changes advice. Only
+    # reached after a long sleep matched. `%%` with a trailing `*` is used for
+    # every search because `#*` prefix removal is quadratic in the offset.
+    _pre_bash_fragment_backgrounded() {
+      local frag="$1" text="$AGENTGUARD_CMD_TRIMMED" before rest
+      local dangling_re='^&[^[:space:];&|<>]*'
+      local lone_re='(^|[^&<>])&($|[^&>])'
+      before="${text%%"$frag"*}"
+      [ "${#before}" -lt "${#text}" ] || return 1
+      rest="${text:$((${#before} + ${#frag}))}"
+      case "$frag" in
+        *[\<\>])
+          [[ "$rest" =~ $dangling_re ]] && rest="${rest:${#BASH_REMATCH[0]}}"
+          ;;
+        "("* | "{"*)
+          before="${rest%%[\)\}]*}"
+          rest="${rest:$((${#before} + 1))}"
+          ;;
+      esac
+      rest="${rest%%[;$'\n']*}"
+      [[ "$rest" =~ $lone_re ]]
+    }
+
+    _pre_bash_warn_long_sleep() {
+      _hook_tool_runs_in_background && return 0
+      # shellcheck disable=SC2016 # Backticks are literal Markdown for the agent.
+      _hook_warn 'Long foreground sleep (60s or more) blocks this agent turn. To wait for a concrete condition, use `wait-until` (e.g. `wait-until --file PATH --timeout 90`, or --pattern/--in, --pid, --cmd). For a longer wait, use your runtime'"'"'s background execution if it has one (e.g. Claude Code run_in_background) instead of a long foreground sleep or polling your own output files.'
+    }
+
     if _pre_bash_needs_classifier "$AGENTGUARD_CMD_TRIMMED"; then
       _pre_bash_command_bytes 2>/dev/null
       [ "$_PRE_BASH_BYTES" -le "$_PRE_BASH_MAX_BYTES" ] ||
@@ -594,6 +688,21 @@ case "$-" in
       _pre_bash_check_deadline
       _pre_bash_check_fragment_limits
     else
+      # A fast-path command is one simple command with no separators, so a
+      # leading `sleep` (bare or by absolute path; `./sleep` is some other
+      # program) is in the foreground. The case match keeps every other
+      # command free of the word split, and the length cap keeps a huge
+      # fast-path command (no size limit applies here) from being split.
+      case "$AGENTGUARD_CMD_TRIMMED" in
+        sleep[[:space:]]* | /*/sleep[[:space:]]*)
+          if [ "${#AGENTGUARD_CMD_TRIMMED}" -le 4096 ]; then
+            read -r -a _pre_bash_words <<<"$AGENTGUARD_CMD_TRIMMED"
+            [[ "${_pre_bash_words[0]}" =~ ^(/.*/)?sleep$ ]] &&
+              _pre_bash_sleep_is_long "${_pre_bash_words[@]:1}" &&
+              _pre_bash_warn_long_sleep
+          fi
+          ;;
+      esac
       _hook_source_extensions
       _hook_finish
     fi
@@ -802,6 +911,7 @@ case "$-" in
       _GUARD_RM_RF=""
       _GUARD_KILL=""
       _GUARD_CHMOD=""
+      _GUARD_LONG_SLEEP=0
 
       [ -n "${_HOOK_EXECUTABLE_FRAGMENTS_CACHE_VALUE:-}" ] || return 0
 
@@ -1123,6 +1233,24 @@ case "$-" in
               ! _fragment_has_noninteractive_flag "$frag" "$cw" &&
               _GUARD_TTY_REQUIRED=1
             ;;
+
+          # Warn on a long foreground sleep. Operands start after the command
+          # index, so wrappers such as `nohup` or `timeout 900` are skipped.
+          # A relative path such as `./sleep` names some other program.
+          sleep | /*/sleep)
+            # The raw word split is a superset of the real operands (wrapper
+            # words included), so a short raw total rules the fragment out
+            # before paying for tokenization; `sleep 1` loops stay cheap.
+            [ "$_GUARD_LONG_SLEEP" -eq 0 ] || continue
+            read -r -a words <<<"$frag"
+            _pre_bash_sleep_is_long "${words[@]:1}" || continue
+            words=()
+            while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$frag")
+            i=$(_fragment_command_index "$frag") || continue
+            _pre_bash_sleep_is_long "${words[@]:$((i + 1))}" &&
+              ! _pre_bash_fragment_backgrounded "$frag" &&
+              _GUARD_LONG_SLEEP=1
+            ;;
         esac
       done <<<"$_HOOK_EXECUTABLE_FRAGMENTS_CACHE_VALUE"
 
@@ -1224,6 +1352,8 @@ case "$-" in
         _hook_warn 'This kill command affects all matching processes. Verify the target is correct before proceeding.'
         ;;
     esac
+
+    [ "$_GUARD_LONG_SLEEP" -eq 1 ] && _pre_bash_warn_long_sleep
 
     # chmod overreach.
     case "$_GUARD_CHMOD" in

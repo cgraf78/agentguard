@@ -11,6 +11,28 @@ removal, unsafe Git operations, unscoped recursive search, protected bare-Git
 untracked scans, TTY-only commands, and other command patterns that should not
 run unattended.
 .PP
+It also warns, without blocking, when a command runs a foreground
+.B sleep
+totalling 60 seconds or more (GNU duration operands such as
+.BR 300 ,
+.BR 5m ,
+or
+.B 1.5m
+are summed), and points the agent at
+.BR wait-until (1)
+or the runtime's background execution. A sleep backgrounded with
+.B &
+(alone or in a backgrounded list or pipeline), or a tool call the host runs
+in the background (Claude Code
+.BR run_in_background ,
+Gemini CLI
+.BR is_background ),
+stays silent. The payload of
+.B wait-until \-\-cmd
+is guarded like a
+.B bash \-c
+payload, since that is how it runs.
+.PP
 The hook is agent-agnostic. Launchers identify the concrete runtime with
 .B AGENTGUARD_NAME
 and
@@ -89,4 +111,5 @@ exit status or a Bash runtime error raised inside AgentGuard's own code, is
 also reported as a block.
 .SH SEE ALSO
 .BR agentguard-classify-command (1),
-.BR agent-hook-post-bash (1)
+.BR agent-hook-post-bash (1),
+.BR wait-until (1)
