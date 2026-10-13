@@ -117,9 +117,10 @@ Usage error.
 Interrupted by HUP, INT, or TERM; a running probe is stopped first.
 .SH EXAMPLES
 .nf
-wait-until \-\-timeout 300 \-\-pattern '^READY' \-\-in server.log
-wait-until \-\-pid "$build_pid" \-\-timeout 900 \-\-interval 5  # in the background
-wait-until \-\-cmd 'curl \-fs localhost:8080/health' \-\-timeout 60
+wait-until \-\-file build/done \-\-timeout 300   # run in the background
+wait-until \-\-pattern 'listening on' \-\-in server.log
+wait-until \-\-pid "$PID" \-\-timeout 900 \-\-interval 5   # in the background
+wait-until \-\-cmd 'curl \-fsS localhost:8080/health'
 .fi
 .SH SEE ALSO
 .BR agent-hook-pre-bash (1),

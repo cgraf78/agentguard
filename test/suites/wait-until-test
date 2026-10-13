@@ -94,7 +94,18 @@ help_out=$("$WAIT_UNTIL" --help)
 _assert_eq "--help: exit 0" "0" "$?"
 _assert_contains "--help: shows usage" "Usage: wait-until" "$help_out"
 # The default must stay under Claude Code's 120 s default Bash tool timeout.
-_assert_contains "--help: documents the 90 s default timeout" "--timeout seconds (default 90)" "$help_out"
+# Match across line wrapping: the help is prose, reflowed as it changes.
+help_flat=$(printf '%s\n' "$help_out" | tr '\n' ' ')
+_assert_contains "--help: documents the 90 s default timeout" "--timeout seconds (default 90)" "$help_flat"
+_assert_contains "--help: says what it does" "Wait until one CONDITION holds, then exit." "$help_out"
+# --help must say why the tool exists and show how to use it, not only list
+# options: agents read it to decide between this and a fixed sleep.
+_assert_contains "--help: explains why it exists" "Why: a long foreground sleep blocks" "$help_out"
+_assert_contains "--help: shows a usage example" "wait-until --pattern 'listening on' --in server.log" "$help_out"
+# shellcheck disable=SC2016 # The example must show a literal $PID.
+_assert_contains "--help: keeps \$PID literal in the example" '--pid "$PID"' "$help_out"
+_assert_contains "--help: points at the manual page" "man wait-until" "$help_out"
+_assert_eq "--help: stays short" "1" "$(($(printf '%s\n' "$help_out" | wc -l) <= 30))"
 
 echo ""
 echo "=== wait-until: --file ==="

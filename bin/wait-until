@@ -37,19 +37,31 @@ usage() {
   cat <<EOF
 Usage: $prog [--timeout SECS] [--interval SECS] CONDITION
 
-Wait until exactly one CONDITION holds, polling every --interval seconds
-(default 2) for at most --timeout seconds (default 90).
+Wait until one CONDITION holds, then exit.
 
-Longer waits need an explicit --timeout and should run as a background tool
-call (run_in_background) so the agent's tool timeout cannot kill them first.
+Why: a long foreground sleep blocks the agent's turn and polling your own
+output files wastes it; wait on the actual condition and return as soon as
+it holds.
 
-Conditions:
+Polls every --interval seconds (default 2) for at most --timeout seconds
+(default 90). Longer waits need an explicit --timeout and should run as a
+background tool call (run_in_background) so the agent's tool timeout cannot
+kill them first.
+
+Conditions (exactly one):
   --file PATH                 PATH exists
   --pattern REGEX --in FILE   FILE contains a line matching extended REGEX
   --pid PID                   process PID has exited
   --cmd 'COMMAND'             bash -c COMMAND exits 0
 
+Examples:
+  $prog --file build/done --timeout 300   # run in the background
+  $prog --pattern 'listening on' --in server.log
+  $prog --pid "\$PID" --timeout 900 --interval 5   # in the background
+  $prog --cmd 'curl -fsS localhost:8080/health'
+
 Exit status: 0 when the condition holds, 124 on timeout, 2 on usage error.
+See \`man wait-until\` for details.
 EOF
 }
 
