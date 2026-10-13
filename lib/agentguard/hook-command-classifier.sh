@@ -1362,7 +1362,7 @@ _agentguard_direct_simple_fragment_command_word() {
     "!" | if | then | elif | while | until | do | else | coproc | \
       command | builtin | exec | time | noglob | \
       env | sudo | doas | nohup | nice | timeout | xargs | \
-      bash | sh | zsh | fish | eval)
+      bash | sh | zsh | fish | eval | wait-until)
       return 1
       ;;
   esac
@@ -1398,7 +1398,7 @@ _agentguard_plain_fragment_command_word() {
       env | sudo | doas | nohup | nice | timeout | xargs)
         return 1
         ;;
-      bash | sh | zsh | fish | eval)
+      bash | sh | zsh | fish | eval | wait-until)
         return 1
         ;;
       *)
@@ -2086,6 +2086,26 @@ _word_is_shell_executable() {
   word="$(_clean_command_word "$1")"
   case "$word" in
     bash | sh | zsh | */bash | */sh | */zsh)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# AgentGuard's own `wait-until --cmd X` runs `bash -c X` on every poll, and
+# the pre-bash hook recommends it by name, so its payload must be classified
+# like any other nested shell rather than becoming a guard bypass.
+_word_is_wait_until_executable() {
+  local word
+  # Callers pass an already cleaned command word and this runs for nearly
+  # every fragment on the classifier path; reject without forking first.
+  case "$1" in
+    *wait-until*) ;;
+    *) return 1 ;;
+  esac
+  word="$(_clean_command_word "$1")"
+  case "$word" in
+    wait-until | */wait-until)
       return 0
       ;;
   esac
@@ -3080,6 +3100,33 @@ _nested_shell_payloads() {
     ((i++))
     [ "${words[$i]:-}" = "--" ] && ((i++))
     _join_fragment_tokens_from "$i" "${words[@]}"
+  elif _word_is_wait_until_executable "$command_word"; then
+    # Mirror wait-until's own parser: every value-taking option consumes the
+    # next word, so `--pattern --cmd` is a pattern, not a probe. Emit every
+    # --cmd payload; wait-until rejects a second one, but checking all of
+    # them costs nothing and leaves no ordering trick to hide behind.
+    local found=1
+    ((i++))
+    while [ "$i" -lt "${#words[@]}" ]; do
+      word="$(_clean_command_word "${words[$i]}")"
+      case "$word" in
+        --cmd)
+          ((i++))
+          [ "$i" -lt "${#words[@]}" ] || break
+          printf '%s\n' "${words[$i]}"
+          found=0
+          ;;
+        --cmd=*)
+          printf '%s\n' "${words[$i]#--cmd=}"
+          found=0
+          ;;
+        --timeout | --interval | --file | --pattern | --in | --pid)
+          ((i++))
+          ;;
+      esac
+      ((i++))
+    done
+    return "$found"
   elif _word_is_shell_executable "$command_word"; then
     ((i++))
     while [ "$i" -lt "${#words[@]}" ]; do
@@ -3266,6 +3313,7 @@ _fragment_runs_nested_shell() {
 
   [ "$command_word" = "eval" ] && return 0
   _word_is_shell_executable "$command_word" && return 0
+  _word_is_wait_until_executable "$command_word" && return 0
 
   return 1
 }

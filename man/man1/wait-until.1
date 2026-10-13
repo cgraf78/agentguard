@@ -1,0 +1,127 @@
+.TH WAIT-UNTIL 1 "2026-10-13" "agentguard" "User Commands"
+.SH NAME
+wait-until \- wait for one concrete condition with a bounded deadline
+.SH SYNOPSIS
+.B wait-until
+.RB [ \-\-timeout
+.IR secs ]
+.RB [ \-\-interval
+.IR secs ]
+.B \-\-file
+.I path
+.br
+.B wait-until
+.RI [ options ]
+.B \-\-pattern
+.I regex
+.B \-\-in
+.I file
+.br
+.B wait-until
+.RI [ options ]
+.B \-\-pid
+.I pid
+.br
+.B wait-until
+.RI [ options ]
+.B \-\-cmd
+.I command
+.SH DESCRIPTION
+.B wait-until
+polls exactly one condition and exits as soon as it holds. It replaces a
+fixed foreground
+.B sleep
+before checking a result: the wait ends when the state arrives instead of
+after a guessed duration, and it fails with a diagnostic at the deadline
+instead of running into a tool timeout.
+.BR agent-hook-pre-bash (1)
+points agents here when they run a long foreground
+.BR sleep .
+.PP
+Options also accept the
+.BI \-\- option = value
+form.
+.TP
+.BI \-\-file " path"
+The path exists.
+.TP
+.BI \-\-pattern " regex " \-\-in " file"
+The file exists and contains a line matching the extended regular expression.
+A missing file keeps waiting.
+.TP
+.BI \-\-pid " pid"
+The process has exited. An exited but unreaped (zombie) process counts as
+exited. Existence comes from
+.BR "kill \-0" ,
+which sees every pid even when a hidepid
+.I /proc
+or a missing
+.BR ps (1)
+would not: "no such process" means exited, "operation not permitted" means
+another user's live process. Zombies, which still answer
+.BR "kill \-0" ,
+are spotted through
+.I /proc
+on Linux and
+.B ps
+elsewhere; without either, a zombie keeps the wait going rather than risk a
+false exit.
+.TP
+.BI \-\-cmd " command"
+.B bash \-c
+.I command
+exits 0. Each probe runs in its own process group with no standard input and
+discarded output. Whatever is left of that group when the probe finishes, or
+when the deadline passes with the probe still running, is stopped with TERM,
+then KILL after a two-second grace period. A probe started at or near the
+deadline, including the only probe of
+.BR "\-\-timeout 0" ,
+still gets two seconds to finish, so
+.B \-\-cmd
+can overrun the timeout by that much plus the grace period.
+.BR agent-hook-pre-bash (1)
+applies its command guards to the payload as it does to a
+.B bash \-c
+payload.
+.TP
+.BI \-\-timeout " secs"
+Whole seconds to wait before giving up (default 90, under the 120-second
+default Bash tool timeout of Claude Code). Bash 5 and later measure it in
+milliseconds; older Bash (such as macOS /bin/bash 3.2) only counts whole
+seconds, so there the wait can end up to a second early. With 0 the condition
+is checked once. Longer waits need an explicit
+.B \-\-timeout
+and should run as a background tool call
+.RB ( run_in_background )
+so the agent's tool timeout cannot kill them first.
+.TP
+.BI \-\-interval " secs"
+Seconds between checks (default 2); fractions such as 0.5 are accepted. The
+last sleep is shortened so the final check lands on the deadline.
+.SH EXIT STATUS
+.TP
+.B 0
+The condition held.
+.TP
+.B 124
+The deadline passed first. One line on standard error names the condition and
+its last observed state, such as
+.BR missing ,
+.BR "no match" ,
+the process state, or the probe's last exit status.
+.TP
+.B 2
+Usage error.
+.TP
+.BR 129 ", " 130 ", " 143
+Interrupted by HUP, INT, or TERM; a running probe is stopped first.
+.SH EXAMPLES
+.nf
+wait-until \-\-timeout 300 \-\-pattern '^READY' \-\-in server.log
+wait-until \-\-pid "$build_pid" \-\-timeout 900 \-\-interval 5  # in the background
+wait-until \-\-cmd 'curl \-fs localhost:8080/health' \-\-timeout 60
+.fi
+.SH SEE ALSO
+.BR agent-hook-pre-bash (1),
+.BR sleep (1),
+.BR timeout (1)

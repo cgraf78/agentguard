@@ -17,6 +17,10 @@ and no `suppressOutput` (see `_hook_strict_output_agent`).
   consumers that need AgentGuard's command classifier output as structured JSON.
 - `claude-session-name` is a PATH-visible helper used by
   `agent-hook-session-end-claude` to name Claude transcript sessions.
+- `wait-until` is a PATH-visible, dependency-free command that waits for one
+  concrete condition with a bounded deadline; `agent-hook-pre-bash` suggests
+  it for long foreground sleeps and guards its `--cmd` payloads like
+  `bash -c`.
 - `agentguard-churn-bypass` is the PATH-visible mid-session API for the
   edit-churn guard: `on`/`off` manage a session-scoped bypass marker the
   agent itself can write (a tool-shell `export` cannot reach hook
