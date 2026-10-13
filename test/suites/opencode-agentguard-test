@@ -1389,6 +1389,98 @@ sleep 5
   }
 });
 
+// The session sweep runs only from fixed root-owned paths, so a test cannot
+// redirect it through PATH. Load a private copy of the adapter whose trusted
+// Python is a stub that exits with one scripted result per call ("kill" makes it
+// die by signal), deny a protected hook, and report what cleanup did.
+async function sweepWithResults(results) {
+  const stubDir = fs.mkdtempSync(path.join(root, "sweep-stub-"));
+  const calls = path.join(stubDir, "calls");
+  const resultsFile = path.join(stubDir, "results");
+  const stub = path.join(stubDir, "python3");
+  fs.writeFileSync(resultsFile, `${results.join("\n")}\n`);
+  fs.writeFileSync(
+    stub,
+    `#!/bin/sh
+printf 'call\\n' >>${JSON.stringify(calls)}
+n=$(wc -l <${JSON.stringify(calls)})
+result=$(sed -n "$((n))p" ${JSON.stringify(resultsFile)})
+[ "$result" = kill ] && kill -KILL $$
+exit "\${result:-0}"
+`,
+    { mode: 0o755 },
+  );
+  const trusted =
+    'const TRUSTED_CLEANUP_PYTHON = ["/usr/bin/python3", "/bin/python3"].find(existsSync);';
+  const source = fs.readFileSync(pluginPath, "utf8");
+  assert.equal(source.includes(trusted), true);
+  const variantPath = path.join(stubDir, "agentguard.mjs");
+  fs.writeFileSync(
+    variantPath,
+    source.replace(trusted, `const TRUSTED_CLEANUP_PYTHON = ${JSON.stringify(stub)};`),
+  );
+  const { AgentGuardPlugin: StubbedPlugin } = await import(pathToFileURL(variantPath).href);
+  behavior("agent-hook-pre-bash", { exit: 2, stderr: "denied by fixture" });
+  const errors = [];
+  const savedError = console.error;
+  console.error = (...args) => errors.push(args.join(" "));
+  let hooks;
+  try {
+    hooks = await StubbedPlugin({ directory: sourceDirectory });
+    await assert.rejects(
+      hooks["tool.execute.before"](
+        { tool: "bash", sessionID: "sweep", callID: "sweep-call" },
+        { args: { command: "danger" } },
+      ),
+      /denied by fixture/,
+    );
+  } finally {
+    console.error = savedError;
+    await hooks?.dispose();
+    clearBehavior("agent-hook-pre-bash");
+  }
+  const callCount = fs.existsSync(calls)
+    ? fs.readFileSync(calls, "utf8").trim().split("\n").length
+    : 0;
+  fs.rmSync(stubDir, { recursive: true, force: true });
+  return {
+    calls: callCount,
+    errors,
+    diagnostics: errors.filter((line) => line.includes("session cleanup sweep")),
+  };
+}
+
+await check("a healthy session cleanup sweep runs once without a diagnostic", async () => {
+  const { calls, errors } = await sweepWithResults(["0"]);
+  assert.equal(calls, 1);
+  assert.deepEqual(errors, []);
+});
+
+await check("a failed session cleanup sweep is logged and retried once", async () => {
+  const { calls, diagnostics } = await sweepWithResults(["3", "0"]);
+  assert.equal(calls, 2);
+  assert.deepEqual(diagnostics, [
+    "[opencode-agentguard] session cleanup sweep attempt 1/2 failed: status 3, signal none, error none",
+  ]);
+});
+
+await check("a persistently failing session cleanup sweep stops after one retry", async () => {
+  const { calls, diagnostics } = await sweepWithResults(["3", "4", "0"]);
+  assert.equal(calls, 2);
+  assert.deepEqual(diagnostics, [
+    "[opencode-agentguard] session cleanup sweep attempt 1/2 failed: status 3, signal none, error none",
+    "[opencode-agentguard] session cleanup sweep attempt 2/2 failed: status 4, signal none, error none",
+  ]);
+});
+
+await check("a crashed session cleanup sweep reports its signal", async () => {
+  const { calls, diagnostics } = await sweepWithResults(["kill", "0"]);
+  assert.equal(calls, 2);
+  assert.deepEqual(diagnostics, [
+    "[opencode-agentguard] session cleanup sweep attempt 1/2 failed: status none, signal SIGKILL, error none",
+  ]);
+});
+
 await check("fails closed when a protected hook times out", async () => {
   clearLog();
   behavior("agent-hook-pre-edit", { delayMs: 250 });
