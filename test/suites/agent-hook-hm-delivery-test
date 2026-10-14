@@ -74,9 +74,13 @@ if [ -n "${HM_FILL:-}" ]; then
     [ "$prev" = --context-size ] && [ "$arg" = json ] && json=1
     prev=$arg
   done
-  count=$budget
-  [ "$json" = 1 ] && [ "$HM_FILL" = '"' ] && count=$((budget / 2))
-  body=$(head -c "$count" /dev/zero | tr '\0' "$HM_FILL")
+  count=$budget pad=''
+  if [ "$json" = 1 ] && [ "$HM_FILL" = '"' ]; then
+    # Each quote escapes to two bytes; an odd budget gets one plain byte.
+    count=$((budget / 2))
+    [ $((budget % 2)) = 0 ] || pad=m
+  fi
+  body=$(head -c "$count" /dev/zero | tr '\0' "$HM_FILL")$pad
   response=$(jq -cn --arg body "$body" '{warnings: [], actions: [{kind: "inject_context", body: $body}]}')
 elif [ -n "${HM_RESPONSE:-}" ] && [ -f "$HM_RESPONSE" ]; then
   response=$(cat "$HM_RESPONSE")
@@ -279,8 +283,10 @@ _assert_file_missing "muse: a blocked turn-lifetime prompt needs no reset" \
 
 _delivery_case
 _respond_with_context 500
+# The response goes to a pipe whose reader is already gone. A closed stdout
+# is not portable here: on Termux the write to it still succeeds.
 _run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
-  HM_RESPONSE="$case_dir/response.json" >&- 2>/dev/null
+  HM_RESPONSE="$case_dir/response.json" 2>/dev/null | :
 _assert_file_exists "a failed response write leaves a reset pending" "$(dirty_marker)"
 
 # --- Host size limits ---
@@ -473,15 +479,27 @@ out=$(_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-cl
 _assert_contains "claude: memory context filling the whole budget is kept" "mmmm" "$(_ctx "$out")"
 _assert_file_missing "claude: a full budget leaves no reset pending" "$(dirty_marker)"
 
-for fill in m '"'; do
-  _delivery_case
-  out=$(cd "$dirty_repo" && _run_hook agent-hook-session-start muse s-muse \
-    "$(jq -cn '{session_id: "s-muse", source: "startup"}')" HM_FILL="$fill")
-  # Whatever untracked output would have fit under Muse's limit, the tracked
-  # budget fits too: the response is exactly at the limit, never over.
-  _assert_eq "muse session-start ($fill): response right under 16,384 bytes" "16383" \
-    "$(printf '%s\n' "$out" | wc -c | tr -d ' ')"
-  _assert_file_missing "muse session-start ($fill): nothing dropped" "$(_state_dir s-muse)/hm-context-dirty"
+# The budget's parity follows the length of the context already present (git
+# status here), so cover an odd and an even budget.
+odd_repo=$(_tmpdir)
+git init -q "$odd_repo"
+for i in 1 2 3 4 55; do touch "$odd_repo/untracked-file-$i"; done
+for repo in "$dirty_repo" "$odd_repo"; do
+  for fill in m '"'; do
+    _delivery_case
+    out=$(cd "$repo" && _run_hook agent-hook-session-start muse s-muse \
+      "$(jq -cn '{session_id: "s-muse", source: "startup"}')" HM_FILL="$fill")
+    budget=$(sed -n 's/.*--max-context-bytes \([0-9]*\).*/\1/p' "$case_dir/hm.log")
+    parity=even
+    [ $((budget % 2)) = 0 ] || parity=odd
+    # Whatever untracked output would have fit under Muse's limit, the
+    # tracked budget fits too: the response is exactly at the limit, never
+    # over.
+    _assert_eq "muse session-start ($fill, $parity budget): response right under 16,384 bytes" \
+      "16383" "$(printf '%s\n' "$out" | wc -c | tr -d ' ')"
+    _assert_file_missing "muse session-start ($fill, $parity budget): nothing dropped" \
+      "$(_state_dir s-muse)/hm-context-dirty"
+  done
 done
 
 _delivery_case
