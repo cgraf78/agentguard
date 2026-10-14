@@ -1,0 +1,759 @@
+#!/usr/bin/env bash
+# agent-hook-hm-delivery-test — Hive Memory delivery tracking per runtime.
+#
+# Runs the real session-start, prompt-submit, stop, and compact launchers
+# against a logging `hm` stub and asserts the contract with `hm`: which
+# runtimes are tracked, the lifetime and size budget each one passes, when a
+# context epoch is reset, and when memory context that the host will not show
+# leaves a reset pending. Every untracked or uncertain path must fall back to
+# behavior that re-sends memory rather than hides it.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+echo ""
+echo "=== Hive Memory delivery tracking ==="
+
+DELIVERY_ROOT=$(_tmpdir)
+DELIVERY_HOME="$DELIVERY_ROOT/home"
+DELIVERY_STUB="$DELIVERY_ROOT/stub-bin"
+mkdir -p "$DELIVERY_HOME/.config/hive-memory" "$DELIVERY_STUB"
+touch "$DELIVERY_HOME/.config/hive-memory/config.toml"
+_install_hook_fixture "$DELIVERY_ROOT/fixture" \
+  agent-hook-session-start agent-hook-prompt-submit agent-hook-stop agent-hook-compact
+
+# A prompt extension that blocks the prompt when TEST_BLOCK_PROMPT=1, the way
+# any blocking UserPromptSubmit hook would.
+cat >"$DELIVERY_ROOT/fixture/bin/agent-hook-prompt-submit-work" <<'SCRIPT'
+# shellcheck shell=bash
+if [ "${TEST_BLOCK_PROMPT:-0}" = 1 ]; then
+  _hook_block "blocked by test"
+fi
+# TEST_PREPEND=1 rewrites the context in front of Hive Memory's block, so
+# the tail after it cannot be measured.
+if [ "${TEST_PREPEND:-0}" = 1 ]; then
+  _HOOK_CTX="rewritten ${_HOOK_CTX:-}"
+fi
+# Context added after Hive Memory on every prompt, like a goal reminder.
+# TEST_TAIL_FILL overrides the filler character.
+if [ -n "${TEST_TAIL_BYTES:-}" ]; then
+  _hook_context "$(head -c "$TEST_TAIL_BYTES" /dev/zero | tr '\0' "${TEST_TAIL_FILL:-t}")"
+fi
+SCRIPT
+
+# Stop notifications must never reach the real terminal.
+printf '#!/usr/bin/env bash\nexit 0\n' >"$DELIVERY_STUB/term-notify-sound"
+chmod +x "$DELIVERY_STUB/term-notify-sound"
+
+# The stub logs one line per call and answers from $HM_RESPONSE (a file).
+# HM_OLD=1 rejects the delivery flags with a usage error, like an `hm` that
+# predates them; HM_FAIL=1 fails every call. Tracked responses that inject
+# context report one emitted memory unless they carry their own `delivery`.
+cat >"$DELIVERY_STUB/hm" <<'SCRIPT'
+#!/usr/bin/env bash
+printf 'args=%s|session=%s\n' "$*" "${HIVE_MEMORY_SESSION_ID:-}" >>"$HM_LOG"
+if [ "${HM_FAIL:-0}" = 1 ]; then
+  echo "store offline" >&2
+  exit 1
+fi
+if [ "${HM_OLD:-0}" = 1 ]; then
+  case " $* " in
+    *" --delivery "* | *" context-reset "*)
+      echo "error: unexpected argument" >&2
+      exit 2
+      ;;
+  esac
+fi
+if [ -n "${HM_FILL:-}" ]; then
+  # Emit memory context exactly as large as the budget allows, counted the
+  # way the budget is counted (JSON-escaped when --context-size json).
+  budget=0 json=0 prev=''
+  for arg in "$@"; do
+    [ "$prev" = --max-context-bytes ] && budget=$arg
+    [ "$prev" = --context-size ] && [ "$arg" = json ] && json=1
+    prev=$arg
+  done
+  count=$budget pad=''
+  if [ "$json" = 1 ] && [ "$HM_FILL" = '"' ]; then
+    # Each quote escapes to two bytes; an odd budget gets one plain byte.
+    count=$((budget / 2))
+    [ $((budget % 2)) = 0 ] || pad=m
+  fi
+  body=$(head -c "$count" /dev/zero | tr '\0' "$HM_FILL")$pad
+  response=$(jq -cn --arg body "$body" '{warnings: [], actions: [{kind: "inject_context", body: $body}]}')
+elif [ -n "${HM_RESPONSE:-}" ] && [ -f "$HM_RESPONSE" ]; then
+  response=$(cat "$HM_RESPONSE")
+else
+  response='{"warnings":[],"actions":[]}'
+fi
+case " $* " in
+  *" --delivery "*)
+    response=$(printf '%s' "$response" | jq -c '
+      if .delivery == null and any(.actions[]?; .kind == "inject_context" and .body != "")
+      then .delivery = {emitted_ids: ["stub-memory"]} else . end')
+    ;;
+esac
+printf '%s\n' "$response"
+exit "${HM_EXIT:-0}"
+SCRIPT
+chmod +x "$DELIVERY_STUB/hm"
+
+case_dir=''
+# Fresh per-case state: hook state root, hm log, and response file.
+_delivery_case() {
+  case_dir=$(_tmpdir)
+  : >"$case_dir/hm.log"
+}
+
+# Run hook $1 for agent $2 with session key $3 and stdin payload $4. Extra
+# environment assignments may follow. Prints the hook's stdout. Inherited Hive
+# Memory config selectors (CI runners set XDG_CONFIG_HOME) would point away
+# from the fixture config and make `hm` look unconfigured.
+_run_hook() {
+  local hook="$1" agent="$2" key="$3" payload="$4"
+  shift 4
+  printf '%s' "$payload" | env -u CLAUDE_CODE_SESSION_ID -u MUSE_SESSION_ID \
+    -u XDG_CONFIG_HOME -u HIVE_MEMORY_CONFIG \
+    HOME="$DELIVERY_HOME" \
+    PATH="$DELIVERY_STUB:$PATH" \
+    XDG_RUNTIME_DIR="$case_dir/run" \
+    TMPDIR="$case_dir" \
+    HM_LOG="$case_dir/hm.log" \
+    AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+    AGENTGUARD_TELEMETRY=0 \
+    AGENTGUARD_NAME="$agent" \
+    AGENTGUARD_SESSION_ID="$key" \
+    "$@" \
+    "$DELIVERY_ROOT/fixture/bin/$hook" 2>"$case_dir/stderr"
+}
+
+_prompt_payload() {
+  jq -cn --arg sid "$1" '{session_id: $sid, prompt: "check the deploy", cwd: "/tmp/project"}'
+}
+
+_start_payload() {
+  jq -cn --arg sid "$1" --arg source "$2" '{session_id: $sid, source: $source, cwd: "/tmp/project"}'
+}
+
+_stop_payload() {
+  jq -cn --arg sid "$1" '{session_id: $sid, stop_hook_active: false}'
+}
+
+_log() {
+  cat "$case_dir/hm.log"
+}
+
+_state_dir() {
+  printf '%s\n' "$case_dir/run/agentguard/hook-state/$1"
+}
+
+_ctx() {
+  printf '%s' "$1" | jq -r '.hookSpecificOutput.additionalContext // empty'
+}
+
+# Response with one inject_context action of about $1 bytes.
+# $2 overrides the filler character.
+_respond_with_context() {
+  local size="$1" fill="${2:-m}" body
+  body="Hive Memory Context $(head -c "$size" /dev/zero | tr '\0' "$fill")"
+  jq -cn --arg body "$body" \
+    '{warnings: [], actions: [{kind: "inject_context", body: $body}]}' \
+    >"$case_dir/response.json"
+}
+
+# --- Per-runtime policy: lifetime and budget passed to hm ---
+
+_delivery_case
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" >/dev/null
+_assert_contains "claude prompt: persistent delivery, just under the 10,000-char limit" \
+  "--json --text check the deploy --delivery persistent --max-context-bytes 9999|session=s-claude" "$(_log)"
+_assert_eq "claude prompt: no tail recorded yet is not an error" "" "$(cat "$case_dir/stderr")"
+
+_delivery_case
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  AGENTGUARD_HIVE_MEMORY_CONTEXT_RESERVE=08 >/dev/null
+_assert_contains "reserve floor with a leading zero is decimal" "--max-context-bytes 9991" "$(_log)"
+
+_delivery_case
+_run_hook agent-hook-prompt-submit codex s-codex "$(_prompt_payload s-codex)" >/dev/null
+_assert_contains "codex prompt: persistent delivery" \
+  "--text check the deploy --delivery persistent|session=s-codex" "$(_log)"
+_assert_not_contains "codex prompt: no size budget" "--max-context-bytes" "$(_log)"
+
+_delivery_case
+_run_hook agent-hook-session-start codex s-codex "$(_start_payload s-codex startup)" >/dev/null
+_assert_contains "codex session-start: persistent, reset on first start, no budget" \
+  "hook session-start --project /tmp/project --json --delivery persistent --reset|session=s-codex" "$(_log)"
+
+_delivery_case
+_run_hook agent-hook-prompt-submit muse s-muse "$(_prompt_payload s-muse)" >/dev/null
+_assert_contains "muse prompt: turn lifetime, exact escaped-stdout budget" \
+  "--delivery turn --max-context-bytes 16300 --context-size json" "$(_log)"
+
+_delivery_case
+_run_hook agent-hook-session-start muse s-muse "$(_start_payload s-muse startup)" >/dev/null
+_assert_contains "muse session-start: persistent lifetime" \
+  "hook session-start --project /tmp/project --json --delivery persistent --reset" "$(_log)"
+
+# Session-start context already accumulated (uncommitted changes in a dirty
+# repo) shrinks the budget hm gets.
+dirty_repo=$(_tmpdir)
+git init -q "$dirty_repo"
+for i in 1 2 3 4 5; do touch "$dirty_repo/untracked-file-$i"; done
+_delivery_case
+(cd "$dirty_repo" && _run_hook agent-hook-session-start claude s-claude \
+  "$(jq -cn '{session_id: "s-claude", source: "startup"}')") >/dev/null
+budget=$(sed -n 's/.*--max-context-bytes \([0-9]*\).*/\1/p' "$case_dir/hm.log")
+_assert_eq "existing context is subtracted from the budget" "1" "$((budget > 0 && budget < 9999))"
+_delivery_case
+(cd "$dirty_repo" && _run_hook agent-hook-session-start muse s-muse \
+  "$(jq -cn '{session_id: "s-muse", source: "startup"}')") >/dev/null
+budget=$(sed -n 's/.*--max-context-bytes \([0-9]*\).*/\1/p' "$case_dir/hm.log")
+_assert_eq "muse: existing context is subtracted from the stdout budget" "1" \
+  "$((budget > 0 && budget < 16304))"
+
+for agent in gemini grok; do
+  _delivery_case
+  _run_hook agent-hook-prompt-submit "$agent" "s-$agent" "$(_prompt_payload "s-$agent")" >/dev/null
+  _assert_contains "$agent prompt: hm still called" "--text check the deploy" "$(_log)"
+  _assert_not_contains "$agent prompt: stays untracked" "--delivery" "$(_log)"
+done
+
+# --- Guards that keep a hook untracked ---
+
+_delivery_case
+_run_hook agent-hook-prompt-submit claude parent-session "$(_prompt_payload nested-session)" >/dev/null
+_assert_not_contains "nested session (payload id differs from key): untracked" "--delivery" "$(_log)"
+
+for field in agent_id agentId; do
+  _delivery_case
+  _run_hook agent-hook-prompt-submit claude s-claude \
+    "$(jq -cn --arg f "$field" '{session_id: "s-claude", prompt: "check the deploy"} + {($f): "sub-1"}')" >/dev/null
+  _assert_not_contains "subagent payload ($field): untracked" "--delivery" "$(_log)"
+done
+
+_delivery_case
+_run_hook agent-hook-prompt-submit claude s-claude '{"prompt":"check the deploy"}' >/dev/null
+_assert_not_contains "payload without a session id: untracked" "--delivery" "$(_log)"
+
+for value in 0 false no off; do
+  _delivery_case
+  _run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+    AGENTGUARD_HIVE_MEMORY_DELIVERY="$value" >/dev/null
+  _assert_not_contains "AGENTGUARD_HIVE_MEMORY_DELIVERY=$value: untracked" "--delivery" "$(_log)"
+done
+
+# --- Memory context the host will not show leaves a reset pending ---
+
+dirty_marker() {
+  printf '%s\n' "$(_state_dir s-claude)/hm-context-dirty"
+}
+
+_delivery_case
+_respond_with_context 2000
+out=$(_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_RESPONSE="$case_dir/response.json")
+_assert_contains "claude: delivered context reaches the response" "Hive Memory Context" "$(_ctx "$out")"
+_assert_not_contains "no acknowledgement flag is passed" "--ack" "$(_log)"
+_assert_file_missing "delivered context leaves no pending reset" "$(dirty_marker)"
+_run_hook agent-hook-stop claude s-claude "$(_stop_payload s-claude)" >/dev/null
+_assert_eq "Stop only reports the stop event" "args=hook stop --json|session=s-claude" \
+  "$(tail -n 1 "$case_dir/hm.log")"
+
+_delivery_case
+_respond_with_context 500
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_RESPONSE="$case_dir/response.json" TEST_BLOCK_PROMPT=1 >/dev/null
+status=$?
+_assert_eq "blocked prompt exits 2" "2" "$status"
+_assert_file_exists "a prompt this hook blocks leaves a reset pending" "$(dirty_marker)"
+
+_delivery_case
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  TEST_BLOCK_PROMPT=1 >/dev/null
+_assert_file_missing "a blocked prompt without memory context needs no reset" "$(dirty_marker)"
+
+_delivery_case
+_respond_with_context 500
+_run_hook agent-hook-prompt-submit muse s-muse "$(_prompt_payload s-muse)" \
+  HM_RESPONSE="$case_dir/response.json" TEST_BLOCK_PROMPT=1 >/dev/null
+_assert_file_missing "muse: a blocked turn-lifetime prompt needs no reset" \
+  "$(_state_dir s-muse)/hm-context-dirty"
+
+_delivery_case
+_respond_with_context 500
+# The response goes to a pipe whose reader is already gone. A closed stdout
+# is not portable here: on Termux the write to it still succeeds.
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_RESPONSE="$case_dir/response.json" 2>/dev/null | :
+_assert_file_exists "a failed response write leaves a reset pending" "$(dirty_marker)"
+
+# --- Host size limits ---
+
+_delivery_case
+_respond_with_context 10000
+out=$(_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_RESPONSE="$case_dir/response.json")
+_assert_not_contains "claude: context over 10,000 chars is dropped" "Hive Memory Context" "$out"
+_assert_file_exists "claude: dropped context leaves a reset pending" "$(dirty_marker)"
+
+_delivery_case
+# 9,990 chars of memory fits alone; the reminder pushes the total past 10,000.
+_respond_with_context 9970
+jq -c '.actions += [{kind: "remind", body: "write the memory"}]' "$case_dir/response.json" \
+  >"$case_dir/r2.json"
+out=$(_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_RESPONSE="$case_dir/r2.json")
+ctx=$(_ctx "$out")
+_assert_not_contains "claude: limit counts other context too" "Hive Memory Context" "$ctx"
+_assert_contains "claude: context after the memory survives the drop" "write the memory" "$ctx"
+_assert_file_exists "claude: partially dropped response leaves a reset pending" "$(dirty_marker)"
+
+_delivery_case
+_respond_with_context 9900
+out=$(cd "$dirty_repo" && _run_hook agent-hook-session-start claude s-claude \
+  "$(jq -cn '{session_id: "s-claude", source: "startup"}')" HM_RESPONSE="$case_dir/response.json")
+ctx=$(_ctx "$out")
+_assert_contains "claude session-start: context before the memory survives the drop" \
+  "Uncommitted changes" "$ctx"
+_assert_not_contains "claude session-start: oversized memory is dropped" "Hive Memory Context" "$ctx"
+# Read the raw field: command substitution would strip a trailing newline.
+# (busybox tr also lacks character classes such as [:print:].)
+_assert_eq "claude session-start: no stray separator remains" "false" \
+  "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext | endswith("\n")')"
+_assert_file_exists "claude session-start: dropped delivery leaves a reset pending" "$(dirty_marker)"
+
+_delivery_case
+_respond_with_context 15000
+out=$(_run_hook agent-hook-prompt-submit codex s-codex "$(_prompt_payload s-codex)" \
+  HM_RESPONSE="$case_dir/response.json")
+_assert_contains "codex: no size limit" "Hive Memory Context" "$out"
+
+_delivery_case
+_respond_with_context 12000
+out=$(_run_hook agent-hook-prompt-submit muse s-muse "$(_prompt_payload s-muse)" \
+  HM_RESPONSE="$case_dir/response.json")
+_assert_contains "muse: delivery under 16 KB of stdout is kept" "Hive Memory Context" "$out"
+
+_delivery_case
+_respond_with_context 16400
+out=$(_run_hook agent-hook-prompt-submit muse s-muse "$(_prompt_payload s-muse)" \
+  HM_RESPONSE="$case_dir/response.json")
+_assert_not_contains "muse: delivery over the stdout limit is dropped" "Hive Memory Context" "$out"
+_assert_eq "muse: response stays under 16 KB" "0" "$((${#out} >= 16384))"
+
+_delivery_case
+# 9,000 quote characters: well under 16 KB raw, over it once JSON-escaped.
+_respond_with_context 9000 '"'
+out=$(_run_hook agent-hook-prompt-submit muse s-muse "$(_prompt_payload s-muse)" \
+  HM_RESPONSE="$case_dir/response.json")
+_assert_not_contains "muse: the limit applies to the escaped JSON" "Hive Memory Context" "$out"
+
+# --- Older hm without delivery flags ---
+
+_delivery_case
+_respond_with_context 12000
+out=$(_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_RESPONSE="$case_dir/response.json" HM_OLD=1)
+_assert_eq "old hm: tracked call is retried once untracked" "2" "$(grep -c '^args=' "$case_dir/hm.log")"
+_assert_contains "old hm: retry drops the delivery flags" \
+  "args=hook prompt-submit --project /tmp/project --json --text check the deploy|" "$(_log)"
+_assert_contains "old hm: untracked context is never dropped by the tracked limit" \
+  "Hive Memory Context" "$out"
+_assert_not_contains "old hm: note stays out of model context" "predates" "$out"
+
+_delivery_case
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" HM_FAIL=1 >/dev/null
+_assert_eq "other hm failures are not retried" "1" "$(grep -c '^args=' "$case_dir/hm.log")"
+
+# --- Session start: context epochs ---
+
+_delivery_case
+_respond_with_context 100
+_run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude startup)" \
+  HM_RESPONSE="$case_dir/response.json" >/dev/null
+_assert_contains "first startup resets the epoch" \
+  "hook session-start --project /tmp/project --json --delivery persistent --reset --max-context-bytes" "$(_log)"
+: >"$case_dir/hm.log"
+_run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude startup)" \
+  HM_RESPONSE="$case_dir/response.json" >/dev/null
+_assert_eq "repeated startup does not call hm" "" "$(_log)"
+for source in compact clear resume; do
+  : >"$case_dir/hm.log"
+  _run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude "$source")" \
+    HM_RESPONSE="$case_dir/response.json" >/dev/null
+  _assert_contains "source=$source re-injects with a reset despite the marker" \
+    "--delivery persistent --reset" "$(_log)"
+done
+
+_delivery_case
+_respond_with_context 100
+_run_hook agent-hook-session-start gemini s-gemini "$(_start_payload s-gemini startup)" \
+  HM_RESPONSE="$case_dir/response.json" >/dev/null
+: >"$case_dir/hm.log"
+_run_hook agent-hook-session-start gemini s-gemini "$(_start_payload s-gemini compact)" \
+  HM_RESPONSE="$case_dir/response.json" >/dev/null
+_assert_eq "untracked runtime: marker still suppresses later starts" "" "$(_log)"
+
+# --- Pending resets (dirty marker) ---
+
+_delivery_case
+_run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude compact)" HM_FAIL=1 >/dev/null
+_assert_file_exists "failed reset at session start leaves the dirty marker" "$(dirty_marker)"
+: >"$case_dir/hm.log"
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" HM_FILL=m >/dev/null
+_assert_contains "next prompt asks hm to reset" "--delivery persistent --reset" "$(_log)"
+_assert_file_missing "dirty marker clears once hm re-sends under the reset" "$(dirty_marker)"
+
+_delivery_case
+_run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude compact)" HM_FAIL=1 >/dev/null
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" HM_FAIL=1 >/dev/null
+_assert_file_exists "dirty marker survives a failed prompt" "$(dirty_marker)"
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" HM_OLD=1 >/dev/null
+_assert_file_exists "dirty marker survives an untracked retry on an older hm" "$(dirty_marker)"
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload nested-session)" >/dev/null
+_assert_file_exists "an untracked nested prompt cannot clear the marker" "$(dirty_marker)"
+_run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude resume)" >/dev/null
+_assert_file_exists "a session-start reset that re-sent nothing keeps the marker" "$(dirty_marker)"
+_run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude resume)" HM_FILL=m >/dev/null
+_assert_file_missing "a tracked session-start reset that re-sent memory clears the marker" \
+  "$(dirty_marker)"
+
+_delivery_case
+_run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude compact)" HM_OLD=1 >/dev/null
+_assert_file_exists "session-start reset on an older hm stays pending" "$(dirty_marker)"
+
+_delivery_case
+_run_hook agent-hook-compact claude s-claude '{"session_id":"s-claude"}' \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=0 >/dev/null
+_assert_file_missing "Hive Memory off: compaction leaves no marker" "$(dirty_marker)"
+_run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude compact)" \
+  PATH="$TEST_TMPDIR/hermetic-bin:/usr/bin:/bin" >/dev/null
+_assert_file_missing "hm not installed: session start leaves no marker" "$(dirty_marker)"
+
+_delivery_case
+mv "$DELIVERY_HOME/.config/hive-memory/config.toml" "$DELIVERY_HOME/config.toml.away"
+_run_hook agent-hook-compact claude s-claude '{"session_id":"s-claude","trigger":"auto"}' >/dev/null
+_assert_file_exists "a reset that cannot reach hm stays pending" "$(dirty_marker)"
+mv "$DELIVERY_HOME/config.toml.away" "$DELIVERY_HOME/.config/hive-memory/config.toml"
+
+# --- PreCompact ---
+
+for agent in claude codex; do
+  _delivery_case
+  out=$(_run_hook agent-hook-compact "$agent" "s-$agent" "$(jq -cn --arg sid "s-$agent" '{session_id: $sid, trigger: "manual"}')")
+  status=$?
+  _assert_eq "$agent compact: exits 0" "0" "$status"
+  _assert_eq "$agent compact: empty response" "{}" "$out"
+  _assert_contains "$agent compact: resets the hm epoch" \
+    "args=hook context-reset --json|session=s-$agent" "$(_log)"
+done
+
+_delivery_case
+out=$(_run_hook agent-hook-compact claude s-claude '{"session_id":"s-claude","trigger":"auto"}' HM_FAIL=1)
+status=$?
+_assert_eq "failed compact reset: still exits 0" "0" "$status"
+_assert_eq "failed compact reset: response stays empty" "{}" "$out"
+_assert_file_exists "failed compact reset: leaves the dirty marker" "$(dirty_marker)"
+out=$(_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" HM_FAIL=1)
+_assert_contains "failed compact reset: later prompt warnings still reach the model" \
+  "Hive Memory hook failed" "$(_ctx "$out")"
+
+_delivery_case
+_run_hook agent-hook-compact codex s-codex '{"session_id":"s-codex"}' HM_OLD=1 >/dev/null
+_assert_eq "old hm: compact reset is attempted once" "1" "$(grep -c '^args=' "$case_dir/hm.log")"
+_assert_file_exists "old hm: compact reset stays pending" "$(_state_dir s-codex)/hm-context-dirty"
+
+_delivery_case
+out=$(_run_hook agent-hook-compact muse s-muse '{"session_id":"s-muse","trigger":"soft"}')
+_assert_eq "muse compact: empty response" "{}" "$out"
+_assert_eq "muse compact: keeps the epoch (session-start context survives)" "" "$(_log)"
+_assert_file_missing "muse compact: no pending reset" "$(_state_dir s-muse)/hm-context-dirty"
+
+_delivery_case
+_run_hook agent-hook-compact gemini s-gemini '{"session_id":"s-gemini"}' >/dev/null
+_assert_eq "untracked runtime: compact does not call hm" "" "$(_log)"
+
+# --- Exact budgets, timeouts, and the bounded drop cycle ---
+
+_delivery_case
+out=$(_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" HM_FILL=m)
+_assert_contains "claude: memory context filling the whole budget is kept" "mmmm" "$(_ctx "$out")"
+_assert_file_missing "claude: a full budget leaves no reset pending" "$(dirty_marker)"
+
+# The budget's parity follows the length of the context already present (git
+# status here), so cover an odd and an even budget.
+odd_repo=$(_tmpdir)
+git init -q "$odd_repo"
+for i in 1 2 3 4 55; do touch "$odd_repo/untracked-file-$i"; done
+for repo in "$dirty_repo" "$odd_repo"; do
+  for fill in m '"'; do
+    _delivery_case
+    out=$(cd "$repo" && _run_hook agent-hook-session-start muse s-muse \
+      "$(jq -cn '{session_id: "s-muse", source: "startup"}')" HM_FILL="$fill")
+    budget=$(sed -n 's/.*--max-context-bytes \([0-9]*\).*/\1/p' "$case_dir/hm.log")
+    parity=even
+    [ $((budget % 2)) = 0 ] || parity=odd
+    # Whatever untracked output would have fit under Muse's limit, the
+    # tracked budget fits too: the response is exactly at the limit, never
+    # over.
+    _assert_eq "muse session-start ($fill, $parity budget): response right under 16,384 bytes" \
+      "16383" "$(printf '%s\n' "$out" | wc -c | tr -d ' ')"
+    _assert_file_missing "muse session-start ($fill, $parity budget): nothing dropped" \
+      "$(_state_dir s-muse)/hm-context-dirty"
+  done
+done
+
+_delivery_case
+_respond_with_context 500
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_RESPONSE="$case_dir/response.json" HM_EXIT=124 >/dev/null
+_assert_file_exists "a tracked call that fails after hm wrote its output leaves a reset pending" \
+  "$(dirty_marker)"
+
+_delivery_case
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" HM_EXIT=1 \
+  AGENTGUARD_HIVE_MEMORY_DELIVERY=0 >/dev/null
+_assert_file_missing "an untracked failed call leaves no reset pending" "$(dirty_marker)"
+
+_delivery_case
+# Extensions add 2,000 chars after the memory block on every prompt. The first
+# response overflows and is dropped; the next budget leaves room for that
+# tail, so memory reaches the model from then on instead of every prompt
+# being dropped.
+out=$(_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_FILL=m TEST_TAIL_BYTES=2000)
+_assert_not_contains "drop cycle: first overflow is dropped" "mmmm" "$(_ctx "$out")"
+_assert_file_exists "drop cycle: first overflow leaves a reset pending" "$(dirty_marker)"
+_assert_eq "drop cycle: recording the first tail is quiet" "" "$(cat "$case_dir/stderr")"
+for turn in 2 3; do
+  out=$(_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+    HM_FILL=m TEST_TAIL_BYTES=2000)
+  ctx=$(_ctx "$out")
+  _assert_contains "drop cycle: prompt $turn delivers memory" "mmmm" "$ctx"
+  _assert_eq "drop cycle: prompt $turn stays under the limit" "1" "$((${#ctx} < 10000))"
+done
+_assert_file_missing "drop cycle: the reset was consumed" "$(dirty_marker)"
+
+_delivery_case
+_run_hook agent-hook-prompt-submit muse s-muse "$(_prompt_payload s-muse)" \
+  HM_FILL='"' TEST_TAIL_BYTES=3000 >/dev/null
+out=$(_run_hook agent-hook-prompt-submit muse s-muse "$(_prompt_payload s-muse)" \
+  HM_FILL='"' TEST_TAIL_BYTES=3000)
+_assert_contains "muse drop cycle: escaped memory fits on the next prompt" '\"\"\"' "$out"
+_assert_eq "muse drop cycle: response under 16,384 bytes" "1" \
+  "$(($(printf '%s\n' "$out" | wc -c) < 16384))"
+
+tail_file() {
+  printf '%s\n' "$(_state_dir "${1:-s-claude}")/hm-context-tail-${2:-prompt-submit}"
+}
+
+_delivery_case
+# A tail that never pushed a response over the limit reserves nothing, so a
+# one-off reminder does not shrink later budgets.
+_respond_with_context 500
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_RESPONSE="$case_dir/response.json" TEST_TAIL_BYTES=2000 >/dev/null
+_assert_file_missing "tail: not recorded without an overflow" "$(tail_file)"
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" >/dev/null
+_assert_contains "tail: budget stays exact" "--max-context-bytes 9999" "$(_log)"
+
+_delivery_case
+# The last overflow replaces the recorded tail, so it can shrink again.
+mkdir -p "$(_state_dir s-claude)"
+printf '5000 0 0\n' >"$(tail_file)"
+_respond_with_context 9500
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_RESPONSE="$case_dir/response.json" TEST_TAIL_BYTES=1000 >/dev/null
+_assert_file_content "tail: the last overflow replaces the recorded tail" "1001 1 1" "$(tail_file)"
+
+_delivery_case
+# Alternating tails over half the limit overflow on every big prompt, since
+# a non-consecutive overflow records only half. After three overflows the
+# prompt runs untracked (today's output), so the drops end.
+for turn in 1 2 3 4 5 6 7 8; do
+  tail_bytes=0
+  [ $((turn % 2)) = 1 ] && tail_bytes=6000
+  _run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+    HM_FILL=m TEST_TAIL_BYTES="$tail_bytes" >/dev/null
+done
+_assert_file_content "alternating tails: overflows stop at three" "5000 1 3" "$(tail_file)"
+_assert_not_contains "alternating tails: later prompts run untracked" "--delivery" \
+  "$(tail -n 2 "$case_dir/hm.log")"
+
+_delivery_case
+# Something rewrote the context around the memory block: the tail cannot be
+# measured, so the event stays untracked rather than risk endless drops.
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_FILL=m TEST_PREPEND=1 TEST_TAIL_BYTES=500 >/dev/null
+_assert_file_content "unmeasurable tail: untracked from now on" "0 1 3" "$(tail_file)"
+_assert_file_exists "unmeasurable tail: a reset is left pending" "$(dirty_marker)"
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" >/dev/null
+_assert_not_contains "unmeasurable tail: next prompt is untracked" "--delivery" \
+  "$(tail -n 1 "$case_dir/hm.log")"
+
+_delivery_case
+# Muse counts the escaped response, so a quote-heavy tail is recorded at its
+# escaped size (the separator newline escapes to two bytes as well).
+_run_hook agent-hook-prompt-submit muse s-muse "$(_prompt_payload s-muse)" \
+  HM_FILL=m TEST_TAIL_FILL='"' TEST_TAIL_BYTES=3000 >/dev/null
+_assert_file_content "muse tail: recorded escaped" "6002 1 1" "$(tail_file s-muse)"
+out=$(_run_hook agent-hook-prompt-submit muse s-muse "$(_prompt_payload s-muse)" \
+  HM_FILL=m TEST_TAIL_FILL='"' TEST_TAIL_BYTES=3000)
+_assert_contains "muse tail: memory fits on the next prompt" "mmmm" "$out"
+_assert_eq "muse tail: response under 16,384 bytes" "1" \
+  "$(($(printf '%s\n' "$out" | wc -c) < 16384))"
+
+_delivery_case
+# A Muse project-change block forgets the tail; recall does not.
+mkdir -p "$(_state_dir s-muse)"
+printf '6002 0 1\n' >"$(tail_file s-muse)"
+_respond_with_context 200
+jq -c '. + {context_emitted: true, recall: {reason: "selected"}}' "$case_dir/response.json" \
+  >"$case_dir/recall.json"
+_run_hook agent-hook-prompt-submit muse s-muse "$(_prompt_payload s-muse)" \
+  HM_RESPONSE="$case_dir/recall.json" >/dev/null
+_assert_file_content "muse recall keeps the tail" "6002 0 1" "$(tail_file s-muse)"
+jq -c '. + {context_emitted: true, recall: {reason: "context-selection-changed"}}' \
+  "$case_dir/response.json" >"$case_dir/switch.json"
+printf '6002 1 1\n' >"$(tail_file s-muse)"
+printf '3000 0 0\n' >"$(tail_file s-muse session-start)"
+_run_hook agent-hook-prompt-submit muse s-muse "$(_prompt_payload s-muse)" \
+  HM_RESPONSE="$case_dir/switch.json" >/dev/null
+_assert_file_content "muse project change forgets the tail and the overflow flag, not the count" \
+  "0 0 1" "$(tail_file s-muse)"
+_assert_file_content "muse project change leaves the session-start tail" "3000 0 0" \
+  "$(tail_file s-muse session-start)"
+
+_delivery_case
+# A recurring Muse tail with a project change on every prompt still stops
+# overflowing after three: the count survives the forgotten tail.
+jq -cn '{warnings: [], actions: [{kind: "inject_context", body: ("Hive Memory Context " + ("m" * 9000))}],
+  context_emitted: true, recall: {reason: "context-selection-changed"}}' >"$case_dir/switch.json"
+for turn in 1 2 3 4 5 6; do
+  _run_hook agent-hook-prompt-submit muse s-muse "$(_prompt_payload s-muse)" \
+    HM_RESPONSE="$case_dir/switch.json" TEST_TAIL_BYTES=9000 >/dev/null
+done
+_assert_contains "muse recurring overflow: three overflows" " 3" "$(cat "$(tail_file s-muse)")"
+_assert_not_contains "muse recurring overflow: then untracked" "--delivery" \
+  "$(tail -n 1 "$case_dir/hm.log")"
+
+_delivery_case
+# A one-off reminder that nearly fills the limit is recorded as half the
+# limit, so later prompts still get memory, and the dropped memory is re-sent
+# under the pending reset. A second, non-consecutive one stays at half.
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_FILL=m TEST_TAIL_BYTES=9900 >/dev/null
+_assert_file_content "huge tail: first overflow recorded as half the limit" "5000 1 1" "$(tail_file)"
+out=$(_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" HM_FILL=m)
+_assert_contains "huge tail: next prompt re-sends under the reset with half the budget" \
+  "--reset --max-context-bytes 4999" "$(tail -n 1 "$case_dir/hm.log")"
+_assert_contains "huge tail: next prompt delivers memory" "mmmm" "$(_ctx "$out")"
+_assert_file_missing "huge tail: the reset is consumed once memory went out" "$(dirty_marker)"
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_FILL=m TEST_TAIL_BYTES=9900 >/dev/null
+_assert_file_content "huge tail: a non-consecutive recurrence stays at half" "5000 1 2" "$(tail_file)"
+out=$(_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" HM_FILL=m)
+_assert_contains "huge tail: memory still flows after the second one" "mmmm" "$(_ctx "$out")"
+
+_delivery_case
+# Consecutive overflows record the tail whole. The budget left is under the
+# floor, so the next prompt runs untracked, which behaves like today.
+for turn in 1 2; do
+  _run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+    HM_FILL=m TEST_TAIL_BYTES=9900 >/dev/null
+done
+_assert_file_content "consecutive huge tails: recorded whole" "9901 1 2" "$(tail_file)"
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" >/dev/null
+_assert_not_contains "consecutive huge tails: next prompt untracked" "--delivery" \
+  "$(tail -n 1 "$case_dir/hm.log")"
+_assert_file_exists "consecutive huge tails: the reset waits for a tracked prompt" \
+  "$(dirty_marker)"
+
+_delivery_case
+# The budget floor: just enough room stays tracked, one unit less does not.
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  AGENTGUARD_HIVE_MEMORY_CONTEXT_RESERVE=7951 >/dev/null
+_assert_contains "floor: 2,048 units left stays tracked" "--max-context-bytes 2048" "$(_log)"
+_delivery_case
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  AGENTGUARD_HIVE_MEMORY_CONTEXT_RESERVE=7952 >/dev/null
+_assert_not_contains "floor: 2,047 units left runs untracked" "--delivery" "$(_log)"
+
+_delivery_case
+# Session start with too little room still injects startup context, untracked,
+# and leaves its reset pending for a tracked prompt.
+_run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude compact)" \
+  HM_FILL=m AGENTGUARD_HIVE_MEMORY_CONTEXT_RESERVE=9000 >/dev/null
+_assert_contains "floor at session start: hm still runs" "hook session-start" "$(_log)"
+_assert_not_contains "floor at session start: untracked" "--delivery" "$(_log)"
+_assert_file_exists "floor at session start: reset left pending" "$(dirty_marker)"
+
+_delivery_case
+# Session start after three overflows also runs untracked and keeps the reset.
+mkdir -p "$(_state_dir s-claude)"
+printf '100 1 3\n' >"$(tail_file s-claude session-start)"
+_run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude startup)" \
+  HM_FILL=m >/dev/null
+_assert_contains "overflow limit at session start: hm still runs" "hook session-start" "$(_log)"
+_assert_not_contains "overflow limit at session start: untracked" "--delivery" "$(_log)"
+_assert_file_exists "overflow limit at session start: reset left pending" "$(dirty_marker)"
+_respond_with_context 300
+out=$(_run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude compact)" \
+  HM_RESPONSE="$case_dir/response.json" AGENTGUARD_HIVE_MEMORY_CONTEXT_RESERVE=9000)
+_assert_contains "floor at session start: untracked context reaches the model" \
+  "Hive Memory Context" "$(_ctx "$out")"
+_assert_file_exists "floor at session start: untracked context leaves the reset pending" \
+  "$(dirty_marker)"
+out=$(_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_RESPONSE="$case_dir/response.json" AGENTGUARD_HIVE_MEMORY_CONTEXT_RESERVE=9000)
+_assert_contains "floor at prompt: untracked context reaches the model" \
+  "Hive Memory Context" "$(_ctx "$out")"
+_assert_file_exists "floor at prompt: untracked context leaves the reset pending" \
+  "$(dirty_marker)"
+
+_delivery_case
+# A pending reset is cleared once memory context went out under it, even a
+# header-only block (everything already visible); a response with no context
+# keeps it pending.
+mkdir -p "$(_state_dir s-claude)"
+: >"$(dirty_marker)"
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" >/dev/null
+_assert_file_exists "empty response keeps the reset pending" "$(dirty_marker)"
+_assert_contains "the reset is sent again" "--reset" "$(tail -n 1 "$case_dir/hm.log")"
+jq -cn '{warnings: [], actions: [{kind: "inject_context", body: "Hive Memory Context header"}],
+  delivery: {emitted_ids: []}}' >"$case_dir/header.json"
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_RESPONSE="$case_dir/header.json" >/dev/null
+_assert_file_missing "header-only response under the reset clears it" "$(dirty_marker)"
+: >"$(dirty_marker)"
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_RESPONSE="$case_dir/header.json" HM_EXIT=1 >/dev/null
+_assert_file_exists "a failed call keeps the reset pending" "$(dirty_marker)"
+
+_delivery_case
+# An accepted reset starts a new epoch and forgets recorded tails.
+mkdir -p "$(_state_dir s-claude)"
+printf '4000\n' >"$(tail_file)"
+printf '3000\n' >"$(tail_file s-claude session-start)"
+_run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude compact)" >/dev/null
+_assert_file_missing "accepted reset: prompt tail forgotten" "$(tail_file)"
+_assert_file_missing "accepted reset: session-start tail forgotten" \
+  "$(tail_file s-claude session-start)"
+
+_delivery_case
+mkdir -p "$(_state_dir s-claude)"
+printf '4000\n' >"$(tail_file)"
+_run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude compact)" \
+  HM_FAIL=1 >/dev/null
+_assert_file_content "failed reset: tail kept" "4000" "$(tail_file)"
+_delivery_case
+mkdir -p "$(_state_dir s-claude)"
+printf '4000\n' >"$(tail_file)"
+: >"$(dirty_marker)"
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" >/dev/null
+_assert_file_content "prompt-driven reset: tail kept (it may be what overflowed)" "4000" \
+  "$(tail_file)"
+
+_test_summary

@@ -16,6 +16,23 @@
 _HOOK_BLOCKED=''
 _HOOK_CTX=''
 _HOOK_HM_CONFIG_PATH=''
+# Hive Memory delivery tracking for this hook (see _hook_hm_delivery_policy):
+# optional `hm hook` arguments, the host's context lifetime and size limit, the
+# last hm status, and where the memory context sits in _HOOK_CTX so
+# _hook_finish can verify it against the host limit.
+_HOOK_HM_DELIVERY_ARGS=()
+_HOOK_HM_TRACKED=''
+_HOOK_HM_LIFETIME=''
+_HOOK_HM_LIMIT_KIND=''
+_HOOK_HM_LIMIT=''
+_HOOK_HM_EVENT=''
+_HOOK_HM_EVENT_NAME=''
+_HOOK_HM_LAST_RC=0
+_HOOK_HM_RESPONSE=''
+_HOOK_HM_CTX_PREFIX=''
+_HOOK_HM_CTX_BODY=''
+_HOOK_HM_QUIET=''
+_HOOK_HM_POLICY_AGENT=''
 _HOOK_INPUT_STATE_REFRESHED=''
 _HOOK_INPUT_SESSION=''
 _HOOK_INPUT_EVENT=''
@@ -1646,6 +1663,12 @@ _hook_hm_apply_response() {
     case "$kind" in
       inject_context)
         _HOOK_HM_CONTEXT_EMITTED=1
+        if [ -n "$_HOOK_HM_TRACKED" ]; then
+          # Remember exactly where the memory context lands so _hook_finish
+          # can drop it again if the final output would exceed the host limit.
+          _HOOK_HM_CTX_PREFIX="$_HOOK_CTX"
+          _HOOK_HM_CTX_BODY="$body"
+        fi
         _hook_context "$body"
         ;;
       remind)
@@ -1842,11 +1865,14 @@ _hook_timeout_prefix() {
 }
 
 _hook_hm_event() {
+  # 125 until hm actually ran: a context reset that could not reach `hm` must
+  # not count as recorded.
+  _HOOK_HM_LAST_RC=125
   _hook_hm_available || return 0
 
   local event="$1"
   shift
-  local project="" response err rc project_infer=1
+  local project="" err rc project_infer=1
   local -a hm_args
   _hook_hm_read_input
   err=$(mktemp "${TMPDIR:-/tmp}/hm-hook.XXXXXX") || return 0
@@ -1856,11 +1882,11 @@ _hook_hm_event() {
   # coalescing from config and hook state.
   hm_args=(hook "$event")
   case "$event" in
-    stop | tool-complete)
-      # Intentionally omit project context for these high-frequency events.
-      # `session-start` and `prompt-submit` are the project-aware context
-      # boundaries; `tool-complete` only reports status, and passing a project
-      # hint here forces `hm` through VCS discovery after every tool call.
+    stop | tool-complete | context-reset)
+      # Intentionally omit project context for these events. `session-start`
+      # and `prompt-submit` are the project-aware context boundaries;
+      # `tool-complete` only reports status, and passing a project hint here
+      # forces `hm` through VCS discovery after every tool call.
       project_infer=0
       ;;
     *)
@@ -1882,30 +1908,38 @@ _hook_hm_event() {
   # whole hook process getting killed later and its output discarded.
   _hook_timeout_prefix "${AGENTGUARD_HIVE_MEMORY_TIMEOUT:-2}"
 
-  if [ "$project_infer" -eq 0 ]; then
-    response=$(
-      env -u HIVE_MEMORY_PROJECT \
-        HIVE_MEMORY_CONFIG="$_HOOK_HM_CONFIG_PATH" \
-        HIVE_MEMORY_AGENT_ID="$(_hook_agent_name)" \
-        HIVE_MEMORY_SESSION_ID="$_HOOK_SESSION_KEY" \
-        HIVE_MEMORY_PROJECT_INFER=0 \
-        HIVE_MEMORY_HOOK_ACTIVE=1 \
-        HIVE_MEMORY_BACKGROUND_REFRESH=1 \
-        "${_HOOK_TIMEOUT_PREFIX[@]}" hm "${hm_args[@]}" 2>"$err"
-    )
-  else
-    response=$(
-      HIVE_MEMORY_CONFIG="$_HOOK_HM_CONFIG_PATH" \
-        HIVE_MEMORY_AGENT_ID="$(_hook_agent_name)" \
-        HIVE_MEMORY_SESSION_ID="$_HOOK_SESSION_KEY" \
-        HIVE_MEMORY_PROJECT="$project" \
-        HIVE_MEMORY_PROJECT_INFER="$project_infer" \
-        HIVE_MEMORY_HOOK_ACTIVE=1 \
-        HIVE_MEMORY_BACKGROUND_REFRESH=1 \
-        "${_HOOK_TIMEOUT_PREFIX[@]}" hm "${hm_args[@]}" 2>"$err"
-    )
-  fi
+  _hook_hm_run "$err" "$project_infer" "$project" "${hm_args[@]}" \
+    ${_HOOK_HM_DELIVERY_ARGS[@]+"${_HOOK_HM_DELIVERY_ARGS[@]}"}
   rc=$?
+  if [ "$rc" -eq 2 ] && [ "${#_HOOK_HM_DELIVERY_ARGS[@]}" -gt 0 ]; then
+    # `hm` exits 2 only for command-line usage errors, so an installed `hm`
+    # older than delivery tracking rejects the optional flags this way. Run
+    # the untracked command it understands instead of losing memory context.
+    _hook_hm_note_once "untracked" "Hive Memory predates delivery tracking; using untracked hooks"
+    _HOOK_HM_DELIVERY_ARGS=()
+    _HOOK_HM_TRACKED=''
+    _hook_hm_run "$err" "$project_infer" "$project" "${hm_args[@]}"
+    rc=$?
+  fi
+  # Delivery arguments belong to this one event.
+  _HOOK_HM_DELIVERY_ARGS=()
+  _HOOK_HM_LAST_RC=$rc
+  # A tracked call can fail after `hm` recorded its output as delivered (the
+  # timeout guard killing it, for example), and the output is discarded here:
+  # leave a reset pending so the next prompt re-sends.
+  [ "$rc" -eq 0 ] || [ -z "$_HOOK_HM_TRACKED" ] || _hook_hm_mark_dirty
+  if [ "$rc" -ne 0 ] && [ -n "$_HOOK_HM_QUIET" ]; then
+    # Hooks whose response cannot carry context (PreCompact) report on stderr
+    # and telemetry only, under their own once-keys, so they never use up the
+    # once-per-session warnings a later prompt would show the model.
+    if [ "$rc" -eq 2 ]; then
+      _hook_hm_note_once "untracked-$event" "Hive Memory predates $event; context loss will be retried"
+    else
+      _hook_hm_note_once "failed-$event" "Hive Memory $event failed with status $rc"
+    fi
+    rm -f "$err"
+    return 0
+  fi
   if [ "$rc" -ne 0 ]; then
     if [ "$rc" -eq 124 ]; then
       _hook_hm_warn_once "timeout" "Hive Memory hook timed out after ${AGENTGUARD_HIVE_MEMORY_TIMEOUT:-2}s — skipping memory context this turn"
@@ -1919,11 +1953,354 @@ _hook_hm_event() {
   fi
   rm -f "$err"
 
-  _hook_hm_apply_response "$response"
+  _hook_hm_apply_response "$_HOOK_HM_RESPONSE"
+}
+
+# Run one `hm` command with the hook environment and the timeout prefix from
+# _hook_timeout_prefix. Stores stdout in _HOOK_HM_RESPONSE, stderr in file $1,
+# and returns hm's status. $2 is 0 to disable project inference, $3 the project
+# hint; the rest is the hm argument list.
+_hook_hm_run() {
+  local err="$1" project_infer="$2" project="$3"
+  shift 3
+  if [ "$project_infer" -eq 0 ]; then
+    _HOOK_HM_RESPONSE=$(
+      env -u HIVE_MEMORY_PROJECT \
+        HIVE_MEMORY_CONFIG="$_HOOK_HM_CONFIG_PATH" \
+        HIVE_MEMORY_AGENT_ID="$(_hook_agent_name)" \
+        HIVE_MEMORY_SESSION_ID="$_HOOK_SESSION_KEY" \
+        HIVE_MEMORY_PROJECT_INFER=0 \
+        HIVE_MEMORY_HOOK_ACTIVE=1 \
+        HIVE_MEMORY_BACKGROUND_REFRESH=1 \
+        "${_HOOK_TIMEOUT_PREFIX[@]}" hm "$@" 2>"$err"
+    )
+  else
+    _HOOK_HM_RESPONSE=$(
+      HIVE_MEMORY_CONFIG="$_HOOK_HM_CONFIG_PATH" \
+        HIVE_MEMORY_AGENT_ID="$(_hook_agent_name)" \
+        HIVE_MEMORY_SESSION_ID="$_HOOK_SESSION_KEY" \
+        HIVE_MEMORY_PROJECT="$project" \
+        HIVE_MEMORY_PROJECT_INFER="$project_infer" \
+        HIVE_MEMORY_HOOK_ACTIVE=1 \
+        HIVE_MEMORY_BACKGROUND_REFRESH=1 \
+        "${_HOOK_TIMEOUT_PREFIX[@]}" hm "$@" 2>"$err"
+    )
+  fi
+}
+
+# Stderr and telemetry only, once per session: operational notes the model
+# does not need, unlike _hook_hm_warn_once, which also reaches hook context.
+_hook_hm_note_once() {
+  _hook_once_per_session "hm-note-$1" || return 0
+  _hook_telemetry_note _HOOK_TELEMETRY_WARNINGS "$2"
+  printf 'WARNING: %s\n' "$2" >&2
+}
+
+# --- Hive Memory delivery tracking ---
+#
+# With tracking, `hm` skips memories the model can still see: a memory counts
+# as delivered once `hm` emits it within the host's size limit. That is safe
+# only when every way the host can lose context is reported to `hm`, so
+# tracking is enabled per runtime, for runtimes whose signals were verified
+# live (2026-10-13; Claude Code 2.1.291, Codex 0.159.3, Muse 1.4.8):
+#   - Claude Code keeps hook context in the transcript until compaction
+#     (PreCompact, then SessionStart source=compact) or /clear (a new session
+#     id, SessionStart source=clear). Hook additionalContext over 10,000
+#     characters is replaced by a 2 KB preview, so it is not visible.
+#   - Codex keeps context the same way; PreCompact fires at compaction and
+#     SessionStart source=compact|clear|resume at the next prompt. No size
+#     limit up to 200,000 characters.
+#   - Muse replaces prompt-submit context on every turn (lifetime `turn`);
+#     session-start context persists through compaction and resume, so
+#     compaction needs no reset, and /clear starts a new session id. Hook
+#     stdout over 16,384 bytes is dropped whole.
+# Other runtimes stay untracked.
+
+# Whether this hook belongs to the context window the hm session key names.
+# A subagent (payload agent_id), or a nested agent that inherited its parent's
+# session variables (payload session id differs from the key), has a separate
+# context window and must not share the parent's delivered set.
+_hook_hm_owns_session() {
+  [ -n "$_HOOK_INPUT_SESSION" ] && [ "$_HOOK_INPUT_SESSION" = "$_HOOK_SESSION_KEY" ] ||
+    return 1
+  case "${_HOOK_INPUT:-}" in
+    *'"agent_id"'* | *'"agentId"'*)
+      if printf '%s' "$_HOOK_INPUT" |
+        jq -e '(.agent_id // .agentId // "") | . != ""' >/dev/null 2>&1; then
+        return 1
+      fi
+      ;;
+  esac
+}
+
+# Set the delivery policy for hm event $1 (session-start, prompt-submit,
+# context-reset): _HOOK_HM_LIFETIME, _HOOK_HM_LIMIT_KIND (`context`: bytes of
+# additionalContext; `stdout`: bytes of the whole response; empty: no limit),
+# and _HOOK_HM_LIMIT. Returns 1 when this hook must stay untracked.
+_hook_hm_delivery_policy() {
+  local event="$1"
+  _HOOK_HM_LIFETIME=''
+  _HOOK_HM_LIMIT_KIND=''
+  _HOOK_HM_LIMIT=''
+  _HOOK_HM_EVENT="$event"
+  case "$event" in
+    session-start) _HOOK_HM_EVENT_NAME=SessionStart ;;
+    prompt-submit) _HOOK_HM_EVENT_NAME=UserPromptSubmit ;;
+    *) _HOOK_HM_EVENT_NAME='' ;;
+  esac
+  case "${AGENTGUARD_HIVE_MEMORY_DELIVERY:-1}" in
+    0 | false | no | off) return 1 ;;
+  esac
+  _hook_hm_owns_session || return 1
+  [ -n "$_HOOK_HM_POLICY_AGENT" ] || _HOOK_HM_POLICY_AGENT=$(_hook_agent_name)
+  case "$_HOOK_HM_POLICY_AGENT" in
+    claude)
+      _HOOK_HM_LIFETIME=persistent
+      _HOOK_HM_LIMIT_KIND=context
+      _HOOK_HM_LIMIT=10000
+      ;;
+    codex)
+      _HOOK_HM_LIFETIME=persistent
+      ;;
+    muse)
+      case "$event" in
+        prompt-submit) _HOOK_HM_LIFETIME=turn ;;
+        # Compaction keeps Muse's session-start context and prompt context
+        # never outlives its turn, so nothing visible is lost: a reset would
+        # only re-send startup context on every later prompt.
+        context-reset) return 1 ;;
+        *) _HOOK_HM_LIFETIME=persistent ;;
+      esac
+      _HOOK_HM_LIMIT_KIND=stdout
+      _HOOK_HM_LIMIT=16384
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# Store in the variable named by $2 the size of text $1 in the host limit's
+# units: bytes for `context` limits, bytes once escaped as a JSON string for
+# `stdout` limits (Muse counts the raw JSON response).
+_hook_hm_size() {
+  local LC_ALL=C size
+  if [ "$_HOOK_HM_LIMIT_KIND" = stdout ] && [ -n "$1" ]; then
+    size=$(printf '%s' "$1" | jq -Rs . | wc -c) || size=''
+    size=${size//[!0-9]/}
+    # jq adds two quotes and a newline.
+    size=$((${size:-0} > 3 ? ${size:-0} - 3 : 0))
+  else
+    size=${#1}
+  fi
+  printf -v "$2" '%s' "$size"
+}
+
+# Per-event file (in the session state dir, suffixed with the hm event) with
+# three numbers: the tail, in limit units, recorded from the last response
+# whose context after Hive Memory's block (extension reminders, for example)
+# pushed it over the host limit; 1 if the last tracked response with a memory
+# block overflowed, else 0; and the overflows since the file was last
+# forgotten. An accepted reset (_hook_hm_session_start) forgets it; a Muse
+# project-change block (_hook_hm_prompt_submit) forgets only the tail, so the
+# overflow count still bounds drops on Muse, which has no reset event.
+_HOOK_HM_TAIL_PREFIX=hm-context-tail-
+# After this many overflows the event stays untracked until the file is
+# forgotten. Each overflow costs a dropped memory block and a re-send, so this
+# bounds the cost however the tail varies; untracked output is today's.
+_HOOK_HM_MAX_OVERFLOWS=3
+# Smallest useful budget, in limit units. Below it the prompt runs untracked:
+# a tracked block would carry little or nothing, while untracked output at
+# least behaves like today (Claude shows a preview of oversized context).
+_HOOK_HM_BUDGET_FLOOR=2048
+
+# Read the tail file for the current hm event into the caller's `tail`,
+# `overflowed`, and `overflows` variables (0 when missing or malformed).
+_hook_hm_read_tail() {
+  local LC_ALL=C
+  tail=0 overflowed=0 overflows=0
+  { read -r tail overflowed overflows <"$_HOOK_STATE_DIR/$_HOOK_HM_TAIL_PREFIX$_HOOK_HM_EVENT"; } \
+    2>/dev/null || true
+  case "$tail" in '' | *[!0-9]* | ??????*) tail=0 ;; esac
+  case "$overflowed" in 1) ;; *) overflowed=0 ;; esac
+  case "$overflows" in '' | *[!0-9]* | ???*) overflows=0 ;; esac
+}
+
+# Store in the variable named by $1 the largest memory context to request
+# from `hm` so the final response stays inside the host limit: the limit minus
+# context already present, the recorded tail for this event, and the optional
+# AGENTGUARD_HIVE_MEMORY_CONTEXT_RESERVE floor. Returns 1 when the host has no
+# limit, and 2 when this event should run untracked (too many overflows, or a
+# budget under _HOOK_HM_BUDGET_FLOOR).
+#
+# There is no tail allowance until a response actually overflows. Untracked
+# hooks overflow then too whenever the tracked block is a subset of theirs:
+# session start and Muse context-change prompts. Claude/Codex prompts that add
+# recall and Muse recall can be larger and cost one drop. Each overflow
+# (_hook_hm_finalize_delivery) records its tail, and the next budget leaves
+# room for it. A first tail over half the limit is recorded as half, so a
+# one-off huge reminder still leaves room for memory; only consecutive
+# overflows record it whole. The last overflow replaces the recorded tail, so
+# it can shrink again. Drops are bounded by _HOOK_HM_MAX_OVERFLOWS, after
+# which the event runs untracked until the tail is forgotten.
+_hook_hm_context_budget() {
+  local LC_ALL=C used=0 tail overflowed overflows reserve allowance envelope
+  reserve="${AGENTGUARD_HIVE_MEMORY_CONTEXT_RESERVE:-0}"
+  case "$reserve" in
+    '' | *[!0-9]* | ??????*) reserve=0 ;;
+  esac
+  reserve=$((10#$reserve))
+  case "$_HOOK_HM_LIMIT_KIND" in
+    context) envelope=0 ;;
+    stdout)
+      # The strict-agent response around additionalContext, plus jq's
+      # trailing newline (_hook_finish).
+      envelope='{"hookSpecificOutput":{"hookEventName":"","additionalContext":""}}'
+      envelope=$((${#envelope} + ${#_HOOK_HM_EVENT_NAME} + 1))
+      ;;
+    *) return 1 ;;
+  esac
+  _hook_hm_read_tail
+  [ "$overflows" -lt "$_HOOK_HM_MAX_OVERFLOWS" ] || return 2
+  [ "$reserve" -gt "$tail" ] && tail=$reserve
+  [ -n "$_HOOK_CTX" ] && _hook_hm_size "$_HOOK_CTX"$'\n' used
+  # The host drops a response at the limit, so stay one unit below. `hm`
+  # counts JSON escaping the way jq does, so no further margin is needed.
+  allowance=$((_HOOK_HM_LIMIT - 1 - envelope - used - tail))
+  [ "$allowance" -ge "$_HOOK_HM_BUDGET_FLOOR" ] || return 2
+  # The caller names its own variable; no local here may share that name.
+  printf -v "$1" '%s' "$allowance"
+}
+
+# Prepare tracked delivery from the policy _hook_hm_delivery_policy just set;
+# arguments (--reset) are passed through to `hm`. Returns 1, leaving the call
+# untracked, when _hook_hm_context_budget says this event should run untracked.
+_hook_hm_track() {
+  local budget status=0
+  _hook_hm_context_budget budget || status=$?
+  if [ "$status" -eq 2 ]; then
+    _hook_telemetry_note _HOOK_TELEMETRY_WARNINGS \
+      "Hive Memory context untracked: too little room under the host limit"
+    return 1
+  fi
+  _HOOK_HM_TRACKED=1
+  _HOOK_HM_DELIVERY_ARGS=(--delivery "$_HOOK_HM_LIFETIME" "$@")
+  if [ "$status" -eq 0 ]; then
+    _HOOK_HM_DELIVERY_ARGS+=(--max-context-bytes "$budget")
+    [ "$_HOOK_HM_LIMIT_KIND" = stdout ] && _HOOK_HM_DELIVERY_ARGS+=(--context-size json)
+  fi
+  return 0
+}
+
+# Return 0 when the last tracked `hm` call succeeded and emitted memory
+# context: memories, pointers, or a header-only block (all memories already
+# visible). Callers reset _HOOK_HM_CONTEXT_EMITTED before the call.
+_hook_hm_emitted_context() {
+  [ -n "$_HOOK_HM_TRACKED" ] && [ "$_HOOK_HM_LAST_RC" -eq 0 ] &&
+    [ "$_HOOK_HM_CONTEXT_EMITTED" -eq 1 ]
+}
+
+# Forget every recorded tail and overflow count (a new context epoch).
+_hook_hm_forget_tail() {
+  rm -f "$_HOOK_STATE_DIR/$_HOOK_HM_TAIL_PREFIX"* 2>/dev/null || true
+}
+
+# Marker (in the session state dir) for a context loss `hm` has not recorded
+# yet: a reset that failed (timeout, lock contention) must still happen before
+# anything is skipped as already visible.
+_HOOK_HM_DIRTY_MARKER=hm-context-dirty
+
+_hook_hm_mark_dirty() {
+  # No marker where Hive Memory is off or not installed; a configured hm that
+  # was briefly unreachable still gets one.
+  [ "${AGENTGUARD_HIVE_MEMORY_HOOKS:-1}" != "0" ] || return 0
+  command -v hm >/dev/null 2>&1 || return 0
+  _hook_mkstate "$_HOOK_STATE_DIR" || return 0
+  : >"$_HOOK_STATE_DIR/$_HOOK_HM_DIRTY_MARKER" 2>/dev/null || true
+}
+
+# Called from _hook_finish. Re-checks the host limit against the final
+# context and keeps the tail file current. `hm` already counted the memory
+# context as delivered, so if it would push the response over the limit (the
+# host would hide or drop it) it is removed, the context after it is recorded
+# as this event's tail, and a context reset is left pending: the next prompt
+# re-sends.
+_hook_hm_finalize_delivery() {
+  [ -n "$_HOOK_HM_TRACKED" ] && [ -n "$_HOOK_HM_CTX_BODY" ] && [ -n "$_HOOK_HM_LIMIT" ] ||
+    return 0
+  local LC_ALL=C size=0 segment rest='' tail overflowed overflows measured=''
+  local half tail_file="$_HOOK_STATE_DIR/$_HOOK_HM_TAIL_PREFIX$_HOOK_HM_EVENT"
+
+  case "$_HOOK_HM_LIMIT_KIND" in
+    context) size=${#_HOOK_CTX} ;;
+    stdout)
+      # Muse counts the raw response, so measure the exact strict-agent JSON
+      # (and jq's trailing newline) that _hook_finish prints.
+      size=$(printf '%s' "$_HOOK_CTX" |
+        jq -Rsc --arg hook_event_name "$(_hook_event_name)" '{
+          hookSpecificOutput: {
+            hookEventName: $hook_event_name,
+            additionalContext: .
+          }
+        }' | wc -c) || size=''
+      size=${size//[!0-9]/}
+      [ -n "$size" ] || size=$_HOOK_HM_LIMIT
+      ;;
+  esac
+  _hook_hm_read_tail
+  if [ "$size" -lt "$_HOOK_HM_LIMIT" ]; then
+    # Fits: only the consecutive-overflow flag changes.
+    if [ "$overflowed" = 1 ] && _hook_mkstate "$_HOOK_STATE_DIR"; then
+      printf '%s 0 %s\n' "$tail" "$overflows" >"$tail_file" 2>/dev/null || true
+    fi
+    return 0
+  fi
+  if [ -n "$_HOOK_HM_CTX_PREFIX" ]; then
+    segment="$_HOOK_HM_CTX_PREFIX"$'\n'"$_HOOK_HM_CTX_BODY"
+  else
+    segment="$_HOOK_HM_CTX_BODY"
+  fi
+  case "$_HOOK_CTX" in
+    "$segment"*)
+      rest="${_HOOK_CTX#"$segment"}"
+      # The context after the memory block, its leading separator included
+      # (none when the block alone overflowed).
+      tail=0
+      [ -z "$rest" ] || _hook_hm_size "$rest" tail
+      measured=1
+      [ -n "$_HOOK_HM_CTX_PREFIX" ] || rest="${rest#$'\n'}"
+      _HOOK_CTX="$_HOOK_HM_CTX_PREFIX$rest"
+      _hook_telemetry_note _HOOK_TELEMETRY_WARNINGS \
+        "Hive Memory context dropped: the response would exceed the host limit"
+      ;;
+  esac
+  overflows=$((overflows + 1))
+  if [ -z "$measured" ]; then
+    # Something rewrote the context around the memory block, so the tail
+    # cannot be measured and the next budget could not leave room for it.
+    # Fail safe: this event stays untracked until the tail is forgotten.
+    overflows=$_HOOK_HM_MAX_OVERFLOWS
+  elif [ "$overflowed" != 1 ]; then
+    half=$((_HOOK_HM_LIMIT / 2))
+    [ "$tail" -le "$half" ] || tail=$half
+  fi
+  if _hook_mkstate "$_HOOK_STATE_DIR"; then
+    printf '%s 1 %s\n' "$tail" "$overflows" >"$tail_file" 2>/dev/null || true
+  fi
+  _hook_hm_mark_dirty
+}
+
+# Called from _hook_finish after the response: memory context `hm` counted as
+# delivered that the host will not show (this hook blocked the prompt, or
+# writing the response failed) leaves a context reset pending. Turn-lifetime
+# context never joins the delivered set, so a reset would recover nothing and
+# only re-send context the host still keeps.
+_hook_hm_undelivered() {
+  [ -n "$_HOOK_HM_TRACKED" ] && [ -n "$_HOOK_HM_CTX_BODY" ] || return 0
+  [ "$_HOOK_HM_LIFETIME" != turn ] || return 0
+  _hook_hm_mark_dirty
 }
 
 _hook_hm_session_start() {
-  local marker
+  local marker source='' reset=''
   # Read hook stdin before checking the marker. Some runners only expose the
   # durable session id in JSON; checking the process-key marker first would miss
   # an existing session marker, and writing after _hook_hm_event could target a
@@ -1935,10 +2312,46 @@ _hook_hm_session_start() {
   # every hook process. PromptSubmit still has its own path for context changes
   # such as a project/store affinity switch.
   marker="$_HOOK_STATE_DIR/hm-session-start-context-emitted"
-  [ ! -e "$marker" ] || return 0
+  if _hook_hm_delivery_policy session-start; then
+    case "${_HOOK_INPUT:-}" in
+      *'"source"'*)
+        source=$(printf '%s' "$_HOOK_INPUT" | jq -r '.source // empty' 2>/dev/null) ||
+          source=''
+        ;;
+    esac
+    # Compaction, clear, and resume can remove earlier context from the
+    # model's view, so they start a new epoch and re-inject past the marker.
+    # The first SessionStart for a key resets too: a reused session key must
+    # not inherit another session's delivered set.
+    case "$source" in
+      compact | clear | resume) reset=1 ;;
+      *) [ -e "$marker" ] || reset=1 ;;
+    esac
+    [ -n "$reset" ] || return 0
+    # Untracked when there is too little room; the reset then stays pending.
+    _hook_hm_track --reset || true
+  else
+    [ ! -e "$marker" ] || return 0
+  fi
 
   _HOOK_HM_CONTEXT_EMITTED=0
   _hook_hm_event session-start
+  if [ -n "$reset" ]; then
+    # Only a tracked call that `hm` accepted recorded the reset; an older
+    # `hm` (retried untracked) or an unreachable one did not.
+    # The new epoch also forgets recorded tails (see _hook_hm_context_budget).
+    # A pending reset is cleared only once memory context went out under it.
+    if [ "$_HOOK_HM_LAST_RC" -eq 0 ] && [ -n "$_HOOK_HM_TRACKED" ]; then
+      _hook_hm_forget_tail
+      if _hook_hm_emitted_context; then
+        rm -f "$_HOOK_STATE_DIR/$_HOOK_HM_DIRTY_MARKER" 2>/dev/null || true
+      else
+        _hook_hm_mark_dirty
+      fi
+    else
+      _hook_hm_mark_dirty
+    fi
+  fi
   if [ "$_HOOK_HM_CONTEXT_EMITTED" -eq 1 ]; then
     # Warnings also add hook context, but they do not deliver memory. Mark only
     # a real inject_context action so a timeout remains retryable after recovery.
@@ -1951,7 +2364,7 @@ _hook_hm_session_start() {
 }
 
 _hook_hm_prompt_submit() {
-  local prompt
+  local prompt dirty=''
   # Read stdin in this shell before extracting the prompt. Command substitution
   # runs helper calls in a subshell, so letting `_hook_hm_prompt_text` perform
   # the first read would consume hook JSON without preserving `_HOOK_INPUT` for
@@ -1960,7 +2373,52 @@ _hook_hm_prompt_submit() {
   prompt=$(_hook_hm_prompt_text)
   [ -n "$prompt" ] || return 0
   _HOOK_PROMPT_SUBMITTED=1
+  if _hook_hm_available && _hook_hm_delivery_policy prompt-submit; then
+    # Untracked when there is too little room (_hook_hm_track); a pending
+    # reset then waits for a tracked prompt.
+    if [ -e "$_HOOK_STATE_DIR/$_HOOK_HM_DIRTY_MARKER" ]; then
+      dirty=1
+      _hook_hm_track --reset || true
+    else
+      _hook_hm_track || true
+    fi
+  fi
+  _HOOK_HM_CONTEXT_EMITTED=0
   _hook_hm_event prompt-submit --text "$prompt"
+  # Clear a pending reset only once a tracked call accepted it and emitted
+  # memory context under it (memories, pointers, or a header). An untracked
+  # call (older `hm`, or too little room) never sent it, and a response with
+  # no context re-sent nothing.
+  if [ -n "$dirty" ] && _hook_hm_emitted_context; then
+    rm -f "$_HOOK_STATE_DIR/$_HOOK_HM_DIRTY_MARKER" 2>/dev/null || true
+  fi
+  # A Muse project-change block forgets the recorded tail, so one overflow
+  # cannot shrink Muse budgets for the rest of the session (Muse has no reset
+  # event that would). The overflow count stays: it is what bounds drops.
+  local tail overflowed overflows
+  if [ "$_HOOK_HM_LIFETIME" = turn ] && [ -n "$_HOOK_HM_TRACKED" ] &&
+    [ "$_HOOK_HM_LAST_RC" -eq 0 ] &&
+    printf '%s' "$_HOOK_HM_RESPONSE" |
+    jq -e '.context_emitted == true and .recall.reason == "context-selection-changed"' \
+      >/dev/null 2>&1; then
+    _hook_hm_read_tail
+    if [ "$tail" -gt 0 ] || [ "$overflowed" = 1 ]; then
+      printf '0 0 %s\n' "$overflows" \
+        >"$_HOOK_STATE_DIR/$_HOOK_HM_TAIL_PREFIX$_HOOK_HM_EVENT" 2>/dev/null || true
+    fi
+  fi
+}
+
+# PreCompact: the host is about to drop earlier context. Record the loss so
+# no memory is skipped as already visible afterwards. A failed reset leaves
+# the dirty marker, which makes the next tracked prompt reset first.
+_hook_hm_context_reset() {
+  _hook_hm_read_input
+  _hook_hm_delivery_policy context-reset || return 0
+  _HOOK_HM_QUIET=1
+  _hook_hm_event context-reset
+  _HOOK_HM_QUIET=''
+  [ "$_HOOK_HM_LAST_RC" -eq 0 ] || _hook_hm_mark_dirty
 }
 
 # Optional $1 overrides the derived status, for hooks that already know
@@ -2147,6 +2605,7 @@ _hook_telemetry_exit() {
       session-start*) event=SessionStart ;;
       session-end*) event=SessionEnd ;;
       prompt-submit*) event=UserPromptSubmit ;;
+      compact*) event=PreCompact ;;
       stop*) event=Stop ;;
       notification*) event=Notification ;;
     esac
@@ -2310,6 +2769,7 @@ _hook_event_name() {
       fi
       ;;
     agent-hook-stop*) echo "Stop" ;;
+    agent-hook-compact*) echo "PreCompact" ;;
     agent-hook-notification*) echo "PermissionRequest" ;;
     *) echo "UserPromptSubmit" ;;
   esac
@@ -2374,7 +2834,16 @@ _hook_finish() {
         exit 0
       fi
       ;;
+    agent-hook-compact*)
+      # PreCompact only records the context loss. Its response schema differs
+      # across runtimes and strict runners reject unexpected fields, so a
+      # warning stays on stderr and telemetry and the response is empty.
+      printf '{}\n'
+      exit 0
+      ;;
   esac
+
+  _hook_hm_finalize_delivery
 
   if [ -n "$_HOOK_CTX" ]; then
     if _hook_strict_output_agent; then
@@ -2418,6 +2887,11 @@ _hook_finish() {
     fi
   else
     printf '{}\n'
+  fi
+  # Status of the branch's last command: the jq (or printf) that wrote stdout.
+  local emit_status=$?
+  if [ -n "$_HOOK_BLOCKED" ] || [ "$emit_status" -ne 0 ]; then
+    _hook_hm_undelivered
   fi
   [ -n "$_HOOK_BLOCKED" ] && exit 2
   exit 0

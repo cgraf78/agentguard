@@ -8,6 +8,7 @@ root="${test_dir%/test}"
 
 # Keep runtime entry points explicit so additions require a lint review.
 runtime_shell_files=(
+  "$root/bin/agent-hook-compact"
   "$root/bin/agent-hook-notification"
   "$root/bin/agent-hook-post-bash"
   "$root/bin/agent-hook-post-edit"

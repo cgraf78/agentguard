@@ -1,0 +1,45 @@
+.TH AGENT-HOOK-COMPACT 1 "2026-10-13" "agentguard" "User Commands"
+.SH NAME
+agent-hook-compact \- record that an agent is about to compact its context
+.SH SYNOPSIS
+.B agent-hook-compact
+.SH DESCRIPTION
+.B agent-hook-compact
+handles the
+.B PreCompact
+lifecycle event. It reads the hook JSON payload from standard input and runs
+.BR "hm hook context-reset" ,
+so Hive Memory stops treating earlier injected memories as visible and offers
+them again after compaction. It does so only for runtimes whose Hive Memory
+delivery tracking needs it (Claude Code and Codex); elsewhere it does nothing.
+Muse keeps session-start context through compaction and drops prompt context
+every turn, so its compaction loses nothing and needs no reset.
+.PP
+If the reset fails, the hook leaves a marker in the session state directory and
+the next
+.BR agent-hook-prompt-submit (1)
+asks for the reset again. The response is always empty JSON; a failure is
+reported on standard error and in telemetry only.
+.SH ENVIRONMENT
+.TP
+.B AGENTGUARD_HIVE_MEMORY_HOOKS
+Set to
+.B 0
+to disable Hive Memory hook integration.
+.TP
+.B AGENTGUARD_HIVE_MEMORY_DELIVERY
+Set to
+.BR 0 ,
+.BR false ,
+.BR no ,
+or
+.B off
+to keep every runtime on untracked Hive Memory hooks.
+.SH EXIT STATUS
+.TP
+.B 0
+Always; compaction is never blocked.
+.SH SEE ALSO
+.BR agent-hook-prompt-submit (1),
+.BR agent-hook-session-start (1),
+.BR hm (1)

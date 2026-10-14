@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-SESSION-START 1 "2026-06-30" "agentguard" "User Commands"
+.TH AGENT-HOOK-SESSION-START 1 "2026-10-13" "agentguard" "User Commands"
 .SH NAME
 agent-hook-session-start \- emit startup context for an agent session
 .SH SYNOPSIS
@@ -16,14 +16,53 @@ When a session is launched from
 AgentGuard treats that as no active project instead of passing the home
 directory as a project hint.
 .PP
+On runtimes with Hive Memory delivery tracking (Claude Code, Codex, Muse), a
+start with
+.B source
+.BR compact ,
+.BR clear ,
+or
+.BR resume ,
+and the first start for a session key, also start a new Hive Memory context
+epoch and inject startup context again; a repeated plain start does not. If
+that reset fails or re-sends no memory context, the next
+.BR agent-hook-prompt-submit (1)
+requests it again. With less than 2 KB left under the host limit, or after
+three overflows since the last compaction, clear, or resume, the start runs
+untracked, as without tracking, and the reset stays pending.
+.PP
 Every start also removes the session's edit-churn bypass marker (see
 .BR agentguard-churn-bypass (1))
 from every state root, so a reused session key never inherits a
 previous session's bypass.
+.SH ENVIRONMENT
+.TP
+.B AGENTGUARD_HIVE_MEMORY_HOOKS
+Set to
+.B 0
+to disable Hive Memory hook integration.
+.TP
+.B AGENTGUARD_HIVE_MEMORY_DELIVERY
+Set to
+.BR 0 ,
+.BR false ,
+.BR no ,
+or
+.B off
+to keep every runtime on untracked Hive Memory hooks.
+.TP
+.B AGENTGUARD_HIVE_MEMORY_CONTEXT_RESERVE
+Minimum bytes of the host limit to keep free for context added after Hive
+Memory (default 0). The hook otherwise reserves the context that last pushed
+a response over the limit (capped at half the limit unless two overflows were
+consecutive) until the next compaction, clear, or resume, or a Muse
+project-change block.
+
 .SH EXIT STATUS
 .TP
 .B 0
 Startup context was emitted or no context was available.
 .SH SEE ALSO
+.BR agent-hook-compact (1),
 .BR agent-hook-prompt-submit (1),
 .BR hm (1)
