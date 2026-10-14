@@ -1218,10 +1218,8 @@ case "$-" in
             ;;
 
           # Block interactive TTY commands — they will silently hang the agent turn.
-          # Families with a documented batch mode are exempted when the fragment
-          # carries one of their non-interactive flags; see
-          # _tty_noninteractive_flags for that table. Everything else, and any
-          # family absent from the table, still blocks unconditionally.
+          # The classifier owns batch-flag exemptions and argument-aware man
+          # pager selection. Families without a supported mode still block.
           vim | vi | nvim | view | */vim | */vi | */nvim | */view | \
             nano | pico | joe | micro | */nano | */pico | */joe | */micro | \
             emacs | */emacs | \

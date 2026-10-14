@@ -11,6 +11,21 @@ removal, unsafe Git operations, unscoped recursive search, protected bare-Git
 untracked scans, TTY-only commands, and other command patterns that should not
 run unattended.
 .PP
+Manual-page reads with an explicit
+.B cat
+pager are allowed, for example
+.BR "man -P cat tmux" ,
+.BR "man --pager=cat tmux" ,
+or
+.BR "MANPAGER=cat man tmux" .
+A literal command-prefix
+.B PAGER=cat
+is also recognized unless
+.B MANPAGER
+overrides it. Interactive pagers, nonempty
+.BR MANOPT ,
+and unsupported output modes remain blocked.
+.PP
 It also warns, without blocking, when a command runs a foreground
 .B sleep
 totalling 60 seconds or more (GNU duration operands such as
