@@ -2949,6 +2949,20 @@ _assert_eq "cd_to_target: command prefix and --" "0" "$?"
 ) | _stdin_contains PASS
 _assert_eq "cd_to_target: path-qualified cd stays put" "0" "$?"
 
+# A trailing separator leaves an empty last fragment, which must not read
+# as a failed split and skip the leading cd.
+for _cd_trailer in ';' '; ' ' &' $' ;\n'; do
+  (
+    source "$HELPERS"
+    AGENTGUARD_CMD_TRIMMED="cd \"$MOCK_CD_SPACE_DIR\"; ls$_cd_trailer"
+    AGENTGUARD_CMD_LINE1="$AGENTGUARD_CMD_TRIMMED"
+    _hook_cd_to_target
+    [ "$(pwd -P)" = "$MOCK_CD_SPACE_DIR_PHYS" ] && echo "PASS" || echo "FAIL: $(pwd -P)"
+  ) | _stdin_contains PASS
+  _cd_rc=$?
+  _assert_eq "cd_to_target: trailing separator $(printf %q "$_cd_trailer")" "0" "$_cd_rc"
+done
+
 # Non-cd command stays in current dir
 (
   source "$HELPERS"
