@@ -318,7 +318,10 @@ ctx=$(_ctx "$out")
 _assert_contains "claude session-start: context before the memory survives the drop" \
   "Uncommitted changes" "$ctx"
 _assert_not_contains "claude session-start: oversized memory is dropped" "Hive Memory Context" "$ctx"
-_assert_eq "claude session-start: no stray separator remains" "" "$(printf '%s' "$ctx" | sed -n '$p' | tr -d '[:print:]')"
+# Read the raw field: command substitution would strip a trailing newline.
+# (busybox tr also lacks character classes such as [:print:].)
+_assert_eq "claude session-start: no stray separator remains" "false" \
+  "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext | endswith("\n")')"
 _assert_file_exists "claude session-start: dropped delivery leaves a reset pending" "$(dirty_marker)"
 
 _delivery_case
