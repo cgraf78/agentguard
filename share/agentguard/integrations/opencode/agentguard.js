@@ -67,6 +67,11 @@ const CONTEXT_HEADING = "AgentGuard context";
 const TRUSTED_CLEANUP_PYTHON = ["/usr/bin/python3", "/bin/python3"].find(existsSync);
 const TRUSTED_CLEANUP_PS = ["/bin/ps", "/usr/bin/ps"].find(existsSync);
 const TRUSTED_CLEANUP_PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
+// A healthy sweep finishes in well under a second, including on loaded macOS CI.
+// Together these cap the time a failed or timed-out hook can spend in cleanup at
+// four seconds.
+const SESSION_SWEEP_TIMEOUT = 2_000;
+const SESSION_SWEEP_ATTEMPTS = 2;
 // These variables are executable input to a newly started non-interactive
 // shell, not ordinary application configuration. Inheriting them would let a
 // project or outer agent run code before an AgentGuard hook's first line, which
@@ -471,6 +476,38 @@ async function executable(hook) {
   }
 }
 
+// Kill every member of a hook's private session, including helpers that moved
+// to another process group. The group kill has already succeeded in the common
+// case, so a failed sweep would otherwise leave such a helper running without a
+// trace. Log each failure so the cause is visible, and retry once: a second ps
+// snapshot covers a transient failure, while the fixed attempt count and
+// per-attempt timeout keep a fail-closed denial's added latency bounded.
+function sweepSession(leaderPid) {
+  for (let attempt = 1; attempt <= SESSION_SWEEP_ATTEMPTS; attempt += 1) {
+    const result = spawnSync(
+      TRUSTED_CLEANUP_PYTHON,
+      ["-I", "-c", POSIX_SESSION_KILLER, String(leaderPid), TRUSTED_CLEANUP_PS],
+      {
+        // `-I` removes the current directory and PYTHON* environment from
+        // module discovery. A neutral cwd and fixed system PATH are defense in
+        // depth: cleanup must never import a checkout module or execute a
+        // project/toolchain replacement for Python or ps.
+        cwd: path.parse(process.execPath).root,
+        env: hookEnvironment({ PATH: TRUSTED_CLEANUP_PATH }),
+        stdio: "ignore",
+        timeout: SESSION_SWEEP_TIMEOUT,
+      },
+    );
+    if (result.status === 0) return true;
+    console.error(
+      `[opencode-agentguard] session cleanup sweep attempt ${attempt}/${SESSION_SWEEP_ATTEMPTS} failed: ` +
+        `status ${result.status ?? "none"}, signal ${result.signal ?? "none"}, ` +
+        `error ${result.error?.code ?? "none"}`,
+    );
+  }
+  return false;
+}
+
 function spawnHook(command, hook, payload, directory, sessionID, runtimeName) {
   return new Promise((resolve, reject) => {
     // A timed-out hook may have spawned helpers. A separate POSIX process group
@@ -516,24 +553,9 @@ function spawnHook(command, hook, payload, directory, sessionID, runtimeName) {
         // This synchronous call runs only while handling a timeout or protocol
         // failure. Waiting for it here preserves the stronger invariant that
         // no owned session member is left running when the hook promise rejects.
-        let sessionKill;
-        if (TRUSTED_CLEANUP_PYTHON && TRUSTED_CLEANUP_PS) {
-          sessionKill = spawnSync(
-            TRUSTED_CLEANUP_PYTHON,
-            ["-I", "-c", POSIX_SESSION_KILLER, String(child.pid), TRUSTED_CLEANUP_PS],
-            {
-              // `-I` removes the current directory and PYTHON* environment from
-              // module discovery. A neutral cwd and fixed system PATH are
-              // defense in depth: cleanup must never import a checkout module
-              // or execute a project/toolchain replacement for Python or ps.
-              cwd: path.parse(process.execPath).root,
-              env: hookEnvironment({ PATH: TRUSTED_CLEANUP_PATH }),
-              stdio: "ignore",
-              timeout: 2_000,
-            },
-          );
-        }
-        if (sessionKill?.status === 0 || groupKilled) return;
+        const sessionSwept =
+          Boolean(TRUSTED_CLEANUP_PYTHON && TRUSTED_CLEANUP_PS) && sweepSession(child.pid);
+        if (sessionSwept || groupKilled) return;
 
         // A damaged or unusually minimal environment may omit Python or ps.
         // Retry the original process group as a safe, narrower fallback because

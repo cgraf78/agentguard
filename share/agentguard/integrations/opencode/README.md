@@ -74,8 +74,10 @@ deliberately created another process group. That helper runs Python in isolated
 mode from a neutral directory, with absolute system executable paths and a
 fixed system `PATH`, so a project cannot inject `sitecustomize.py`,
 `subprocess.py`, `PYTHONPATH`, `python3`, or `ps` into cleanup; the narrower
-group kill remains the non-executing fallback on minimal systems. Windows does
-not use POSIX process-group cleanup.
+group kill remains the non-executing fallback on minimal systems. A sweep that
+fails to start, exits nonzero, times out, or dies by signal is logged with its
+status, signal, and error code, then retried once; each attempt has a
+two-second limit. Windows does not use POSIX process-group cleanup.
 
 Live MCP inventory refreshes are bounded to one second and cached briefly. A
 timed-out or malformed local status response falls back to the last known or
