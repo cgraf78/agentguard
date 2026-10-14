@@ -391,8 +391,12 @@ To add a new managed agent runtime:
   `git clean -f`, `git push --force`/`-f`/`+refspec` (`--force-with-lease`
   stays allowed), `git push --mirror`, `git push --prune`,
   interactive TTY commands (editors, `man`/`info`, `top`-style monitors,
-  debuggers, `watch`; only `vim`/`vi`/`view`/`nvim` are exempt with a batch
-  flag such as `-es` or `--headless`), `kill` targeting PID `1`, `0`, or `-1`,
+  debuggers, `watch`; `vim`/`vi`/`view`/`nvim` are exempt with a batch
+  flag such as `-es` or `--headless`, and `man` with an explicit `cat` pager
+  such as `man -P cat`, `man --pager=cat`, or `MANPAGER=cat man`). A literal
+  command-prefix `PAGER=cat` also works when `MANPAGER` does not override it;
+  other pagers, nonempty `MANOPT`, and unsupported modes stay blocked.
+  It also blocks `kill` targeting PID `1`, `0`, or `-1`,
   `chmod 777`, Git or Sapling commit-authoring commands inside command
   substitutions, and the protected bare-Git scans described above. It warns on
   `kill -9`/SIGKILL, `killall`, `pkill`, and world-writable `chmod` modes. It
