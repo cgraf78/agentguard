@@ -3812,11 +3812,90 @@ _rm_fragment_rf_state() {
   fi
 }
 
+# Recognize literal cat pager selections without executing command text. Unlike
+# editor batch flags, a pager option takes a value and later options override it.
+# Environment-derived selections need an explicit assignment in this fragment:
+# hook and tool shells can inherit different pager settings. Unsupported wrapper
+# options and MANOPT stay conservative rather than guessing their effects.
+_man_noninteractive() {
+  local fragment="$1" word i command_index pager="${PAGER-}" manpager="${MANPAGER-}"
+  local manopt="${MANOPT-}" explicit_env=0 plain_prefix=1 explicit_pager=0
+  local -a words=()
+
+  while IFS= read -r word; do
+    words+=("$word")
+  done < <(_fragment_tokens "$fragment")
+  command_index="$(_fragment_command_index_from_words "${words[@]}")" || return 1
+
+  for ((i = 0; i < command_index; i++)); do
+    word="${words[$i]}"
+    case "$word" in
+      MANPAGER=*)
+        manpager="${word#*=}"
+        explicit_env=1
+        ;;
+      PAGER=*)
+        pager="${word#*=}"
+        explicit_env=1
+        ;;
+      MANOPT=*) manopt="${word#*=}" ;;
+      env | */env | command | builtin | exec | time | '!' | '(' | '{') ;;
+      [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*) ;;
+      *) plain_prefix=0 ;;
+    esac
+  done
+
+  for ((i = command_index + 1; i < ${#words[@]}; i++)); do
+    word="${words[$i]}"
+    case "$word" in
+      --) break ;;
+      -P | --pager)
+        ((i++))
+        [ "$i" -lt "${#words[@]}" ] || return 1
+        pager="${words[$i]}"
+        explicit_pager=1
+        ;;
+      -P?*)
+        pager="${word#-P}"
+        explicit_pager=1
+        ;;
+      --pager=*)
+        pager="${word#*=}"
+        explicit_pager=1
+        ;;
+      # Consume other option values so a prompt or path spelled -P cannot
+      # manufacture a pager selection. Attached values remain one token.
+      -C | -R | -L | -m | -M | -S | -s | -e | -r | -E | -p | \
+        --config-file | --recode | --locale | --systems | --manpath | \
+        --sections | --extension | --prompt | --encoding | --preprocessor)
+        ((i++))
+        [ "$i" -lt "${#words[@]}" ] || return 1
+        ;;
+      -C?* | -R?* | -L?* | -m?* | -M?* | -S?* | -s?* | -e?* | -r?* | -E?* | -p?* | \
+        --config-file=* | --recode=* | --locale=* | --systems=* | --manpath=* | \
+        --sections=* | --extension=* | --prompt=* | --encoding=* | --preprocessor=*) ;;
+      -a | --all | -l | --local-file | -w | --where | --path | --location) ;;
+      # Browser modes ignore the pager, and unknown modes may alter option
+      # parsing. They earn no exemption merely because cat appears elsewhere.
+      -*) return 1 ;;
+    esac
+  done
+
+  [ -z "$manopt" ] || return 1
+  if [ "$explicit_pager" -eq 0 ]; then
+    [ "$explicit_env" -eq 1 ] && [ "$plain_prefix" -eq 1 ] || return 1
+    pager="${manpager:-$pager}"
+  fi
+  case "$pager" in
+    cat | /bin/cat | /usr/bin/cat) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Flags that switch a normally-interactive command into a non-interactive mode,
 # keyed by command family. This is the extension point for the TTY guard: a
-# family gains a batch mode by adding one row here, rather than by special-casing
-# the guard itself. Families with no row keep blocking unconditionally, so the
-# table fails closed for anything it does not know about.
+# family gains a batch mode by adding one row here. Value-taking pager selection
+# uses _man_noninteractive instead. Families with neither keep blocking.
 #
 # Absence of a row means "not implemented here", not "has no batch mode" —
 # `gdb --batch`, `emacs --batch`, and `top -b -n 1` are all real batch
@@ -3855,6 +3934,11 @@ _tty_noninteractive_flags() {
 _fragment_has_noninteractive_flag() {
   local fragment="$1" command_word="$2" word flag i
   local -a words=() flags=()
+
+  if [ "${command_word##*/}" = man ]; then
+    _man_noninteractive "$fragment"
+    return $?
+  fi
 
   while IFS= read -r flag; do
     flags+=("$flag")

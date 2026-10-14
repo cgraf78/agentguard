@@ -9,6 +9,9 @@
 AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
 . "$AGENTGUARD_TEST_HELPERS"
 
+# Pager fixtures must not depend on the invoking terminal's manual-page setup.
+unset MANPAGER PAGER MANOPT
+
 # ---------------------------------------------------------------------------
 # Tests: sudo guard
 # ---------------------------------------------------------------------------
@@ -307,6 +310,53 @@ _assert_eq "echo nvim --headless: allowed" "0" "$HOOK_EXIT"
 # Compound fragments: an interactive nvim anywhere in the chain still blocks.
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"nvim --headless -c qall! && nvim ."}}'
 _assert_eq "compound with interactive nvim: blocked" "2" "$HOOK_EXIT"
+
+# Literal pager selection must exempt cat without admitting another pager or
+# mistaking an option's argument or a page name for the pager setting.
+while IFS='|' read -r label expected command; do
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c "$command" '{tool_input:{command:$c}}')"
+  _assert_eq "$label" "$expected" "$HOOK_EXIT"
+done <<'MAN_PAGER_CASES'
+man -P cat: allowed|0|man -P cat tmux
+man attached -Pcat: allowed|0|man -Pcat tmux
+man --pager cat: allowed|0|man --pager cat tmux
+man --pager=cat: allowed|0|man --pager=cat tmux
+path-qualified man and cat: allowed|0|/usr/bin/man -P /bin/cat tmux
+man local file with cat: allowed|0|man -l -P cat manual.1
+MANPAGER=cat: allowed|0|MANPAGER=cat man tmux
+PAGER=cat: allowed|0|PAGER=cat man tmux
+env MANPAGER=cat: allowed|0|env MANPAGER='cat' man tmux
+explicit cat overrides MANPAGER: allowed|0|MANPAGER=less man -P cat tmux
+MANPAGER overrides PAGER: allowed|0|PAGER=less MANPAGER=cat man tmux
+last explicit pager cat: allowed|0|man -P less --pager=cat tmux
+nested assignment cat wins: allowed|0|MANPAGER=less MANPAGER=cat man tmux
+explicit cat before -- remains selected|0|man -P cat -- tmux
+nested shell man with cat: allowed|0|bash -c 'man -P cat tmux'
+plain man stays blocked|2|man tmux
+interactive pager stays blocked|2|man -P less tmux
+missing short pager stays blocked|2|man -P
+missing long pager stays blocked|2|man --pager
+empty pager stays blocked|2|man --pager='' tmux
+unrecognized pager command stays blocked|2|man -P 'cat manual.1' tmux
+last explicit interactive pager stays blocked|2|man -P cat --pager=less tmux
+explicit pager overrides MANPAGER=cat|2|MANPAGER=cat man -P less tmux
+MANPAGER=less overrides PAGER=cat|2|MANPAGER=less PAGER=cat man tmux
+last assignment interactive pager wins|2|MANPAGER=cat MANPAGER=less man tmux
+options after -- are page names|2|man -- -P cat
+prompt argument is not a pager option|2|man -r '-P' cat tmux
+long prompt argument is not a pager option|2|man --prompt '-P' cat tmux
+MANPAGER operand is not an assignment|2|man tmux MANPAGER=cat
+PAGER operand is not an assignment|2|man tmux PAGER=cat
+unset MANPAGER removes cat selection|2|MANPAGER=cat env -u MANPAGER man tmux
+cleared environment removes cat selection|2|MANPAGER=cat env -i man tmux
+MANOPT can override the environment pager|2|MANOPT='-P less' MANPAGER=cat man tmux
+browser mode stays blocked|2|man -P cat -Hfirefox tmux
+compound interactive man stays blocked|2|man -P cat tmux && man git
+compound editor stays blocked|2|man -P cat tmux && nvim .
+MAN_PAGER_CASES
+
+MANPAGER=less _run_hook "$PRE_BASH" '{"tool_input":{"command":"PAGER=cat man tmux"}}'
+_assert_eq "inherited MANPAGER overrides explicit PAGER" "2" "$HOOK_EXIT"
 
 # Non-TTY commands are fine
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"cat README.md"}}'
