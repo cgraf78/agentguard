@@ -2190,12 +2190,12 @@ _hook_hm_track() {
   return 0
 }
 
-# Return 0 when the last tracked `hm` response emitted at least one memory
-# (not only a header, pointers, or nothing).
-_hook_hm_emitted_memory() {
-  [ -n "$_HOOK_HM_TRACKED" ] && [ "$_HOOK_HM_LAST_RC" -eq 0 ] || return 1
-  printf '%s' "$_HOOK_HM_RESPONSE" |
-    jq -e '(.delivery.emitted_ids // []) | length > 0' >/dev/null 2>&1
+# Return 0 when the last tracked `hm` call succeeded and emitted memory
+# context: memories, pointers, or a header-only block (all memories already
+# visible). Callers reset _HOOK_HM_CONTEXT_EMITTED before the call.
+_hook_hm_emitted_context() {
+  [ -n "$_HOOK_HM_TRACKED" ] && [ "$_HOOK_HM_LAST_RC" -eq 0 ] &&
+    [ "$_HOOK_HM_CONTEXT_EMITTED" -eq 1 ]
 }
 
 # Forget every recorded tail and overflow count (a new context epoch).
@@ -2340,10 +2340,10 @@ _hook_hm_session_start() {
     # Only a tracked call that `hm` accepted recorded the reset; an older
     # `hm` (retried untracked) or an unreachable one did not.
     # The new epoch also forgets recorded tails (see _hook_hm_context_budget).
-    # A pending reset is cleared only once memory actually went out under it.
+    # A pending reset is cleared only once memory context went out under it.
     if [ "$_HOOK_HM_LAST_RC" -eq 0 ] && [ -n "$_HOOK_HM_TRACKED" ]; then
       _hook_hm_forget_tail
-      if _hook_hm_emitted_memory; then
+      if _hook_hm_emitted_context; then
         rm -f "$_HOOK_STATE_DIR/$_HOOK_HM_DIRTY_MARKER" 2>/dev/null || true
       else
         _hook_hm_mark_dirty
@@ -2383,11 +2383,13 @@ _hook_hm_prompt_submit() {
       _hook_hm_track || true
     fi
   fi
+  _HOOK_HM_CONTEXT_EMITTED=0
   _hook_hm_event prompt-submit --text "$prompt"
-  # Clear a pending reset only once a tracked call accepted it and memory
-  # actually went out under it. An untracked call (older `hm`, or too little
-  # room) never sent it, and an empty or header-only response re-sent nothing.
-  if [ -n "$dirty" ] && _hook_hm_emitted_memory; then
+  # Clear a pending reset only once a tracked call accepted it and emitted
+  # memory context under it (memories, pointers, or a header). An untracked
+  # call (older `hm`, or too little room) never sent it, and a response with
+  # no context re-sent nothing.
+  if [ -n "$dirty" ] && _hook_hm_emitted_context; then
     rm -f "$_HOOK_STATE_DIR/$_HOOK_HM_DIRTY_MARKER" 2>/dev/null || true
   fi
   # A Muse project-change block forgets the recorded tail, so one overflow

@@ -33,9 +33,9 @@ is removed, and the overflowing context after it is reserved from then on. A
 failed Hive Memory call, a response the hook cannot write, or a prompt it
 blocks also leave the reset pending, except a blocked Muse prompt, whose
 memory context never counts as delivered. The pending reset is cleared once
-a tracked response re-sends memory under it. With less than 2 KB left, or
-after three overflows since the last compaction, clear, or resume, the prompt
-runs untracked, as without tracking.
+a tracked response re-sends memory context (even only a header) under it.
+With less than 2 KB left, or after three overflows since the last compaction,
+clear, or resume, the prompt runs untracked, as without tracking.
 .SH ENVIRONMENT
 .TP
 .B AGENTGUARD_HIVE_MEMORY_HOOKS

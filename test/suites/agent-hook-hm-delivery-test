@@ -103,11 +103,14 @@ _delivery_case() {
 }
 
 # Run hook $1 for agent $2 with session key $3 and stdin payload $4. Extra
-# environment assignments may follow. Prints the hook's stdout.
+# environment assignments may follow. Prints the hook's stdout. Inherited Hive
+# Memory config selectors (CI runners set XDG_CONFIG_HOME) would point away
+# from the fixture config and make `hm` look unconfigured.
 _run_hook() {
   local hook="$1" agent="$2" key="$3" payload="$4"
   shift 4
   printf '%s' "$payload" | env -u CLAUDE_CODE_SESSION_ID -u MUSE_SESSION_ID \
+    -u XDG_CONFIG_HOME -u HIVE_MEMORY_CONFIG \
     HOME="$DELIVERY_HOME" \
     PATH="$DELIVERY_STUB:$PATH" \
     XDG_RUNTIME_DIR="$case_dir/run" \
@@ -665,26 +668,48 @@ _run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude co
 _assert_contains "floor at session start: hm still runs" "hook session-start" "$(_log)"
 _assert_not_contains "floor at session start: untracked" "--delivery" "$(_log)"
 _assert_file_exists "floor at session start: reset left pending" "$(dirty_marker)"
+
+_delivery_case
+# Session start after three overflows also runs untracked and keeps the reset.
+mkdir -p "$(_state_dir s-claude)"
+printf '100 1 3\n' >"$(tail_file s-claude session-start)"
+_run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude startup)" \
+  HM_FILL=m >/dev/null
+_assert_contains "overflow limit at session start: hm still runs" "hook session-start" "$(_log)"
+_assert_not_contains "overflow limit at session start: untracked" "--delivery" "$(_log)"
+_assert_file_exists "overflow limit at session start: reset left pending" "$(dirty_marker)"
 _respond_with_context 300
 out=$(_run_hook agent-hook-session-start claude s-claude "$(_start_payload s-claude compact)" \
   HM_RESPONSE="$case_dir/response.json" AGENTGUARD_HIVE_MEMORY_CONTEXT_RESERVE=9000)
 _assert_contains "floor at session start: untracked context reaches the model" \
   "Hive Memory Context" "$(_ctx "$out")"
+_assert_file_exists "floor at session start: untracked context leaves the reset pending" \
+  "$(dirty_marker)"
+out=$(_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_RESPONSE="$case_dir/response.json" AGENTGUARD_HIVE_MEMORY_CONTEXT_RESERVE=9000)
+_assert_contains "floor at prompt: untracked context reaches the model" \
+  "Hive Memory Context" "$(_ctx "$out")"
+_assert_file_exists "floor at prompt: untracked context leaves the reset pending" \
+  "$(dirty_marker)"
 
 _delivery_case
-# A pending reset is cleared only once memory actually went out under it.
+# A pending reset is cleared once memory context went out under it, even a
+# header-only block (everything already visible); a response with no context
+# keeps it pending.
 mkdir -p "$(_state_dir s-claude)"
 : >"$(dirty_marker)"
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" >/dev/null
+_assert_file_exists "empty response keeps the reset pending" "$(dirty_marker)"
+_assert_contains "the reset is sent again" "--reset" "$(tail -n 1 "$case_dir/hm.log")"
 jq -cn '{warnings: [], actions: [{kind: "inject_context", body: "Hive Memory Context header"}],
   delivery: {emitted_ids: []}}' >"$case_dir/header.json"
 _run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
   HM_RESPONSE="$case_dir/header.json" >/dev/null
-_assert_file_exists "header-only response keeps the reset pending" "$(dirty_marker)"
-_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" >/dev/null
-_assert_file_exists "empty response keeps the reset pending" "$(dirty_marker)"
-_assert_contains "the reset is sent again" "--reset" "$(tail -n 1 "$case_dir/hm.log")"
-_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" HM_FILL=m >/dev/null
-_assert_file_missing "memory under the reset clears it" "$(dirty_marker)"
+_assert_file_missing "header-only response under the reset clears it" "$(dirty_marker)"
+: >"$(dirty_marker)"
+_run_hook agent-hook-prompt-submit claude s-claude "$(_prompt_payload s-claude)" \
+  HM_RESPONSE="$case_dir/header.json" HM_EXIT=1 >/dev/null
+_assert_file_exists "a failed call keeps the reset pending" "$(dirty_marker)"
 
 _delivery_case
 # An accepted reset starts a new epoch and forgets recorded tails.

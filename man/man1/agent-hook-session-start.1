@@ -25,7 +25,7 @@ or
 .BR resume ,
 and the first start for a session key, also start a new Hive Memory context
 epoch and inject startup context again; a repeated plain start does not. If
-that reset fails or re-sends no memory, the next
+that reset fails or re-sends no memory context, the next
 .BR agent-hook-prompt-submit (1)
 requests it again. With less than 2 KB left under the host limit, or after
 three overflows since the last compaction, clear, or resume, the start runs

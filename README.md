@@ -519,7 +519,8 @@ lose context is reported:
   call, a response the hook could not write, or a prompt it blocks get the
   same treatment. A blocked Muse prompt is the exception: Muse prompt context
   never counts as delivered, so it has nothing to re-send. A pending reset is
-  cleared only once a tracked response re-sent memory under it.
+  cleared once a tracked response re-sent memory context under it (even a
+  header-only block when everything is already visible).
 - Accepted gap: when another plugin's hook blocks the prompt, or the host
   times out the hook after `hm` returned, those memories wait for the next
   reset (compaction, clear, resume). Untracked prompt recall has the same gap.
