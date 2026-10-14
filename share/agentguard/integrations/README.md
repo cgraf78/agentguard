@@ -114,3 +114,6 @@ protocol suite would let the copies drift independently.
    `GROK_SESSION_ID` plus the `grok` binary name).
 3. Add an optional `$hook-<name>` extension only if a hook needs
    runtime-specific behavior (`_hook_source_agent` discovers it by filename).
+4. If the runtime logs a Stop hook's exit 2 and ends the turn anyway, set
+   `AGENTGUARD_STOP_BLOCK_ENDS_TURN=1` for `agent-hook-stop`; otherwise the hook
+   waits for a continuation that never comes and the turn ends silently.

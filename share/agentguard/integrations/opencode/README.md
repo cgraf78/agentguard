@@ -64,7 +64,10 @@ AgentGuard is still being installed. Once a protected pre-hook is found and
 launched, denial, timeout, malformed successful output, input failure, or launch
 failure rejects the protected tool call. Post-tool and lifecycle hooks cannot
 undo completed work, so their failures are logged without rewriting the tool's
-result.
+result. A Stop hook's exit 2 is logged the same way and does not continue the
+turn, so the adapter sets `AGENTGUARD_STOP_BLOCK_ENDS_TURN=1` for the Stop
+hook: it then rings and clears the busy pane mark even when an extension blocks
+it.
 
 Hook children run in a private POSIX process group. On timeout, input failure,
 denial, nonzero exit, or malformed protected output, the adapter kills that
