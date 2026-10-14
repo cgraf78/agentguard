@@ -171,7 +171,9 @@ preserving user hooks and runtime-owned state.
 The OpenCode adapter translates OpenCode's plugin callbacks into AgentGuard's
 shared hook schema. `AGENTGUARD_OPENCODE_NAME` can override the default
 `opencode` identity for a compatible runtime, and
-`AGENTGUARD_OPENCODE_TIMEOUT_SCALE` scales hook timeouts for tests. Hook
+`AGENTGUARD_OPENCODE_TIMEOUT_SCALE` scales hook timeouts for tests. The adapter
+sets `AGENTGUARD_STOP_BLOCK_ENDS_TURN=1` for the Stop hook because OpenCode
+does not continue a turn when that hook exits 2. Hook
 executables are invoked directly with shell startup controls removed so their
 documented launcher boundary remains intact.
 
@@ -374,6 +376,8 @@ To add a new managed agent runtime:
   instead of adding policy directly to the agent config
 - add `-<agent>` extension scripts only for behavior that is truly
   runtime-specific
+- set `AGENTGUARD_STOP_BLOCK_ENDS_TURN=1` for `agent-hook-stop` when the agent
+  logs a Stop hook's exit 2 and ends the turn anyway
 - update `detect.sh` only when the runtime exposes reliable process or
   environment signals
 - add tests that verify native event mapping, hook environment injection,
@@ -467,13 +471,20 @@ To add a new managed agent runtime:
   reminders and context refresh decisions, then resets prompt-cycle state used
   by once-per-prompt guidance. The hook passes prompt text and path facts; it
   does not decide what should be written.
-- `agent-hook-stop` asks Hive Memory for any pending-memory reminder and plays a
-  terminal notification for the first non-reentrant Stop callback after a valid
-  prompt. Repeated callbacks stay silent until another valid prompt re-arms the
-  shared AgentGuard state. Codex Stop continuations are currently suppressed
-  because affected Codex releases persist their synthetic messages with
-  replay-invalid item IDs; prompt-submit still surfaces memory reminders before
-  Stop. Grok Stop always emits empty JSON because Grok treats Stop context as
+- `agent-hook-stop` asks Hive Memory for any pending-memory reminder, runs its
+  extensions, and plays a terminal notification for the first Stop after a
+  valid prompt that ends the foreground turn. A Stop an extension blocks to
+  keep the agent working stays silent, so the Stop that later ends the turn
+  rings although the host flags it as a continuation; other re-entrant and
+  repeated callbacks stay silent until another valid prompt re-arms the shared
+  AgentGuard state. A block ends the turn anyway on Codex and on hosts that set
+  `AGENTGUARD_STOP_BLOCK_ENDS_TURN=1` (the OpenCode adapter does), so that Stop
+  rings, and so does a Stop that dies first (a crashed extension or a host
+  timeout's HUP or TERM) without a block. A SIGKILL timeout (OpenCode's)
+  cannot ring. Codex Stop continuations are currently suppressed because
+  affected Codex releases persist their synthetic messages with replay-invalid
+  item IDs; prompt-submit still surfaces memory reminders before Stop. Grok
+  Stop always emits empty JSON because Grok treats Stop context as
   keep-working feedback; an extension block still exits with status 2.
   `agent-hook-notification` plays notifications for host attention events such
   as permission requests.

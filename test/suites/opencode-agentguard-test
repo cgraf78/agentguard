@@ -62,6 +62,7 @@ fs.appendFileSync(
     cwd: process.cwd(),
     name: process.env.AGENTGUARD_NAME,
     session: process.env.AGENTGUARD_SESSION_ID,
+    stopBlockEndsTurn: process.env.AGENTGUARD_STOP_BLOCK_ENDS_TURN,
     bashEnv: process.env.BASH_ENV,
     posixEnv: process.env.ENV,
     bashFunction: process.env["BASH_FUNC_agentguard_test%%"],
@@ -1063,6 +1064,18 @@ await check("deduplicates Stop and finalizes each session at most once", async (
     records
       .filter((item) => item.hook === "agent-hook-stop")
       .every((item) => item.payload.hook_event_name === "Stop"),
+  );
+  // A Stop's exit 2 cannot continue an OpenCode turn; AgentGuard must know,
+  // and only the Stop hook is told.
+  assert.ok(
+    records
+      .filter((item) => item.hook === "agent-hook-stop")
+      .every((item) => item.stopBlockEndsTurn === "1"),
+  );
+  assert.ok(
+    records
+      .filter((item) => item.hook !== "agent-hook-stop")
+      .every((item) => item.stopBlockEndsTurn === undefined),
   );
   assert.equal(
     records.find((item) => item.hook === "agent-hook-session-end").payload.hook_event_name,

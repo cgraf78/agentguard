@@ -313,6 +313,253 @@ _assert_file_content "stop: repeated Hive checks ring only once" \
   "$REMINDER_STOP_NOTIFY_MARKER"
 
 echo ""
+echo "=== stop: bell after extensions ==="
+
+# Each agent's Stop extension blocks while STOP_BLOCK_FLAG exists, the way a
+# work extension blocks once to keep the turn going.
+MOCK_EXT_STOP_DIR=$(_tmpdir)
+_install_hook_fixture "$MOCK_EXT_STOP_DIR" agent-hook-stop agent-hook-prompt-submit
+cat >"$MOCK_EXT_STOP_DIR/bin/term-notify-sound" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TERM_NOTIFY_MARKER"
+MOCK
+chmod +x "$MOCK_EXT_STOP_DIR/bin/term-notify-sound"
+for ext_agent in claude grok muse gemini blockfixture codex opencode; do
+  # shellcheck disable=SC2016 # expanded by the hook that sources the extension
+  printf '%s\n' '[ ! -e "$STOP_BLOCK_FLAG" ] || _hook_block "keep going"' \
+    >"$MOCK_EXT_STOP_DIR/bin/agent-hook-stop-$ext_agent"
+done
+
+# _ext_stop AGENT LABEL PAYLOAD [ENV...] runs one Stop for session LABEL and
+# prints its exit status. A wrapper process stands in for the agent, so the
+# expected notifier owner is the hook's parent, as under a real agent.
+_ext_stop() {
+  local agent="$1" label="$2" payload="$3"
+  shift 3
+  # shellcheck disable=SC2016 # the wrapper shell expands its own parameters
+  printf '%s' "$payload" |
+    env AGENTGUARD_SESSION_ID="$TEST_SID-ext-$label" \
+      TMPDIR="$TEST_TMPDIR" \
+      AGENTGUARD_NAME="$agent" \
+      TERM_NOTIFY_MARKER="$MOCK_EXT_STOP_DIR/$label.notify" \
+      STOP_BLOCK_FLAG="$MOCK_EXT_STOP_DIR/$label.block" \
+      PATH="$MOCK_EXT_STOP_DIR/bin:$PATH" \
+      "$@" \
+      bash -c 'printf "%s" "$$" >"$1.owner"; "$2"; status=$?; printf "%s\n" "$status"' _ \
+      "$MOCK_EXT_STOP_DIR/$label" "$MOCK_EXT_STOP_DIR/bin/agent-hook-stop" \
+      2>/dev/null | tail -n 1
+}
+
+_ext_prompt() {
+  local agent="$1" label="$2"
+  printf '%s' '{"prompt":"Do the thing."}' |
+    AGENTGUARD_SESSION_ID="$TEST_SID-ext-$label" \
+      TMPDIR="$TEST_TMPDIR" \
+      AGENTGUARD_NAME="$agent" \
+      PATH="$MOCK_EXT_STOP_DIR/bin:$PATH" \
+      "$MOCK_EXT_STOP_DIR/bin/agent-hook-prompt-submit" >/dev/null 2>/dev/null
+}
+
+# Runtimes where a blocked Stop continues the turn.
+for ext_agent in claude grok muse gemini blockfixture; do
+  label="continue-$ext_agent"
+  notify_log="$MOCK_EXT_STOP_DIR/$label.notify"
+  _ext_prompt "$ext_agent" "$label"
+  : >"$MOCK_EXT_STOP_DIR/$label.block"
+  _assert_eq "stop ($ext_agent): a blocking extension continues the turn" \
+    "2" "$(_ext_stop "$ext_agent" "$label" '{"stop_hook_active":false}')"
+  _assert_file_missing "stop ($ext_agent): a Stop an extension blocks stays silent" \
+    "$notify_log"
+
+  # The host flags the follow-up Stop as a continuation; it is the real end.
+  rm -f "$MOCK_EXT_STOP_DIR/$label.block"
+  _assert_eq "stop ($ext_agent): the continued Stop ends the turn" \
+    "0" "$(_ext_stop "$ext_agent" "$label" '{"stop_hook_active":true}')"
+  _assert_file_content "stop ($ext_agent): the continued Stop that ends the turn rings once" \
+    "--owner $(cat "$MOCK_EXT_STOP_DIR/$label.owner")" "$notify_log"
+  _ext_stop "$ext_agent" "$label" '{"stopHookActive":true}' >/dev/null
+  _ext_stop "$ext_agent" "$label" '' >/dev/null
+  _assert_eq "stop ($ext_agent): later Stops after the real end stay silent" \
+    "1" "$(wc -l <"$notify_log" | tr -d ' ')"
+
+  # A new prompt re-arms the bell, and the mark does not outlive its cycle.
+  _ext_prompt "$ext_agent" "$label"
+  _ext_stop "$ext_agent" "$label" '{"stop_hook_active":true}' >/dev/null
+  _assert_eq "stop ($ext_agent): a continuation the next cycle did not cause stays silent" \
+    "1" "$(wc -l <"$notify_log" | tr -d ' ')"
+  _ext_stop "$ext_agent" "$label" '' >/dev/null
+  _assert_eq "stop ($ext_agent): an unblocked Stop in the next cycle rings once" \
+    "2" "$(wc -l <"$notify_log" | tr -d ' ')"
+done
+
+# A block repeated across continuations stays silent until the last Stop.
+label="continue-repeat"
+notify_log="$MOCK_EXT_STOP_DIR/$label.notify"
+_ext_prompt claude "$label"
+: >"$MOCK_EXT_STOP_DIR/$label.block"
+_ext_stop claude "$label" '' >/dev/null
+_ext_stop claude "$label" '{"stop_hook_active":true}' >/dev/null
+_assert_file_missing "stop: repeated blocks across continuations stay silent" "$notify_log"
+rm -f "$MOCK_EXT_STOP_DIR/$label.block"
+_ext_stop claude "$label" '{"stop_hook_active":true}' >/dev/null
+_assert_eq "stop: the Stop after repeated blocks rings once" \
+  "1" "$(wc -l <"$notify_log" | tr -d ' ')"
+
+# Fail-open hosts end the turn although the extension blocked, so that Stop is
+# the real end: Codex by runtime, OpenCode by its adapter's declaration, under
+# any runtime name.
+for fail_open in 'codex:' 'opencode:AGENTGUARD_STOP_BLOCK_ENDS_TURN=1' \
+  'blockfixture:AGENTGUARD_STOP_BLOCK_ENDS_TURN=1'; do
+  ext_agent="${fail_open%%:*}"
+  label="fail-open-$ext_agent"
+  notify_log="$MOCK_EXT_STOP_DIR/$label.notify"
+  read -r -a fail_open_env <<<"${fail_open#*:}"
+  _ext_prompt "$ext_agent" "$label"
+  : >"$MOCK_EXT_STOP_DIR/$label.block"
+  _ext_stop "$ext_agent" "$label" '' ${fail_open_env[@]+"${fail_open_env[@]}"} >/dev/null
+  _assert_file_content "stop ($fail_open): a fail-open blocked Stop rings once" \
+    "--owner $(cat "$MOCK_EXT_STOP_DIR/$label.owner")" "$notify_log"
+  _ext_stop "$ext_agent" "$label" '{"stop_hook_active":true}' \
+    ${fail_open_env[@]+"${fail_open_env[@]}"} >/dev/null
+  _ext_stop "$ext_agent" "$label" '' ${fail_open_env[@]+"${fail_open_env[@]}"} >/dev/null
+  _assert_eq "stop ($fail_open): Stops after a fail-open block stay silent" \
+    "1" "$(wc -l <"$notify_log" | tr -d ' ')"
+done
+
+# Without the declaration, OpenCode's name alone is not a fail-open host.
+label="opencode-undeclared"
+_ext_prompt opencode "$label"
+: >"$MOCK_EXT_STOP_DIR/$label.block"
+_ext_stop opencode "$label" '' >/dev/null
+_assert_file_missing "stop: an undeclared host's blocked Stop stays silent" \
+  "$MOCK_EXT_STOP_DIR/$label.notify"
+_assert_eq "stop: only an enabled flag declares a fail-open host" \
+  "2" "$(_ext_stop opencode "$label" '' AGENTGUARD_STOP_BLOCK_ENDS_TURN=0)"
+
+# An extension that dies before the launcher decides does not block: the turn
+# ends, so the Stop still rings once and clears the busy mark.
+# shellcheck disable=SC2016 # expanded by the hook that sources the extension
+printf '%s\n' 'exit 1' >"$MOCK_EXT_STOP_DIR/bin/agent-hook-stop-crashexit"
+# shellcheck disable=SC2016
+printf '%s\n' ': "$stop_extension_unbound_variable"' \
+  >"$MOCK_EXT_STOP_DIR/bin/agent-hook-stop-crashunbound"
+for crash_agent in crashexit:1 crashunbound:1; do
+  ext_agent="${crash_agent%%:*}"
+  label="crash-$ext_agent"
+  notify_log="$MOCK_EXT_STOP_DIR/$label.notify"
+  _ext_prompt "$ext_agent" "$label"
+  _assert_eq "stop ($ext_agent): a crashing extension's Stop fails non-blocking" \
+    "${crash_agent#*:}" "$(_ext_stop "$ext_agent" "$label" '')"
+  _assert_file_content "stop ($ext_agent): a crashing extension's Stop still rings once" \
+    "--owner $(cat "$MOCK_EXT_STOP_DIR/$label.owner")" "$notify_log"
+  _ext_stop "$ext_agent" "$label" '{"stop_hook_active":true}' >/dev/null
+  _assert_eq "stop ($ext_agent): Stops after a crash stay silent" \
+    "1" "$(wc -l <"$notify_log" | tr -d ' ')"
+done
+
+# Only a block the hook itself emitted continues the turn. An extension that
+# finishes the hook with a block continues it; a raw exit 2 is no recorded
+# block, since after a signal the exit trap sees the last command's status.
+# shellcheck disable=SC2016
+printf '%s\n' '_hook_block "keep going"' '_hook_finish' \
+  >"$MOCK_EXT_STOP_DIR/bin/agent-hook-stop-selffinish"
+label="self-finish"
+notify_log="$MOCK_EXT_STOP_DIR/$label.notify"
+_ext_prompt selffinish "$label"
+_assert_eq "stop: an extension that finishes with a block continues the turn" \
+  "2" "$(_ext_stop selffinish "$label" '')"
+_assert_file_missing "stop: an extension that finishes with a block stays silent" "$notify_log"
+rm -f "$MOCK_EXT_STOP_DIR/bin/agent-hook-stop-selffinish"
+_ext_stop selffinish "$label" '{"stop_hook_active":true}' >/dev/null
+_assert_eq "stop: the Stop after an extension-finished block rings once" \
+  "1" "$(wc -l <"$notify_log" | tr -d ' ')"
+
+# A block the hook never emitted does not count: the crash ends the turn.
+printf '%s\n' '_hook_block "keep going"' 'exit 1' \
+  >"$MOCK_EXT_STOP_DIR/bin/agent-hook-stop-blockcrash"
+label="block-crash"
+notify_log="$MOCK_EXT_STOP_DIR/$label.notify"
+_ext_prompt blockcrash "$label"
+_ext_stop blockcrash "$label" '' >/dev/null
+_assert_eq "stop: an extension that blocks and then crashes still rings once" \
+  "1" "$(wc -l <"$notify_log" 2>/dev/null | tr -d ' ')"
+_ext_stop blockcrash "$label" '{"stop_hook_active":true}' >/dev/null
+_assert_eq "stop: the Stop after a block-then-crash stays silent" \
+  "1" "$(wc -l <"$notify_log" | tr -d ' ')"
+
+printf '%s\n' 'exit 2' >"$MOCK_EXT_STOP_DIR/bin/agent-hook-stop-rawblock"
+label="raw-block"
+notify_log="$MOCK_EXT_STOP_DIR/$label.notify"
+_ext_prompt rawblock "$label"
+_ext_stop rawblock "$label" '' >/dev/null
+_assert_eq "stop: an extension's raw exit 2 is no recorded block and rings" \
+  "1" "$(wc -l <"$notify_log" 2>/dev/null | tr -d ' ')"
+
+# A host timeout signals a hook whose extension runs a slow foreground command:
+# Bash runs the exit trap at once, so the Stop rings without waiting for it.
+# The command publishes its own PID before it becomes the sleep (exec keeps the
+# PID), so the test knows the hook is waiting on it without pgrep, which
+# minimal CI containers lack.
+# shellcheck disable=SC2016
+printf '%s\n' \
+  'bash -c '\''printf "%s\n" "$$" >"$1.tmp" && mv "$1.tmp" "$1" && exec sleep 30'\'' _ "$STOP_HANG_CHILD"' \
+  >"$MOCK_EXT_STOP_DIR/bin/agent-hook-stop-hung"
+for hang_signal in TERM HUP; do
+  label="hung-$hang_signal"
+  notify_log="$MOCK_EXT_STOP_DIR/$label.notify"
+  hang_child_file="$MOCK_EXT_STOP_DIR/$label.child"
+  _ext_prompt hung "$label"
+  AGENTGUARD_SESSION_ID="$TEST_SID-ext-$label" \
+    TMPDIR="$TEST_TMPDIR" \
+    AGENTGUARD_NAME=hung \
+    TERM_NOTIFY_MARKER="$notify_log" \
+    STOP_HANG_CHILD="$hang_child_file" \
+    PATH="$MOCK_EXT_STOP_DIR/bin:$PATH" \
+    "$MOCK_EXT_STOP_DIR/bin/agent-hook-stop" </dev/null >/dev/null 2>&1 &
+  hang_pid=$!
+  hang_deadline=$((SECONDS + 30))
+  while [ ! -s "$hang_child_file" ] && [ "$SECONDS" -lt "$hang_deadline" ]; do
+    sleep 0.05
+  done
+  _assert_file_exists "stop ($hang_signal): the extension's foreground command started" \
+    "$hang_child_file"
+  hang_child=$(cat "$hang_child_file" 2>/dev/null) || hang_child=''
+  hang_start=$SECONDS
+  kill "-$hang_signal" "$hang_pid" 2>/dev/null
+  wait "$hang_pid" 2>/dev/null
+  hang_elapsed=$((SECONDS - hang_start))
+  [ -z "$hang_child" ] || kill "$hang_child" 2>/dev/null
+  _assert_eq "stop ($hang_signal): the signalled Stop ends without waiting for the command" \
+    "1" "$([ "$hang_elapsed" -lt 10 ] && printf 1)"
+  _assert_eq "stop ($hang_signal): a signalled hung extension's Stop rings once" \
+    "1" "$(wc -l <"$notify_log" 2>/dev/null | tr -d ' ')"
+done
+
+# A subagent Stop never rings, and a block there marks no foreground
+# continuation, so the parent's re-entrant Stop keeps the recursion guard.
+subagent_case=0
+for subagent_payload in \
+  '{"hook_event_name":"SubagentStop"}' \
+  '{"hookEventName":"SubagentStop"}' \
+  '{"subagentType":"explore"}'; do
+  subagent_case=$((subagent_case + 1))
+  label="subagent-$subagent_case"
+  notify_log="$MOCK_EXT_STOP_DIR/$label.notify"
+  _ext_prompt grok "$label"
+  : >"$MOCK_EXT_STOP_DIR/$label.block"
+  _ext_stop grok "$label" "$subagent_payload" >/dev/null
+  rm -f "$MOCK_EXT_STOP_DIR/$label.block"
+  _ext_stop grok "$label" "$subagent_payload" >/dev/null
+  _assert_file_missing "stop: subagent Stop $subagent_payload stays silent" "$notify_log"
+  _ext_stop grok "$label" '{"stopHookActive":true}' >/dev/null
+  _assert_file_missing "stop: a subagent block after $subagent_payload does not re-arm a re-entrant Stop" \
+    "$notify_log"
+  _ext_stop grok "$label" '' >/dev/null
+  _assert_eq "stop: the parent's own end after $subagent_payload rings once" \
+    "1" "$(wc -l <"$notify_log" | tr -d ' ')"
+done
+
+echo ""
 echo "=== notification: terminal notifier ==="
 
 MOCK_NOTIFICATION_DIR=$(_tmpdir)
@@ -472,6 +719,15 @@ _busy_hook agent-hook-stop codex "$busy_log" >/dev/null
 _assert_file_content "busy: a fail-open Codex Stop still clears the mark" \
   "$(_busy_mark "$busy_log" clear)" "$busy_log"
 rm -f "$MOCK_BUSY_DIR/bin/agent-hook-stop-codex"
+busy_log="$MOCK_BUSY_DIR/stop-blocked-declared.log"
+AGENTGUARD_STOP_BLOCK_ENDS_TURN=1 _busy_hook agent-hook-stop blockfixture "$busy_log" >/dev/null
+_assert_file_content "busy: a declared fail-open host's blocked Stop still clears the mark" \
+  "$(_busy_mark "$busy_log" clear)" "$busy_log"
+printf '%s\n' 'exit 1' >"$MOCK_BUSY_DIR/bin/agent-hook-stop-crashfixture"
+busy_log="$MOCK_BUSY_DIR/stop-crashed.log"
+_busy_hook agent-hook-stop crashfixture "$busy_log" >/dev/null
+_assert_file_content "busy: a Stop whose extension crashes still clears the mark" \
+  "$(_busy_mark "$busy_log" clear)" "$busy_log"
 
 # Notifications never touch the busy mark: in recorded Claude sessions,
 # idle_prompt followed only Stops, which already cleared it, and never an

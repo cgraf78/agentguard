@@ -42,6 +42,9 @@ _HOOK_INPUT_ATTEMPTED=''
 _HOOK_PROMPT_SUBMITTED=''
 # Cached _hook_stop_is_foreground answer (1 or 0); a Stop hook asks twice.
 _HOOK_STOP_FOREGROUND=''
+# Set while a Stop hook has not yet settled whether its turn ends; see
+# _hook_stop_arm.
+_HOOK_STOP_PENDING=''
 # Telemetry accumulators: block/warn/remind messages joined by ASCII record
 # separators so multi-line messages survive intact into the audit record.
 _HOOK_TELEMETRY_BLOCKS=''
@@ -199,6 +202,12 @@ _hook_exit() {
       _HOOK_TELEMETRY_BLOCKS+="${_HOOK_TELEMETRY_BLOCKS:+$'\x1e'}AgentGuard internal error ($internal)"
       [ -n "$_HOOK_EMITTED" ] || printf '{}\n'
     fi
+  fi
+  if [ -n "$_HOOK_STOP_PENDING" ]; then
+    # A Stop that died before settling (a crashed, exiting, or signalled
+    # extension) still ends the turn unless _hook_finish emitted a block.
+    # Subshell for the same reason as telemetry: never replace the status.
+    (_hook_stop_settle_exit) >/dev/null 2>&1
   fi
   if declare -F _hook_telemetry_exit >/dev/null; then
     (_hook_telemetry_exit "$status") 2>/dev/null
@@ -761,18 +770,90 @@ _hook_stop_is_foreground() {
 # Return success once per foreground prompt cycle so a completed response can
 # notify without repeated Stop callbacks ringing for background continuations.
 # AgentGuard state is canonical across runtimes; stop_hook_active is only an
-# additional recursion guard when a host exposes that compatible field.
+# additional recursion guard when a host exposes that compatible field. It
+# cannot guard a continuation AgentGuard's own Stop caused: that Stop stayed
+# silent, so the flagged Stop that follows may be the turn's real end. Call
+# this only for a Stop that does not continue (see _hook_stop_continues).
 _hook_stop_should_notify() {
   _hook_stop_is_foreground || return 1
-  _hook_stop_active && return 1
+  if _hook_stop_active && ! _hook_stop_was_continued; then
+    return 1
+  fi
   _hook_stop_claim_notification
+}
+
+# Record that this foreground Stop's response kept the turn going, so a later
+# Stop in the same prompt cycle can still ring although the host flags it as a
+# continuation. A failed write only costs that bell; it never adds one.
+_hook_stop_mark_continued() {
+  local dir="$_HOOK_STATE_DIR/prompt-cycle"
+  _hook_mkstate "$dir" || return 0
+  : >"$dir/stop-continued" 2>/dev/null || true
+}
+
+_hook_stop_was_continued() {
+  [ -e "$_HOOK_STATE_DIR/prompt-cycle/stop-continued" ]
+}
+
+# Arm the Stop hook so it settles the turn on every exit, not just through the
+# launcher's own decision: an extension can crash, call exit, or be signalled
+# by a host timeout, and the old pre-extension bell covered those paths.
+# Deliberately no HUP/TERM traps: once an EXIT trap exists, non-interactive
+# Bash (3.2 included) runs it on those signals at once, even mid-command,
+# while a trap of our own would wait for the running command to return.
+# SIGKILL cannot be caught at all.
+_hook_stop_arm() {
+  _HOOK_STOP_PENDING=1
+}
+
+# Ring and clear the busy mark when this foreground Stop ends the turn, or mark
+# it continued so its flagged follow-up can still ring. $1 is 1 when the Stop's
+# response keeps the agent working. Pending clears last, so a signal midway
+# lets _hook_exit finish the job; the bell claim and the idempotent clear make
+# a repeat harmless.
+_hook_stop_settle() {
+  if _hook_stop_is_foreground; then
+    if [ "$1" = 1 ]; then
+      _hook_stop_mark_continued
+    else
+      if _hook_stop_should_notify; then
+        # --owner: an agent this one launched cannot mark this agent's pane pending.
+        term-notify-sound --owner "$PPID" >/dev/null 2>&1 || true
+      fi
+      _hook_pane_busy clear
+    fi
+  fi
+  _HOOK_STOP_PENDING=''
+}
+
+# Settle a Stop that exits before the launcher decided. Only a block that
+# _hook_finish emitted continues the turn; the exit status cannot tell: after
+# a signal, the EXIT trap sees the last command's status while the host sees
+# the signal. Anything else (a crash, a raw exit, a signal) ends the turn; an
+# extension that exits 2 itself instead of calling _hook_block therefore gets
+# the bell and busy clear although the host continues.
+_hook_stop_settle_exit() {
+  # An empty first read already waited on stdin; a payload-less Stop is
+  # foreground, so do not wait again (as telemetry avoids).
+  if [ -z "${_HOOK_INPUT+x}" ] && [ -n "$_HOOK_INPUT_ATTEMPTED" ]; then
+    _HOOK_STOP_FOREGROUND=1
+  fi
+  if [ -n "$_HOOK_EMITTED" ] && _hook_stop_continues; then
+    _hook_stop_settle 1
+  else
+    _hook_stop_settle 0
+  fi
 }
 
 # Return whether this Stop hook's response keeps the agent working. A block
 # exits 2, which continues the turn, except on Codex, where _hook_finish keeps
-# Stop fail-open.
+# Stop fail-open, and on hosts whose adapter sets AGENTGUARD_STOP_BLOCK_ENDS_TURN
+# because they log a Stop's exit 2 and end the turn anyway (OpenCode, under
+# whatever runtime name it is configured with). A host that ignores exit 2
+# without declaring it loses the bell when an extension blocks.
 _hook_stop_continues() {
   [ -n "$_HOOK_BLOCKED" ] || return 1
+  _hook_flag_enabled "${AGENTGUARD_STOP_BLOCK_ENDS_TURN:-}" && return 1
   [ "$(_hook_agent_name)" != codex ]
 }
 

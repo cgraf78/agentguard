@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-STOP 1 "2026-10-12" "agentguard" "User Commands"
+.TH AGENT-HOOK-STOP 1 "2026-10-14" "agentguard" "User Commands"
 .SH NAME
 agent-hook-stop \- run end-of-turn agent checks and notifications
 .SH SYNOPSIS
@@ -6,12 +6,17 @@ agent-hook-stop \- run end-of-turn agent checks and notifications
 .SH DESCRIPTION
 .B agent-hook-stop
 reads a stop hook JSON payload from standard input, asks Hive Memory for any
-pending-memory reminder, and plays a terminal notification (naming the agent
-process with
+pending-memory reminder, runs its extensions, and plays a terminal notification
+(naming the agent process with
 .BR "term-notify-sound \-\-owner" )
-for the first
-non-reentrant Stop callback after a valid prompt. Repeated callbacks stay silent
-until another valid prompt re-arms the shared AgentGuard state. On Codex, the
+for the first Stop after a valid prompt that ends the foreground turn. A Stop
+an extension blocks to keep the agent working stays silent, so the Stop that
+later ends the turn rings although the runtime flags it as a continuation.
+Other re-entrant and repeated callbacks stay silent until another valid prompt
+re-arms the shared AgentGuard state. A Stop that dies before deciding, because
+an extension crashes or exits, or a host timeout sends HUP or TERM, still ends
+the turn and rings unless the hook had already emitted a block. A SIGKILL
+timeout (OpenCode sends one) cannot ring. On Codex, the
 Hive Memory check and notification still run, but the response is replaced
 with empty JSON and the hook exits 0: Stop continuations are suppressed because
 affected Codex releases persist their synthetic messages with replay-invalid
@@ -24,11 +29,21 @@ pane mark with
 .BR "term-pane-mark clear busy" .
 A subagent Stop, or one an extension blocks to keep the agent working, leaves
 the mark set; because Codex Stop is always fail-open, an extension block does
-not keep it on Codex. Only the pane terminal's foreground agent changes the
+not keep it on Codex, nor on a runtime that declares
+.BR AGENTGUARD_STOP_BLOCK_ENDS_TURN .
+Such a Stop also rings. Only the pane terminal's foreground agent changes the
 mark, so the Stop of an agent it launched, which runs without that terminal,
 leaves it alone. A Claude Code interrupt fires no Stop or other turn-ending
 hook, so after one the mark stays set until the next prompt's turn ends or the
 session ends.
+.SH ENVIRONMENT
+.TP
+.B AGENTGUARD_STOP_BLOCK_ENDS_TURN
+Set to
+.B 1
+by a runtime adapter whose runtime logs this hook's exit status 2 and ends the
+turn anyway (the OpenCode adapter does). A blocked Stop then counts as the end
+of the turn.
 .SH EXIT STATUS
 .TP
 .B 0

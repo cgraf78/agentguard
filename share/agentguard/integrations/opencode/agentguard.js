@@ -520,6 +520,12 @@ function spawnHook(command, hook, payload, directory, sessionID, runtimeName) {
       env: hookEnvironment({
         AGENTGUARD_NAME: runtimeName,
         AGENTGUARD_SESSION_ID: sessionID,
+        // advisory() logs a Stop hook's exit 2 and the turn still ends, so
+        // AgentGuard must not wait for a continuation to ring or clear marks.
+        // The runtime name is configurable, so it cannot carry this fact.
+        // Only the Stop hook gets it: an agent a hook child launches would
+        // inherit it and misread its own Stops.
+        ...(hook === "agent-hook-stop" ? { AGENTGUARD_STOP_BLOCK_ENDS_TURN: "1" } : {}),
       }),
       stdio: ["pipe", "pipe", "pipe"],
     });
