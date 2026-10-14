@@ -712,8 +712,10 @@ _split_command_fragments() {
     esac
   done
 
+  # Succeed when the text ends with a separator (`cmd;`, `cmd &`): callers
+  # such as _hook_cd_to_target treat a failed split as unparsable.
   _trim_hook_fragment "$buf" fragment
-  [ -n "$fragment" ] && printf '%s\n' "$fragment"
+  [ -z "$fragment" ] || printf '%s\n' "$fragment"
 }
 
 _hook_command_fragments() {
