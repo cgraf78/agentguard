@@ -38,11 +38,13 @@ expected = {
         ],
         "SessionEnd": [(None, "agent-hook-session-end", 30)],
         "SessionStart": [(None, "agent-hook-session-start", 10)],
+        "PreCompact": [(None, "agent-hook-compact", 10)],
         "Stop": [("", "agent-hook-stop", None)],
         "UserPromptSubmit": [("", "agent-hook-prompt-submit", 10)],
     },
     "codex": {
         "SessionStart": [(None, "agent-hook-session-start", 10)],
+        "PreCompact": [(None, "agent-hook-compact", 10)],
         "PreToolUse": [
             ("Bash|exec_command|functions[.]exec_command", "agent-hook-pre-bash", 600),
             ("Edit|Write|apply_patch|functions[.]apply_patch", "agent-hook-pre-edit", 10),
@@ -135,14 +137,12 @@ telemetry_only_events = {
         "PermissionDenied",
         "SubagentStart",
         "SubagentStop",
-        "PreCompact",
         "PostCompact",
         "StopFailure",
     ],
     "codex": [
         "SubagentStart",
         "SubagentStop",
-        "PreCompact",
         "PostCompact",
         "Interrupt",
     ],

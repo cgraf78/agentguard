@@ -199,7 +199,8 @@ Each hook emits one JSON response through `_hook_finish`.
 - parsers: `_hook_parse_command`, `_hook_parse_edit_files`, `_hook_parse_mcp`
 - tool payload adapters: `_hook_tool_stdout`
 - Hive Memory adapters: `_hook_hm_session_start`, `_hook_hm_prompt_submit`,
-  `_hook_hm_tool_complete`, `_hook_hm_stop`
+  `_hook_hm_tool_complete`, `_hook_hm_stop`, `_hook_hm_context_reset`
+  (delivery-tracking policy per runtime lives in `_hook_hm_delivery_policy`)
 - once markers: `_hook_prompt_cycle_reset`, `_hook_once_per_prompt`,
   `_hook_once_per_session`
 - state helpers: `_hook_edit_churn_file`, `_hook_counter_read`,

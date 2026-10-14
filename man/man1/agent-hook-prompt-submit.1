@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-PROMPT-SUBMIT 1 "2026-10-12" "agentguard" "User Commands"
+.TH AGENT-HOOK-PROMPT-SUBMIT 1 "2026-10-13" "agentguard" "User Commands"
 .SH NAME
 agent-hook-prompt-submit \- handle prompt-time agent context refresh
 .SH SYNOPSIS
@@ -22,17 +22,48 @@ titles), and also a
 run directly in a pane;
 .BR agent-hook-stop (1)
 clears the mark when the turn ends.
+.PP
+On Claude Code, Codex, and Muse the hook asks Hive Memory to track delivery:
+it passes the host's context lifetime and size limit, minus room for context
+that earlier pushed a response over the limit after Hive Memory's block.
+Hive Memory counts what it emits within that limit as delivered. When the
+host would not show it after all, a context reset is left pending so the next
+prompt re-sends. Memory context that would push the response over the limit
+is removed, and the overflowing context after it is reserved from then on. A
+failed Hive Memory call, a response the hook cannot write, or a prompt it
+blocks also leave the reset pending, except a blocked Muse prompt, whose
+memory context never counts as delivered. The pending reset is cleared once
+a tracked response re-sends memory under it. With less than 2 KB left, or
+after three overflows since the last compaction, clear, or resume, the prompt
+runs untracked, as without tracking.
 .SH ENVIRONMENT
 .TP
 .B AGENTGUARD_HIVE_MEMORY_HOOKS
 Set to
 .B 0
 to disable Hive Memory hook integration.
+.TP
+.B AGENTGUARD_HIVE_MEMORY_DELIVERY
+Set to
+.BR 0 ,
+.BR false ,
+.BR no ,
+or
+.B off
+to keep every runtime on untracked Hive Memory hooks.
+.TP
+.B AGENTGUARD_HIVE_MEMORY_CONTEXT_RESERVE
+Minimum bytes of the host limit to keep free for context added after Hive
+Memory (default 0). The hook otherwise reserves the context that last pushed
+a response over the limit (capped at half the limit unless two overflows were
+consecutive) until the next compaction, clear, or resume, or a Muse
+project-change block.
 .SH EXIT STATUS
 .TP
 .B 0
 Prompt handling completed.
 .SH SEE ALSO
 .BR hm (1),
+.BR agent-hook-compact (1),
 .BR agent-hook-session-start (1),
 .BR term-pane-mark (1)

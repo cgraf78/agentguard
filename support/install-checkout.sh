@@ -13,6 +13,7 @@ MAN_DIR="${MAN_DIR:-$PREFIX/share/man/man1}"
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 
 commands=(
+  agent-hook-compact
   agent-hook-notification
   agent-hook-post-bash
   agent-hook-post-edit

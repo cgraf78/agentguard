@@ -20,6 +20,7 @@ _assert_contains "installer: wrapper identifies the shared generator" \
   "$(sed -n '2p' "$installer_wrapper")"
 
 commands=(
+  agent-hook-compact
   agent-hook-notification
   agent-hook-post-bash
   agent-hook-post-edit

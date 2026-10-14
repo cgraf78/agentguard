@@ -1,3 +1,4 @@
+hook bin/agent-hook-compact
 hook bin/agent-hook-notification
 hook bin/agent-hook-post-bash
 hook bin/agent-hook-post-edit

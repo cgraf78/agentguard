@@ -124,6 +124,15 @@
       {
         "hooks": [
           {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=claude AGENTGUARD_SESSION_ID=\"${CLAUDE_CODE_CURRENT_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}\" agent-hook-compact",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
             "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=claude AGENTGUARD_SESSION_ID=\"${CLAUDE_CODE_CURRENT_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}\" agent-hook-telemetry",
             "timeout": 10,
             "type": "command"

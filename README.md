@@ -457,6 +457,8 @@ To add a new managed agent runtime:
   startup context when `hm` is installed and configured.
 - `agent-hook-session-end` parses session metadata for agent-specific naming or
   sync extensions.
+- `agent-hook-compact` handles PreCompact: it tells Hive Memory the host is
+  about to drop earlier context (see delivery tracking below).
 - `agent-hook-prompt-submit` lets `hm hook prompt-submit` handle memory-intent
   reminders and context refresh decisions, then resets prompt-cycle state used
   by once-per-prompt guidance. The hook passes prompt text and path facts; it
@@ -484,6 +486,47 @@ When an agent session is launched from `$HOME`, AgentGuard treats that as "no
 active project" rather than passing home as a project hint. Explicit file paths
 under `$HOME` still pass through, so one long-lived session can work across many
 projects without collapsing context onto the home directory itself.
+
+For Claude Code, Codex, and Muse, AgentGuard also turns on Hive Memory
+delivery tracking (`hm hook ... --delivery`). `hm` then skips memories the
+model can still see, for example when a session moves back to a project it
+already received context for. This is safe only because every way these hosts
+lose context is reported:
+
+- `agent-hook-compact` (PreCompact, Claude Code and Codex) and SessionStart
+  with `source` `compact`, `clear`, or `resume` start a new context epoch, and
+  SessionStart re-injects. Muse compaction keeps session-start context and
+  Muse prompt context never outlives its turn, so Muse needs no reset there.
+- A reset that fails leaves a marker so the next prompt resets first.
+- AgentGuard passes each host's context lifetime (Muse drops prompt context
+  every turn) and size limit (Claude shows at most 10,000 characters of hook
+  context; Muse drops hook output over 16 KB).
+- The size budget is exact: the host limit minus context already present,
+  counted in the host's units (JSON-escaped response bytes on Muse), minus
+  the tail recorded for that event. A tail is recorded only when context
+  added after the memory block actually pushed a response over the limit; the
+  last such overflow replaces it, capped at half the limit unless two
+  overflows were consecutive. Compaction, clear, or resume forgets it, and
+  so does a Muse project-change block.
+- When less than 2 KB would be left, or after three overflows (counted until
+  the next compaction, clear, or resume), the hook runs untracked, which
+  behaves exactly as without tracking; a rewritten context whose tail cannot
+  be measured counts as three overflows.
+- `hm` counts a memory as delivered once it emits it within that limit.
+  When the host will not show it after all, AgentGuard leaves a reset pending
+  so the next prompt re-sends: `_hook_finish` drops memory context that would
+  exceed the limit and records the overflowing tail. A failed tracked `hm`
+  call, a response the hook could not write, or a prompt it blocks get the
+  same treatment. A blocked Muse prompt is the exception: Muse prompt context
+  never counts as delivered, so it has nothing to re-send. A pending reset is
+  cleared only once a tracked response re-sent memory under it.
+- Accepted gap: when another plugin's hook blocks the prompt, or the host
+  times out the hook after `hm` returned, those memories wait for the next
+  reset (compaction, clear, resume). Untracked prompt recall has the same gap.
+
+Subagents, nested sessions whose session variables point at a parent, other
+runtimes, and `AGENTGUARD_HIVE_MEMORY_DELIVERY=0` stay untracked. So does an
+`hm` that predates the flags; AgentGuard falls back automatically.
 
 Claude-specific extensions auto-name untitled sessions and run the daily
 `claude-templates update` refresh in the background.
