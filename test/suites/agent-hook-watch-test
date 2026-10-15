@@ -713,7 +713,7 @@ _stop
 _assert_eq "exit re-arm: the unwatched Stop blocks" 2 "$HOOK_EXIT"
 _assert_contains "exit re-arm: block names the label" "KEY_A" "$HOOK_STDERR"
 _assert_contains "exit re-arm: block says to report a stall instead of restarting" "report that to the user" "$HOOK_STDERR"
-_assert_contains "exit re-arm: block names a green or merged result" "no green or merged result" "$HOOK_STDERR"
+_assert_contains "exit re-arm: block names a green, merged, or closed result" "no green, merged, or closed result" "$HOOK_STDERR"
 _assert_contains "exit re-arm: block carries the background advice itself" "(Claude Code: run_in_background: true)" "$HOOK_STDERR"
 for _round in 1 2; do
   _blocked
@@ -741,6 +741,13 @@ _blocked
 printf '143 stall blocked -\n' >"$PRODUCER/exited/o_r_12"
 _stop
 _assert_eq "killed while stalled: re-arms one block" 2 "$HOOK_EXIT"
+_blocked
+printf '1 action failed 1003\n' >"$TEST_TMPDIR/real-red-exit"
+ln -sf "$TEST_TMPDIR/real-red-exit" "$PRODUCER/exited/o_r_12"
+_new_prompt
+_stop
+_assert_eq "symlinked exited record: does not re-arm the block" 0 "$HOOK_EXIT"
+rm -f "$PRODUCER/exited/o_r_12"
 _blocked
 printf '0 done green 1004\n' >"$PRODUCER/exited/o_r_12"
 _new_prompt
@@ -913,6 +920,13 @@ _assert_eq "60 KB launch line with an &: not judged (fails open)" "0 none" "$(_l
 _assert_eq "60 KB launch line: finishes in under 20 seconds" 1 "$((SECONDS - _started < 20))"
 _assert_eq "60 KB launch line behind nohup: still detached" "0 detached" \
   "$(_launch claude "nohup git pr-watch --wait $_long" true)"
+# The 16 KiB budget is across the whole command: once two dense lines used
+# it, a later line is not scanned (fails open), however it ends.
+_pad=$(printf 'a%.0s' $(seq 1 7000))
+_assert_eq "detach scan budget: a line past 16 KiB is not judged" "0 none" "$(_launch claude "git pr-watch --wait 1 $_pad 'x&y'
+git pr-watch --wait 2 $_pad 'x&y'
+git pr-watch --wait 3 $_pad &" true)"
+_assert_eq "detach scan budget: within it, the same line is judged" "0 detached" "$(_launch claude "git pr-watch --wait 3 $_pad &" true)"
 _mid=$(printf "'a'%.0s" $(seq 1 2000))
 _assert_eq "6 KB quote-dense launch line with an &: judged" "0 detached" "$(_launch claude "git pr-watch --wait 1 $_mid &" true)"
 # Just over the 8 KiB scan limit: larger quote-dense lines are slow in the
@@ -1022,6 +1036,8 @@ for _shell in "${_shells[@]}"; do
     "$(_engine "$_shell" "_hook_gh_push_scopes 'Pushing...' 'tool push'")"
   _assert_eq "$_shell watch-github: inert command" "" \
     "$(_engine "$_shell" "_hook_gh_push_scopes '' 'git push --dry-run'")"
+  _assert_eq "$_shell watch-github: repeated To blocks give one scope" "o_r" \
+    "$(_engine "$_shell" "_hook_watch_record git-tools/pr-watch o_r_1 o_r git-pr-watch l h >/dev/null; _hook_gh_push_scopes \"\$(printf 'To github.com:o/r.git\n   1111111..2222222  a -> a\nTo github.com:o/r.git\n   1111111..2222222  b -> b\nTo https://github.com/O/R\n * [new branch] c -> c\n')\" 'git push'")"
   _assert_eq "$_shell watch-github: --no-push command" "" \
     "$(_engine "$_shell" "_hook_gh_push_scopes '' 'git pr-sync-stack --no-push'")"
   _assert_eq "$_shell watch-github: owner over 39 characters refused" 1 \

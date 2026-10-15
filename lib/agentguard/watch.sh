@@ -632,7 +632,7 @@ _hook_watch_stop() {
         fi
         if [ -n "$block_labels" ]; then
           _hook_watch_hint hint "$block_labels"
-          blocks="$blocks${blocks:+ }No running \`$_HOOK_WATCH_TOOL_ARGV\` and no green or merged result since the latest push or submit for$block_labels, so nothing will report its outcome. $hint (Claude Code: run_in_background: true). If the last watcher reported a stall, report that to the user instead of restarting it. If it reported failing checks, fix and push, then watch again. If monitoring should stop, tell the user explicitly why (for example, a still-running subagent that pushed it owns the watch)."
+          blocks="$blocks${blocks:+ }No running \`$_HOOK_WATCH_TOOL_ARGV\` and no green, merged, or closed result since the latest push or submit for$block_labels, so nothing will report its outcome. $hint (Claude Code: run_in_background: true). If the last watcher reported a stall, report that to the user instead of restarting it. If it reported failing checks, fix and push, then watch again. If monitoring should stop, tell the user explicitly why (for example, a still-running subagent that pushed it owns the watch)."
         fi
       fi
       remind_labels='' block_labels=''

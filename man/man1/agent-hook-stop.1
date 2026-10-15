@@ -29,13 +29,13 @@ obligations (pull requests that
 .BR agent-hook-post-bash (1)
 recorded or re-armed): one that no live
 .B git pr-watch
-watcher covers, and that no green or merged result from a check started
-after the last push or submit satisfies, gets one reminder on standard error
-per prompt. With
+watcher covers, and that no green, merged, or closed result from a check
+started after the last push or submit satisfies, gets one reminder on
+standard error per prompt. With
 .B AGENTGUARD_WATCH_BLOCK=1
 on Claude Code, the first such Stop after a push, submit, or watcher exit
-blocks instead, once; a watcher that stalled never re-arms it. A session that recorded nothing pays only a directory
-test. The rules are in
+blocks instead, once; a watcher that reported a stall never re-arms it. A
+session that recorded nothing pays only a directory test. The rules are in
 .I docs/watch-protocol.md
 in the AgentGuard checkout.
 .PP

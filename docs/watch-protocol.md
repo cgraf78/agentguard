@@ -104,10 +104,13 @@ A producer that wants AgentGuard to see it must:
   and write the watcher files before removing a pending file;
 - write `done/<key>` only once the item is really finished, with the epoch of
   the check that judged it;
-- write `exited/<key>` when a watching run ends, including when it is cut
-  short (before removing its watcher files), with its last state and the
-  epoch of the check behind the final result it delivered, or `-` when it
-  delivered none;
+- write `exited/<key>` as `<status> <state> <reason> <epoch>` when a
+  watching run ends, including when it is cut short (before removing its
+  watcher files): the engine reads two state words, `done` (a finished
+  result, which satisfies the key when its epoch, that of the check behind
+  the result, is newer than the key's) and `stall` (with status `8`, a
+  reported stall, which never re-arms an opted-in block); every other state
+  re-arms a block. The epoch is `-` when the run delivered no final result;
 - replace files atomically through names containing `~`, create directories
   private to the user, and never put `~`, `/`, or whitespace in keys or scopes;
 - keep its argv[0] or argv[1] basename stable.
@@ -140,9 +143,10 @@ turn ends; a subagent's own Stop enforces nothing.
   (`_hook_watch_rearm_key`) revives them (a reopened pull request).
 - **Satisfied**: a live watcher, a matching live pending file (an unscoped
   one matches every key; a scoped one matches keys recorded with exactly that
-  scope, so never a key recorded with scope `-`), a `done/` record whose
-  epoch is newer than the key's, or an `exited/` record with state `done`
-  (a green or merged result) whose epoch is newer than the key's. A red,
+  scope, so never a key recorded with scope `-`), a `done/` record (green,
+  merged, or closed) whose epoch is newer than the key's, or an `exited/`
+  record with state `done` (a green or merged result) whose epoch is newer
+  than the key's. A red,
   needs-action, stalled, pending, or cut-short exit does not satisfy. All
   epoch comparisons are strict: a check that started in the key's own second
   may not have seen the work.
@@ -158,7 +162,9 @@ turn ends; a subagent's own Stop enforces nothing.
   waits on something outside the pull request, which the agent should
   report rather than restart a watcher for), and any later Stop ends the
   turn. The block message itself carries the Claude Code background advice,
-  so it survives a custom hint. Every re-arm needs new work or a new watcher
+  so it survives a custom hint. Its wording is the pull-request one (push,
+  green, stall) for every tool; an overlay-defined kind gets that wording
+  with its own labels and hint. Every re-arm needs new work or a new watcher
   run, so blocks stay bounded. An unwritable state dir degrades a block to a
   reminder. Blocks are independent of extension blocks. A `<labels>` token
   in a tool's hint is replaced by the labels the message names.
