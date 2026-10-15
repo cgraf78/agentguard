@@ -843,7 +843,7 @@ _engine_cases() {
   _assert_eq "$tag: unsafe tool dir refused" 1 "$(_engine "$shell" "_hook_watch_record '/abs' k - '$argv' l h; echo \$?")"
   _assert_eq "$tag: dot-dot tool dir refused" 1 "$(_engine "$shell" "_hook_watch_record 'a/../b' k - '$argv' l h; echo \$?")"
   _assert_eq "$tag: tool dirs differing only in / and _ stay apart" "a+b_c a_b+c" \
-    "$(_engine "$shell" "_hook_watch_record a/b_c k - '$argv' l h; _hook_watch_record a_b/c k - '$argv' l h; ls \"\$_HOOK_STATE_DIR/watch\" | grep '^a' | tr '\n' ' ' | sed 's/ \$//'")"
+    "$(_engine "$shell" "_hook_watch_record a/b_c k - '$argv' l h; _hook_watch_record a_b/c k - '$argv' l h; ls \"\$_HOOK_STATE_DIR/watch\" | grep '^a' | LC_ALL=C sort | tr '\n' ' ' | sed 's/ \$//'")"
   _assert_eq "$tag: unsafe scope refused" 1 "$(_engine "$shell" "_hook_watch_record '$tool' k 'a/b' '$argv' l h; echo \$?")"
   rm -rf "$producer"
 }
