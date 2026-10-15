@@ -587,6 +587,11 @@ printf '%s green 1001\n' "$_commit" >"$PRODUCER/done/o_r_12"
 WATCH_ENV=(XDG_STATE_HOME="$TEST_TMPDIR/xdg-state")
 _assert_eq "newest done across two roots counts" "b" "$(_unmet_after)"
 rm -f "$PRODUCER/done/o_r_12"
+mkdir -p "$TEST_TMPDIR/xdg-state/git-tools/pr-watch/exited"
+printf '1 action failed 900\n' >"$TEST_TMPDIR/xdg-state/git-tools/pr-watch/exited/o_r_12"
+printf '1 action failed 1001\n' >"$PRODUCER/exited/o_r_12"
+_assert_eq "newest exited across two roots counts" "b" "$(_unmet_after)"
+rm -f "$PRODUCER/exited/o_r_12" "$TEST_TMPDIR/xdg-state/git-tools/pr-watch/exited/o_r_12"
 WATCH_ENV=(XDG_STATE_HOME=relative/state)
 _assert_eq "relative XDG_STATE_HOME is ignored" "ab" "$(_unmet_after)"
 WATCH_ENV=()
@@ -616,6 +621,10 @@ printf '%s green 1001\n' "$_commit" >"$PRODUCER/done/o_r_12"
 printf 'x green 1001\n' >"$TEST_TMPDIR/real-done"
 ln -sf "$TEST_TMPDIR/real-done" "$PRODUCER/done/x_9"
 _assert_eq "symlinked done record is not trusted" "b" "$(_unmet_after)"
+rm -f "$PRODUCER/done/o_r_12"
+printf '1 action failed 1001\n' >"$TEST_TMPDIR/real-exited"
+ln -sf "$TEST_TMPDIR/real-exited" "$PRODUCER/exited/o_r_12"
+_assert_eq "symlinked exited record is not trusted" "ab" "$(_unmet_after)"
 _producer_reset
 
 _new_sid
@@ -690,6 +699,16 @@ _stop
 _assert_eq "one prompt: an exit with - is unmet and blocks" 2 "$HOOK_EXIT"
 _stop
 _assert_eq "one prompt: but only once per submit" 0 "$HOOK_EXIT"
+# An exit that does not satisfy does not re-arm the block either: with the
+# key older than the last block and a fresh prompt, a new `-` exit record
+# (newer than the block marker) still only reminds.
+touch -t 200001010000 "$(_session_tool)/keys/o_r_12"
+touch -t 200101010000 "$(_session_tool)/blocked/o_r_12"
+printf '143 pending checks-running -\n' >"$PRODUCER/exited/o_r_12"
+_new_prompt
+_stop
+_assert_eq "an unsatisfying exit does not re-arm the block" 0 "$HOOK_EXIT"
+_assert_contains "an unsatisfying exit still reminds" "KEY_A" "$HOOK_STDERR"
 _new_sid
 _seed_key o_r_12 1000 o_r KEY_A
 printf '%s green 900\n' "$(printf 'd%.0s' {1..40})" >"$PRODUCER/done/o_r_12"
@@ -1017,25 +1036,49 @@ else
   echo "  SKIP: hook shell counts (root ignores PS4, or no BASHPID)"
 fi
 # pre-bash runs privileged, which ignores SHELLOPTS, so count its process
-# creations with strace where it is installed and allowed. The count includes
-# the launcher's fixed tools, which differ between distributions, so only a
-# developer run (no CI variable) asserts it.
-_hook_forks() {
+# creations with strace where it is installed and allowed. Only the hook
+# body's process tree counts: the secure launcher's bootstrap runs fixed
+# platform tools that differ between distributions. The body is the last
+# process that exec'd a bash (the launcher re-execs a validated candidate);
+# its creations are those made by it or its descendants.
+_body_forks_awk='
+{
+  pid = $1
+  if (($2 ~ /^execve\(/ || $0 ~ /execve resumed/) && $0 ~ /= 0$/) {
+    if ($2 ~ /^execve\(/) { p = $2; sub(/^execve\("/, "", p); sub(/".*/, "", p); exe[pid] = p }
+    n = split(exe[pid], parts, "/")
+    if (parts[n] == "bash") body = pid
+  }
+  if ($0 ~ /(clone3?|v?fork)\(/) made[NR] = pid
+  if ($0 !~ /unfinished/ && $NF ~ /^[0-9]+$/ && ($0 ~ /(clone3?|v?fork)\(/ || $0 ~ /<\.\.\. (clone3?|v?fork) resumed>/))
+    parent[$NF] = pid
+}
+END {
+  count = 0
+  for (r in made) {
+    q = made[r]
+    while (q != "" && q != body) q = parent[q]
+    if (q == body) count++
+  }
+  print count
+}'
+_hook_body_forks() {
   local cmd="$1" log="$TEST_TMPDIR/pre-bash-strace.log"
   _new_sid
   jq -nc --arg cmd "$cmd" '{tool_input:{command:$cmd}}' |
     env AGENTGUARD_NAME=claude CODEX_THREAD_ID= AGENTGUARD_SESSION_ID="$SID" \
       TMPDIR="$TEST_TMPDIR" PATH="$WITH_WATCH_PATH" \
-      strace -f -qq -e trace=clone,clone3,fork,vfork -o "$log" "$PRE_BASH" >/dev/null 2>&1
-  grep -cv resumed "$log"
+      strace -f -qq -e trace=execve,clone,clone3,fork,vfork -o "$log" "$PRE_BASH" >/dev/null 2>&1
+  awk "$_body_forks_awk" "$log"
 }
-if [ -z "${CI:-}" ] && command -v strace >/dev/null 2>&1 &&
+if command -v strace >/dev/null 2>&1 &&
   strace -f -qq -e trace=clone -o /dev/null true >/dev/null 2>&1; then
-  _assert_eq "pre-bash, non-matching fast path: exact process creations" 55 "$(_hook_forks 'ls -la')"
-  _assert_eq "pre-bash, non-matching classifier path: exact process creations" 63 \
-    "$(_hook_forks 'rg -n foo src | head')"
+  _assert_eq "pre-bash, non-matching fast path: exact body process creations" 13 \
+    "$(_hook_body_forks 'ls -la')"
+  _assert_eq "pre-bash, non-matching classifier path: exact body process creations" 17 \
+    "$(_hook_body_forks 'rg -n foo src | head')"
 else
-  echo "  SKIP: pre-bash process counts (CI, or no usable strace)"
+  echo "  SKIP: pre-bash process counts (no usable strace)"
 fi
 
 _test_summary

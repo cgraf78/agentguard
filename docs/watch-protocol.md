@@ -60,12 +60,13 @@ because the hook's environment may differ from the agent shell's.
   epochs do not count.
 - `exited/<key>` is written when a waiting run ends, for every pull request
   it had resolved, whatever its state (stalls included). Its fourth field is
-  the epoch of the check behind the result the run delivered (status 0, 1,
-  or 8 with the pull request read); a run cut short (a signal, an internal
-  error, GitHub unreadable) writes `-`, which counts as before any event. The
-  engine reads only that epoch, never the file's mtime: an epoch strictly
-  newer than the key's means the pull request was watched after the work and
-  its result delivered, whatever the state.
+  the epoch of the check behind the final result the run delivered for the
+  pull request (exit status 0, 1, or 8, with it done, needing action, or
+  stalled). A run cut short (a signal, an internal error, GitHub unreadable),
+  and a pull request still pending when the run ended, get `-`, which counts
+  as before any event. The engine reads only that epoch, never the file's
+  mtime: an epoch strictly newer than the key's means the pull request was
+  watched after the work and its result delivered, whatever its final state.
 
 ### Liveness
 
@@ -319,8 +320,9 @@ watcher basename.
   a branch update and re-arms (a nuisance re-arm).
 - Truncated output (`| head -1`, `| tail -n 3`) can lose the `To` block and
   with it a re-arm.
-- A heredoc mentioning a detached launch can make a real foreground launch
-  on the same command read as detached (it matters only under
+- Another mention of the watcher on the launch line, in a heredoc or in
+  another command (`echo git pr-watch & git pr-watch --wait 12`), can make a
+  real foreground launch read as detached (it matters only under
   `AGENTGUARD_WATCH_BLOCK=1`).
 - The reminder groups labels by scope, not host, so pull requests of
   same-named repositories on two hosts share one suggested command.

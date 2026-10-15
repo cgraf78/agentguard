@@ -630,16 +630,16 @@ _hook_watch_stop() {
       remind_labels="$remind_labels $_HOOK_WATCH_KEY_LABEL"
       continue
     fi
-    # Claim the prompt marker first so a key this Stop blocks for is not
-    # reminded again by the Stop that follows in the same prompt.
-    if _hook_once_per_prompt "watch-$id-$key-$_HOOK_WATCH_KEY_EPOCH"; then
-      if [ "$block" = 1 ] && _hook_watch_claim_block "$_HOOK_WATCH_TOOL_DIR" "$key"; then
-        block_labels="$block_labels $_HOOK_WATCH_KEY_LABEL"
-      else
-        remind_labels="$remind_labels $_HOOK_WATCH_KEY_LABEL"
-      fi
-    elif [ "$block" = 1 ] && _hook_watch_claim_block "$_HOOK_WATCH_TOOL_DIR" "$key"; then
+    # One message per prompt per key and submit, a block when armed and a
+    # reminder otherwise. The prompt marker is claimed first, so a key this
+    # Stop blocks for is not reminded again by the Stop that follows in the
+    # same prompt; a block is armed only by a new record or re-arm, which
+    # also changes the epoch and so the marker.
+    _hook_once_per_prompt "watch-$id-$key-$_HOOK_WATCH_KEY_EPOCH" || continue
+    if [ "$block" = 1 ] && _hook_watch_claim_block "$_HOOK_WATCH_TOOL_DIR" "$key"; then
       block_labels="$block_labels $_HOOK_WATCH_KEY_LABEL"
+    else
+      remind_labels="$remind_labels $_HOOK_WATCH_KEY_LABEL"
     fi
   done
   if [ -n "$blocks" ]; then
