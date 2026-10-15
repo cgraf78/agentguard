@@ -63,6 +63,12 @@ assets through shdeps, or use their absolute paths in this checkout.
   Sourced extensions can read `AGENTGUARD_CMD_TRIMMED`,
   `AGENTGUARD_CMD_LINE1`, `AGENTGUARD_EDIT_FILES`, and
   `AGENTGUARD_EDIT_FILE` after the matching parser helper runs.
+- `lib/agentguard/watch.sh` and `lib/agentguard/watch-github.sh` track watch
+  obligations: work an agent started (pull-request checks, for one) that a
+  watcher such as `git pr-watch --wait` should follow to the end. Hook
+  extensions record and re-arm wrapped commands through their documented
+  helpers; [`docs/watch-protocol.md`](docs/watch-protocol.md) describes the
+  state layout, the rules, and the gaps.
 - `share/agentguard/shell.sh` is a stable no-op shell loader for integration
   harnesses that source each dependency's shell API uniformly.
 - `share/agentguard/integrations/` contains canonical native hook fragments for
@@ -421,7 +427,11 @@ To add a new managed agent runtime:
   directions (for example, `timeout 30 sleep 300` still warns), acceptable
   because it only gates advice. `wait-until --cmd`
   payloads get the same guards as `bash -c` payloads, since `wait-until` runs
-  them with `bash -c`.
+  them with `bash -c`. It warns when `git pr-watch --wait` is launched
+  detached (`&`, nohup, setsid, disown), and on Claude Code when it runs in
+  the foreground without `run_in_background`, because either way nobody
+  receives the watcher's result; `AGENTGUARD_WATCH_BLOCK=1` blocks instead
+  (see [watch obligations](docs/watch-protocol.md)).
 - `agent-hook-pre-search` dispatches file-search tool calls to agent-specific
   extensions and enforces nothing itself. `agent-hook-pre-search-muse` blocks
   Muse file searches that do not follow symlinks; uninspectable payloads fail
@@ -431,7 +441,14 @@ To add a new managed agent runtime:
   or `update-branch`, or output showing a push summary or a new pull-request
   URL (pushes run through a script or terminal multiplexer), it reminds once
   per prompt that the pull request is not done until its checks pass on the
-  pushed commit. Output extraction is centralized so agent-specific payload
+  pushed commit. `git pr-open`, `git pr-submit`, `git pr-restack`, and
+  `git pr-sync-stack` count as pushes too, and so do pull-request URLs from any
+  GitHub host. When `git pr-watch` is installed, creating a pull request
+  records it as a watch obligation for the session, a later push or
+  `gh pr ready|reopen|update-branch` re-arms it, and the reminder recommends
+  `git pr-watch --wait <pull requests>` (`AGENTGUARD_PR_WATCH_HINT` replaces
+  that advice; `AGENTGUARD_WATCH=0` turns obligations off). See
+  [`docs/watch-protocol.md`](docs/watch-protocol.md). Output extraction is centralized so agent-specific payload
   names do not leak into the base hook: it reads Claude-style output objects,
   Codex's combined output string, and Muse's JSON output envelope (unwrapped
   only when the detected runtime is Muse, whose `exit_code` or non-completed
@@ -475,7 +492,12 @@ To add a new managed agent runtime:
   by once-per-prompt guidance. The hook passes prompt text and path facts; it
   does not decide what should be written.
 - `agent-hook-stop` asks Hive Memory for any pending-memory reminder, runs its
-  extensions, and plays a terminal notification for the first Stop after a
+  extensions, checks the session's watch obligations (once per prompt, a
+  stderr reminder naming recorded pull requests that no live watcher covers
+  and no newer finished record satisfies; with `AGENTGUARD_WATCH_BLOCK=1` on
+  Claude Code, one block per push or watcher exit instead; a session that
+  recorded nothing pays only a directory test), and plays a terminal
+  notification for the first Stop after a
   valid prompt that ends the foreground turn. A Stop an extension blocks to
   keep the agent working stays silent, so the Stop that later ends the turn
   rings although the host flags it as a continuation; other re-entrant and
