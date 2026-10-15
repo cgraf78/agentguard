@@ -251,6 +251,18 @@ _assert_contains "string push summary: reminds" "$GATE" "$(_context)"
 _assert_eq "string push summary: skips the stderr jq" \
   "$((_object_jq - 1))" "$JQ_CALLS"
 
+# The builtin C-locale helpers restore the caller's locale on return; an
+# uninstalled one must not make them print setlocale warnings. (Bash's own
+# startup warning for that locale carries no script line and is not ours.)
+_case_seq=$((_case_seq + 1))
+# shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+_RUN_HOOK_ENV=(AGENTGUARD_SESSION_ID="$TEST_SID-pr-$_case_seq" TMPDIR="$TEST_TMPDIR"
+  AGENTGUARD_NAME=codex CODEX_THREAD_ID= LC_ALL=xx_XX.UTF-8)
+_run_hook_env "$POST_BASH" "$(_string_payload "./scripts/release.sh" "$_push_summary")"
+_assert_contains "uninstalled locale: still reminds" "$GATE" "$(_context)"
+_assert_not_contains "uninstalled locale: no setlocale warning from hook lines" \
+  "line" "$(printf '%s\n' "$HOOK_STDERR" | grep 'setlocale')"
+
 for _agent in codex muse; do
   _run_case "$_agent" "$(_payload "git push origin main")"
   _assert_contains "$_agent: reminder in additionalContext" "$GATE" "$(_context)"
