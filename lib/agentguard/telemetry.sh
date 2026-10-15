@@ -37,27 +37,41 @@ _agentguard_telemetry_enabled() {
 
 # Primary telemetry root. Only absolute overrides are honored: hook processes
 # run from arbitrary working directories, so a relative path would scatter one
-# session's records across projects.
+# session's records across projects. Prints the root, or stores it in the
+# variable named by $1 (the hook exit path calls this on every hook).
+# shellcheck disable=SC2120 # hook-helpers.sh passes the output variable name.
 _agentguard_telemetry_root() {
+  local _resolved_telemetry_root
   case "${AGENTGUARD_TELEMETRY_DIR:-}" in
-    /*)
-      printf '%s\n' "${AGENTGUARD_TELEMETRY_DIR%/}"
-      return 0
+    /*) _resolved_telemetry_root="${AGENTGUARD_TELEMETRY_DIR%/}" ;;
+    *)
+      case "${XDG_STATE_HOME:-}" in
+        /*) _resolved_telemetry_root="${XDG_STATE_HOME%/}/agentguard/telemetry" ;;
+        *)
+          # Same reason as the override: a relative HOME would scatter
+          # records (and the secrets they hold) into whatever directory a
+          # hook runs in.
+          case "${HOME:-}" in
+            /*) _resolved_telemetry_root="$HOME/.local/state/agentguard/telemetry" ;;
+            *)
+              # A failed capture still assigned empty; so does the stored form.
+              [ -z "${1:-}" ] || printf -v "$1" '%s' ''
+              return 1
+              ;;
+          esac
+          ;;
+      esac
       ;;
   esac
-  case "${XDG_STATE_HOME:-}" in
-    /*)
-      printf '%s/agentguard/telemetry\n' "${XDG_STATE_HOME%/}"
-      return 0
-      ;;
-  esac
-  # Same reason as the override: a relative HOME would scatter records (and
-  # the secrets they hold) into whatever directory a hook runs in.
-  case "${HOME:-}" in
-    /*) ;;
-    *) return 1 ;;
-  esac
-  printf '%s/.local/state/agentguard/telemetry\n' "$HOME"
+  if [ -n "${1:-}" ]; then
+    # Match the `$(...)` capture of the printed form, newline strip included.
+    while [[ "$_resolved_telemetry_root" == *$'\n' ]]; do
+      _resolved_telemetry_root="${_resolved_telemetry_root%$'\n'}"
+    done
+    printf -v "$1" '%s' "$_resolved_telemetry_root"
+  else
+    printf '%s\n' "$_resolved_telemetry_root"
+  fi
 }
 
 # Every root a reader should search, primary first, without duplicates. Some

@@ -854,7 +854,9 @@ _hook_stop_settle_exit() {
 _hook_stop_continues() {
   [ -n "$_HOOK_BLOCKED" ] || return 1
   _hook_flag_enabled "${AGENTGUARD_STOP_BLOCK_ENDS_TURN:-}" && return 1
-  [ "$(_hook_agent_name)" != codex ]
+  local _stop_agent_name
+  _hook_agent_name _stop_agent_name
+  [ "$_stop_agent_name" != codex ]
 }
 
 # Return whether this event ends the foreground turn without a Stop callback:
@@ -884,7 +886,9 @@ _hook_turn_aborted() {
 # The cost is that `codex exec --ephemeral` run directly in a pane, also
 # transcript-less, is not marked either.
 _hook_busy_tracked() {
-  [ "$(_hook_agent_name)" = codex ] || return 0
+  local _busy_agent_name
+  _hook_agent_name _busy_agent_name
+  [ "$_busy_agent_name" = codex ] || return 0
   _hook_hm_read_input
   [ -n "${_HOOK_INPUT:-}" ] || return 0
   ! printf '%s' "$_HOOK_INPUT" |
@@ -1351,8 +1355,9 @@ _hook_parse_command() {
   # `_hook_event_name` is derived from the hook's own filename (no jq), and for
   # this no-context hook `_hook_finish` just emits `{}` and exits 2 — so the
   # fail-closed block works even when jq is the thing that's missing.
-  local _can_block=0
-  [ "$(_hook_event_name)" = "PreToolUse" ] && _can_block=1
+  local _can_block=0 _event
+  _hook_event_name _event
+  [ "$_event" = "PreToolUse" ] && _can_block=1
   if ! command -v jq >/dev/null 2>&1; then
     if [ "$_can_block" = 1 ]; then
       _hook_block 'cannot inspect the command: jq is not on PATH. Install jq; refusing to run the tool call unguarded.'
@@ -1570,7 +1575,7 @@ _hook_parse_mcp() {
 # commands call this after a cheap text prefilter so ordinary commands never
 # pay for sourcing it.
 _hook_load_command_classifier() {
-  [ "$(type -t _hook_command_fragments)" = "function" ] && return 0
+  declare -F _hook_command_fragments >/dev/null && return 0
   # shellcheck source=hook-command-classifier.sh
   # shellcheck disable=SC1091 # sibling module resolved from this file's dir.
   source "$_AGENTGUARD_LIB_DIR/hook-command-classifier.sh"
@@ -2133,7 +2138,7 @@ _hook_hm_delivery_policy() {
     0 | false | no | off) return 1 ;;
   esac
   _hook_hm_owns_session || return 1
-  [ -n "$_HOOK_HM_POLICY_AGENT" ] || _HOOK_HM_POLICY_AGENT=$(_hook_agent_name)
+  [ -n "$_HOOK_HM_POLICY_AGENT" ] || _hook_agent_name _HOOK_HM_POLICY_AGENT
   case "$_HOOK_HM_POLICY_AGENT" in
     claude)
       _HOOK_HM_LIFETIME=persistent
@@ -2660,7 +2665,7 @@ _hook_telemetry_exit() {
   local status="${1:-$?}" hook kind root agent key dir end_us elapsed duration
   local stem tmp event='' raw='' truncated='' max ctx cmd files server
   _agentguard_telemetry_enabled || return 0
-  root=$(_agentguard_telemetry_root 2>/dev/null) || return 0
+  _agentguard_telemetry_root root 2>/dev/null || return 0
   # Lifecycle hooks may never read stdin (their Hive Memory path skips the
   # read when `hm` is absent). Read it now so the session key comes from the
   # payload, exactly as agent-hook-telemetry's key does; otherwise runtimes
@@ -2691,7 +2696,7 @@ _hook_telemetry_exit() {
       notification*) event=Notification ;;
     esac
   fi
-  agent=$(_hook_agent_name 2>/dev/null) || agent=agent
+  _hook_agent_name agent 2>/dev/null
   # stderr: restoring an uninstalled caller LC_ALL after the helpers' local
   # C locale makes bash print setlocale warnings.
   _hook_telemetry_component agent 2>/dev/null || agent=agent
@@ -2789,10 +2794,34 @@ _hook_telemetry_exit() {
 # Returns the name of the running agent. Delegates to the shared
 # `_agent_name` detection and falls back to "agent" (not "unknown")
 # because in a hook context _something_ is always driving.
+#
+# Prints the name, or stores it in the variable named by $1. A hook asks
+# several times and each `$(...)` ask forked twice, so the answer is cached
+# per process, keyed on every variable _agent_name reads; its process-tree
+# fallback walks from this shell's own ancestors, which cannot change while
+# the hook runs.
+_HOOK_AGENT_NAME_KEY=''
+_HOOK_AGENT_NAME_VALUE=''
+
 _hook_agent_name() {
-  local name
-  name=$(_agent_name)
-  [ "$name" != "unknown" ] && echo "$name" || echo "agent"
+  local _agent_name_key='' _agent_name_var _agent_name_value
+  # Length-prefixed so no two sets of values can spell the same key.
+  for _agent_name_var in AGENTGUARD_NAME CODEX_THREAD_ID CODEX_INTERNAL_ORIGINATOR_OVERRIDE \
+    GEMINI_PROJECT_DIR GROK_SESSION_ID CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID \
+    AGENT AGENTGUARD_SESSION_ID AGENTGUARD_PROCESS_DETECT; do
+    _agent_name_value="${!_agent_name_var-}"
+    _agent_name_key+="${#_agent_name_value}:$_agent_name_value"
+  done
+  if [ -z "$_HOOK_AGENT_NAME_VALUE" ] || [ "$_HOOK_AGENT_NAME_KEY" != "$_agent_name_key" ]; then
+    _HOOK_AGENT_NAME_VALUE=$(_agent_name)
+    [ "$_HOOK_AGENT_NAME_VALUE" != "unknown" ] || _HOOK_AGENT_NAME_VALUE=agent
+    _HOOK_AGENT_NAME_KEY="$_agent_name_key"
+  fi
+  if [ -n "${1:-}" ]; then
+    printf -v "$1" '%s' "$_HOOK_AGENT_NAME_VALUE"
+  else
+    printf '%s\n' "$_HOOK_AGENT_NAME_VALUE"
+  fi
 }
 
 # --- Delegation ---
@@ -2801,8 +2830,9 @@ _hook_agent_name() {
 # Auto-discovers by appending the agent name to the hook's own filename
 # (e.g., agent-hook-pre-bash-gemini), so any agent identity can have one.
 _hook_source_agent() {
-  local agent_file
-  agent_file="${_HOOK_SELF:-$0}-$(_hook_agent_name)"
+  local agent_file _source_agent_name
+  _hook_agent_name _source_agent_name
+  agent_file="${_HOOK_SELF:-$0}-$_source_agent_name"
   # "agent" is the fallback name and won't match a real file, so
   # the -f check below handles the no-match case cleanly.
   if [ -f "$agent_file" ]; then
@@ -2829,31 +2859,38 @@ _hook_source_extensions() {
   _hook_source_work
 }
 
+# Prints the response event name, or stores it in the variable named by $1
+# (no `$(...)` fork on the per-call path).
 _hook_event_name() {
   # Basename without the fork: hook paths never carry a trailing slash, which
   # is the only input where ${var##*/} and basename(1) disagree.
-  local hook_name="${_HOOK_SELF:-$0}"
-  hook_name="${hook_name##*/}"
-  case "$hook_name" in
-    agent-hook-session-start*) echo "SessionStart" ;;
-    agent-hook-prompt-submit*) echo "UserPromptSubmit" ;;
-    agent-hook-pre-*) echo "PreToolUse" ;;
+  local _event_hook_name="${_HOOK_SELF:-$0}" _event_name
+  _event_hook_name="${_event_hook_name##*/}"
+  case "$_event_hook_name" in
+    agent-hook-session-start*) _event_name="SessionStart" ;;
+    agent-hook-prompt-submit*) _event_name="UserPromptSubmit" ;;
+    agent-hook-pre-*) _event_name="PreToolUse" ;;
     agent-hook-post-*)
       # Post hooks also serve failed tool calls (PostToolUseFailure), and a
       # strict runner rejects a response naming a different event. The
       # payload's top-level event name is cached by the state refresh's jq
       # (a string match could hit a nested object in tool input).
       if [ "$_HOOK_INPUT_EVENT" = "PostToolUseFailure" ]; then
-        echo "PostToolUseFailure"
+        _event_name="PostToolUseFailure"
       else
-        echo "PostToolUse"
+        _event_name="PostToolUse"
       fi
       ;;
-    agent-hook-stop*) echo "Stop" ;;
-    agent-hook-compact*) echo "PreCompact" ;;
-    agent-hook-notification*) echo "PermissionRequest" ;;
-    *) echo "UserPromptSubmit" ;;
+    agent-hook-stop*) _event_name="Stop" ;;
+    agent-hook-compact*) _event_name="PreCompact" ;;
+    agent-hook-notification*) _event_name="PermissionRequest" ;;
+    *) _event_name="UserPromptSubmit" ;;
   esac
+  if [ -n "${1:-}" ]; then
+    printf -v "$1" '%s' "$_event_name"
+  else
+    printf '%s\n' "$_event_name"
+  fi
 }
 
 _hook_codex_supports_suppress_output() {
@@ -2881,7 +2918,9 @@ _hook_finish_codex_stop() {
 # top-level fields such as the legacy `context` key and enforce a per-event
 # hookSpecificOutput schema, so they receive additionalContext only.
 _hook_strict_output_agent() {
-  case "$(_hook_agent_name)" in
+  local _strict_agent_name
+  _hook_agent_name _strict_agent_name
+  case "$_strict_agent_name" in
     codex | muse) return 0 ;;
     *) return 1 ;;
   esac
@@ -2894,17 +2933,19 @@ _hook_strict_output_agent() {
 # emit additionalContext alone, and Muse has no documented suppressOutput
 # contract, so Muse output stays minimal.
 _hook_finish() {
+  local _finish_agent_name
   _HOOK_EMITTED=1
   # Handle Codex Stop before the generic context/block branches. A Stop
   # extension can call _hook_block without adding _HOOK_CTX; falling through
   # would still exit 2 and turn stderr into the same replay-unsafe prompt.
   case "${_HOOK_SELF##*/}" in
     agent-hook-stop*)
-      if [ "$(_hook_agent_name)" = "codex" ]; then
+      _hook_agent_name _finish_agent_name
+      if [ "$_finish_agent_name" = "codex" ]; then
         _hook_finish_codex_stop
         exit 0
       fi
-      if [ "$(_hook_agent_name)" = "grok" ]; then
+      if [ "$_finish_agent_name" = "grok" ]; then
         # Grok Stop additionalContext is non-error keep-working feedback, not
         # a silent annotation. Hive Memory or git context must not retrigger
         # the turn the way a Claude-shaped dual payload would. SubagentStop
@@ -2929,7 +2970,7 @@ _hook_finish() {
   if [ -n "$_HOOK_CTX" ]; then
     if _hook_strict_output_agent; then
       local hook_event_name
-      hook_event_name=$(_hook_event_name)
+      _hook_event_name hook_event_name
       if [ -n "$_HOOK_BLOCKED" ]; then
         printf '%s' "$_HOOK_CTX" | jq -Rsc --arg hook_event_name "$hook_event_name" '{
           hookSpecificOutput: {
@@ -2941,7 +2982,8 @@ _hook_finish() {
         # Successful context-injection hooks are intentionally quiet. Codex
         # still receives additionalContext, but the transcript does not get a
         # repetitive "hook context" status block after every prompt.
-        if [ "$(_hook_agent_name)" = "codex" ] && _hook_codex_supports_suppress_output "$hook_event_name"; then
+        _hook_agent_name _finish_agent_name
+        if [ "$_finish_agent_name" = "codex" ] && _hook_codex_supports_suppress_output "$hook_event_name"; then
           printf '%s' "$_HOOK_CTX" | jq -Rsc --arg hook_event_name "$hook_event_name" '{
             suppressOutput: true,
             hookSpecificOutput: {
@@ -2960,7 +3002,7 @@ _hook_finish() {
       fi
     else
       local hook_event_name
-      hook_event_name=$(_hook_event_name)
+      _hook_event_name hook_event_name
       printf '%s' "$_HOOK_CTX" | jq -Rsc --arg hook_event_name "$hook_event_name" '{
         context: .,
         hookSpecificOutput: { hookEventName: $hook_event_name, additionalContext: . }
