@@ -354,6 +354,18 @@ _assert_eq "push run in the background" "" "$(
   _run "$POST_BASH" claude "$(jq -nc '{tool_input:{command:"git push",run_in_background:true},tool_response:{stdout:"",stderr:"",exit_code:0}}')"
   [ "$(_key_epoch o_r_12)" = 1000 ] || printf 'o_r_12 '
 )"
+_assert_eq "muse push still running in the background" "" "$(
+  _new_sid
+  _seed_key o_r_12 1000 o_r
+  _run "$POST_BASH" muse "$(_string_payload "git push" "$(_muse_envelope "" '{"terminal_status":"background_running"}')")"
+  [ "$(_key_epoch o_r_12)" = 1000 ] || printf 'o_r_12 '
+)"
+_assert_eq "muse push that completed" "o_r_12 " "$(
+  _new_sid
+  _seed_key o_r_12 1000 o_r
+  _run "$POST_BASH" muse "$(_string_payload "git push" "$(_muse_envelope "$_ff" "$_ok")")"
+  [ "$(_key_epoch o_r_12)" = 1000 ] || printf 'o_r_12 '
+)"
 _new_sid
 _seed_key o_r_12 1000 o_r
 _run "$POST_BASH" claude "$(_payload "git push" "" 0 "$_ff")"

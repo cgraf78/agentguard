@@ -1508,21 +1508,24 @@ _hook_tool_stderr() {
 # Claude Code's Bash tool sets tool_input.run_in_background, and Gemini CLI's
 # shell tool sets is_background (taken from the Gemini CLI tool schema, not
 # verified against a local install; a wrong field name only fails to suppress
-# advice). Runners without such a flag (Codex, OpenCode)
-# background only through shell syntax, which the command classifier sees.
-# A payload without either key name cannot set them, so a builtin match
-# skips the jq fork for the common foreground call; callers still ask only
-# after a guard has already matched.
+# advice). In a post-tool payload, a Muse result envelope reports a shell it
+# backgrounded as terminal_status `background_running`. Runners without such
+# a signal (Codex, OpenCode) background only through shell syntax, which the
+# command classifier sees. A payload without any of those names cannot carry
+# them, so a builtin match skips the jq fork for the common foreground call;
+# callers still ask only after a guard has already matched.
 _hook_tool_runs_in_background() {
   _hook_read_input || return 1
-  local LC_ALL=C
+  local LC_ALL=C _background_agent
   case "$_HOOK_INPUT" in
-    *run_in_background* | *is_background*) ;;
+    *run_in_background* | *is_background* | *background_running*) ;;
     *) return 1 ;;
   esac
-  printf '%s' "$_HOOK_INPUT" | jq -e '
-    (.tool_input? // .toolInput?) | objects |
-      .run_in_background == true or .is_background == true
+  _hook_agent_name _background_agent
+  printf '%s' "$_HOOK_INPUT" | jq -e --arg agent "$_background_agent" "$_HOOK_TOOL_RESPONSE_JQ"'
+    [ ((.tool_input? // .toolInput?) | objects |
+        .run_in_background == true or .is_background == true),
+      (muse_result | .terminal_status == "background_running") ] | any
   ' >/dev/null 2>&1
 }
 
