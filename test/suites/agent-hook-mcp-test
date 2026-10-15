@@ -77,6 +77,38 @@ _run_hook "$PRE_MCP" '{"tool_name":"","tool_input":{}}'
 _assert_eq "empty tool: exit 0" "0" "$HOOK_EXIT"
 
 # ---------------------------------------------------------------------------
+# Tests: agent-hook-pre-mcp — hostile tool names (newline in tool_name)
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-mcp: hostile tool names ==="
+
+# Newline inside tool_name must not shift the parsed fields: the structured
+# mcp_context identity still wins, so the real server's fail file applies.
+_reset_state
+mkdir -p "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID"
+echo 3 >"$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-realserver"
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__evil\nserver__tool","tool_input":{},"mcp_context":{"server_name":"realserver","tool_name":"realtool"}}'
+_assert_eq "newline tool_name: real server blocked" "2" "$HOOK_EXIT"
+
+# Same hostile payload, but the fail file names a different server: the
+# misparse must not accidentally match either fragment.
+_reset_state
+mkdir -p "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID"
+echo 3 >"$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-otherserver"
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__evil\nserver__tool","tool_input":{},"mcp_context":{"server_name":"realserver","tool_name":"realtool"}}'
+_assert_eq "newline tool_name: other server passes" "0" "$HOOK_EXIT"
+
+# NUL inside tool_name must not shift fields either: jq emits the raw byte
+# for \u0000 escapes and bash read -d '' would stop there. NULs are stripped,
+# so the structured mcp_context identity still wins.
+_reset_state
+mkdir -p "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID"
+echo 3 >"$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-realserver"
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__evil\u0000server__tool","tool_input":{},"mcp_context":{"server_name":"realserver","tool_name":"realtool"}}'
+_assert_eq "NUL tool_name: real server blocked" "2" "$HOOK_EXIT"
+
+# ---------------------------------------------------------------------------
 # Tests: agent-hook-pre-mcp — search_files warning
 # ---------------------------------------------------------------------------
 
