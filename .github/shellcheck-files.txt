@@ -30,6 +30,8 @@ program	lib/agentguard/detect.sh
 program	lib/agentguard/hook-command-classifier.sh
 program	lib/agentguard/hook-helpers.sh
 program	lib/agentguard/telemetry.sh
+program	lib/agentguard/watch-github.sh
+program	lib/agentguard/watch.sh
 program	share/agentguard/shell.sh
 program	support/script-resolver.sh.template
 program	support/secure-launcher.sh.template

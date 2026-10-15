@@ -1510,9 +1510,16 @@ _hook_tool_stderr() {
 # verified against a local install; a wrong field name only fails to suppress
 # advice). Runners without such a flag (Codex, OpenCode)
 # background only through shell syntax, which the command classifier sees.
-# Costs a jq fork, so callers ask only after a guard has already matched.
+# A payload without either key name cannot set them, so a builtin match
+# skips the jq fork for the common foreground call; callers still ask only
+# after a guard has already matched.
 _hook_tool_runs_in_background() {
   _hook_read_input || return 1
+  local LC_ALL=C
+  case "$_HOOK_INPUT" in
+    *run_in_background* | *is_background*) ;;
+    *) return 1 ;;
+  esac
   printf '%s' "$_HOOK_INPUT" | jq -e '
     (.tool_input? // .toolInput?) | objects |
       .run_in_background == true or .is_background == true
@@ -1630,6 +1637,24 @@ _hook_load_command_classifier() {
   # shellcheck source=hook-command-classifier.sh
   # shellcheck disable=SC1091 # sibling module resolved from this file's dir.
   source "$_AGENTGUARD_LIB_DIR/hook-command-classifier.sh"
+}
+
+# Load the watch-obligation engine (watch.sh) and the GitHub recognizer
+# helpers (watch-github.sh) on first use. Hooks call these only after a
+# builtin prefilter matched, so other calls never pay for sourcing them.
+_hook_load_watch() {
+  declare -F _hook_watch_record >/dev/null && return 0
+  # shellcheck source=watch.sh
+  # shellcheck disable=SC1091 # sibling module resolved from this file's dir.
+  source "$_AGENTGUARD_LIB_DIR/watch.sh"
+}
+
+_hook_load_watch_github() {
+  declare -F _hook_gh_pr_key_scope >/dev/null && return 0
+  _hook_load_watch || return 1
+  # shellcheck source=watch-github.sh
+  # shellcheck disable=SC1091 # sibling module resolved from this file's dir.
+  source "$_AGENTGUARD_LIB_DIR/watch-github.sh"
 }
 
 # Uses the command classifier to change into a leading `cd` target. Used by
