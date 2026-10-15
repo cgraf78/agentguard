@@ -78,7 +78,9 @@ if [ -n "$_stdout" ]; then
   # so a hit still runs one exact union scan, and only a real match runs
   # every classifier below, keeping warning types and multi-credential
   # behavior unchanged.
-  _credential_literal_pattern='-----BEGIN |AKIA|gh[psrou]_|github_pat_|sk-'
+  # `BEGIN ` rather than the PEM header's leading dashes: a `-` run (common in
+  # tables and separators) would start a match attempt at every dash.
+  _credential_literal_pattern='BEGIN |AKIA|gh[psrou]_|github_pat_|sk-'
   # Byte matching in the C locale: the literals are ASCII, and some libc
   # regex engines refuse to match at all (REG_ILLSEQ) when a multibyte locale
   # meets invalid UTF-8 in the output.

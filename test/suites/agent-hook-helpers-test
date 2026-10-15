@@ -1295,6 +1295,43 @@ _assert_contains "hm hook: tool-complete maps MCP error boolean to nonzero" \
 _assert_not_contains "hm hook: MCP tool-complete skips project argument" \
   "--project" "$(cat "$HM_LOG")"
 
+# With Hive Memory off, tool-complete returns before deriving a status: the
+# status is a jq run whose answer nobody would read. The last-rc marker still
+# says hm did not run.
+hm_off_jq_log="$HM_TMP/hm-off-jq.log"
+hm_off_bin="$HM_TMP/hm-off-bin"
+# Resolved before the mock joins PATH: a prefix assignment's `$(...)` would
+# see the mock and exec it in a loop.
+hm_off_real_jq=$(type -P jq)
+mkdir -p "$hm_off_bin"
+# shellcheck disable=SC2016 # expanded by the mock script.
+printf '%s\n' '#!/usr/bin/env bash' 'printf "jq\n" >>"$HM_OFF_JQ_LOG"' \
+  'exec "$HM_OFF_REAL_JQ" "$@"' >"$hm_off_bin/jq"
+chmod +x "$hm_off_bin/jq"
+: >"$hm_off_jq_log"
+: >"$HM_LOG"
+hm_off_rc=$(HOME="$HM_HOME" \
+  PATH="$hm_off_bin:$HM_BIN:$PATH" \
+  TMPDIR="$HM_TMP" \
+  HM_LOG="$HM_LOG" \
+  HM_OFF_JQ_LOG="$hm_off_jq_log" \
+  HM_OFF_REAL_JQ="$hm_off_real_jq" \
+  AGENTGUARD_HIVE_MEMORY_HOOKS=0 \
+  AGENTGUARD_NAME=claude \
+  CODEX_THREAD_ID="" \
+  AGENTGUARD_SESSION_ID="hm-off-session" \
+  bash -c '
+    source "$1"
+    _HOOK_INPUT='\''{"tool_response":{"stdout":"","exit_code":1}}'\''
+    : >"$HM_OFF_JQ_LOG"
+    _hook_hm_tool_complete
+    printf "%s" "$_HOOK_HM_LAST_RC"
+  ' _ "$HELPERS" 2>/dev/null)
+_assert_eq "hm hook: tool-complete with Hive Memory off runs no status jq" \
+  "0" "$(grep -c . "$hm_off_jq_log")"
+_assert_eq "hm hook: tool-complete with Hive Memory off keeps last rc 125" "125" "$hm_off_rc"
+_assert_eq "hm hook: tool-complete with Hive Memory off does not call hm" "" "$(cat "$HM_LOG")"
+
 # Shell results per runtime shape. Muse sends a JSON envelope string whose
 # exit_code is the result; without one, only a failed or timed-out
 # terminal_status is a failure (a background run is still running, and a
