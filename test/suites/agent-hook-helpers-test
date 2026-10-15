@@ -1296,9 +1296,10 @@ _assert_not_contains "hm hook: MCP tool-complete skips project argument" \
   "--project" "$(cat "$HM_LOG")"
 
 # Shell results per runtime shape. Muse sends a JSON envelope string whose
-# exit_code (or a non-completed terminal_status without one) is the result;
-# Codex sends plain output text, so envelope-shaped Codex output is not a
-# status. Fixtures are synthetic.
+# exit_code is the result; without one, only a failed or timed-out
+# terminal_status is a failure (a background run is still running, and a
+# cancelled command fails open). Codex sends plain output text, so
+# envelope-shaped Codex output is not a status. Fixtures are synthetic.
 _hm_status_envelope() {
   jq -nc --argjson fields "$1" '{tool_input:{command:"run"},
     tool_response:({command:"run", output:"text"} + $fields | tojson)}'
@@ -1323,14 +1324,24 @@ while IFS='|' read -r hm_status_agent hm_status_expected hm_status_desc hm_statu
 done <<EOF
 muse|0|muse completed envelope|$(_hm_status_envelope '{"exit_code":0,"terminal_status":"completed"}')
 muse|2|muse failed envelope exit code|$(_hm_status_envelope '{"exit_code":2,"terminal_status":"failed"}')
-muse|1|muse cancelled envelope without exit_code|$(_hm_status_envelope '{"terminal_status":"cancelled"}')
+muse|0|muse cancelled envelope without exit_code|$(_hm_status_envelope '{"terminal_status":"cancelled"}')
+muse|0|muse background run without exit_code|$(_hm_status_envelope '{"terminal_status":"background_running"}')
+muse|0|muse unknown terminal status without exit_code|$(_hm_status_envelope '{"terminal_status":"something_new"}')
+muse|1|muse timed-out envelope without exit_code|$(_hm_status_envelope '{"terminal_status":"timed_out"}')
 muse|1|muse failed envelope with null exit_code|$(_hm_status_envelope '{"exit_code":null,"terminal_status":"failed"}')
+muse|1|muse negative exit code|$(_hm_status_envelope '{"exit_code":-9,"terminal_status":"failed"}')
 muse|0|muse completed envelope without exit_code|$(_hm_status_envelope '{"terminal_status":"completed"}')
 muse|0|muse string without result fields|$(_hm_status_envelope '{}')
 muse|0|muse plain string|{"tool_response":"plain text"}
+muse|0|muse JSON array string|{"tool_response":"[1]"}
+muse|0|muse JSON number string|{"tool_response":"5"}
+muse|0|muse result fields without output|{"tool_response":"{\"exit_code\":2,\"terminal_status\":\"failed\"}"}
 codex|0|codex failure-shaped output text|$(_hm_status_envelope '{"exit_code":2,"terminal_status":"failed"}')
 codex|0|codex plain string|{"tool_response":"plain text"}
+codex|1|string response with top-level status|{"tool_response":"plain text","status":1}
 claude|3|claude object exit code|{"tool_response":{"stdout":"","exit_code":3}}
+claude|1|claude object negative exit code|{"tool_response":{"stdout":"","exit_code":-9}}
+claude|1|claude object negative exit code string|{"tool_response":{"stdout":"","exit_code":"-9"}}
 EOF
 
 : >"$HM_LOG"

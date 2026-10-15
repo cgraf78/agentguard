@@ -26,11 +26,13 @@ not leak into local extension policy. It reads output objects, a combined
 output string (Codex), and a JSON output envelope string (Muse). The envelope
 is unwrapped only when the detected runtime is Muse; its
 .B exit_code
-or a
+then decides whether the command failed, and without one only a
 .B terminal_status
-other than
-.B completed
-then decides whether the command succeeded.
+of
+.B failed
+or
+.B timed_out
+counts as a failure.
 .SH EXIT STATUS
 .TP
 .B 0

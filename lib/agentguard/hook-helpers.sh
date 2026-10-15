@@ -1750,24 +1750,29 @@ _hook_hm_tool_status() {
   local status _status_agent
   _hook_agent_name _status_agent
   status=$(printf '%s' "${_HOOK_INPUT:-}" | jq -r --arg agent "$_status_agent" "$_HOOK_TOOL_RESPONSE_JQ"'
+    # A negative code (a signal number reported as -N) is still a failure.
     def status_code(v):
       if v == null then empty
-      elif (v | type) == "number" then v
+      elif (v | type) == "number" then (if v < 0 then 1 else v end)
       elif (v | type) == "string" then
         (v | ascii_downcase) as $s |
         if ($s | test("^[0-9]+$")) then ($s | tonumber)
+        elif ($s | test("^-[0-9]+$")) then 1
         elif (["success", "succeeded", "ok", "pass", "passed"] | index($s)) then 0
         elif (["failure", "failed", "error", "errored", "fail"] | index($s)) then 1
         else empty end
       elif (v | type) == "boolean" then
         if v then 1 else 0 end
       else empty end;
-    # A Muse call that ended without an exit code (cancelled, timed out,
-    # or failed to start) still did not succeed.
+    # A Muse call that ended without an exit code fails only on a known
+    # failure state. Anything else gives no status (so 0): a backgrounded
+    # shell reports `background_running` and is still running, and a
+    # cancelled command may already have done its work, so consumers gated
+    # on status fail open for it.
     def muse_status:
       muse_result
       | if .exit_code != null then .exit_code
-        elif has("terminal_status") and .terminal_status != "completed" then 1
+        elif .terminal_status == "failed" or .terminal_status == "timed_out" then 1
         else empty end;
     # `?` on the object lookups: a string tool_response (Codex, Muse) has no
     # fields, and an unguarded lookup would fail the whole program.
