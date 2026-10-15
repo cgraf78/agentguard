@@ -88,7 +88,9 @@ if [ -n "$_stdout" ]; then
     local LC_ALL=C
     [[ "$_stdout" =~ $_credential_literal_pattern ]]
   }
-  if _output_has_credential_literal &&
+  # stderr: restoring an uninstalled caller LC_ALL after the helper's local
+  # C locale makes bash print a setlocale warning.
+  if _output_has_credential_literal 2>/dev/null &&
     printf '%s' "$_stdout" | grep -qE -e "$_credential_union_pattern"; then
     # PEM private key or certificate block headers — unambiguous format.
     # Use -e to avoid grep treating the leading dashes as option flags.
@@ -224,7 +226,8 @@ elif ! [[ "$AGENTGUARD_CMD_TRIMMED" =~ (^|[[:space:];\&\|\(])gh[[:space:]] ]]; t
   # skip the read and its subshell outright.
   case "${_HOOK_INPUT:-}" in
     *"To "*" -> "*)
-      _hook_tool_response_is_string ||
+      # stderr: same setlocale warning as the credential prefilter above.
+      _hook_tool_response_is_string 2>/dev/null ||
         _pr_checks_text="$_pr_checks_text"$'\n'"$(_hook_tool_stderr)"
       ;;
   esac
