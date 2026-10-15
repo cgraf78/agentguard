@@ -477,13 +477,21 @@ if [ -n "$_pr_checks_key" ] && [ "$(_hook_hm_tool_status)" = "0" ]; then
   # Only a successful command-position create, push, or gh re-arm feeds the
   # watch obligations; AGENTGUARD_WATCH=0 turns them off. Push parsing runs
   # only once this session has recorded something to re-arm.
-  # A call the host runs in the background (Claude Code run_in_background)
-  # reports here before the command has done anything, so it neither records
-  # nor re-arms.
+  # A call the host runs in the background (Claude Code run_in_background,
+  # a Muse background shell) reports here before the command has done
+  # anything: it records nothing (no URL yet), and a push re-arms every
+  # recorded pull request rather than none, since a nuisance re-arm beats a
+  # missed one and the producer's push-race guard covers an early check.
   if [ "${_pr_checks_key%%:*}" = command ] && ! _hook_flag_disabled "${AGENTGUARD_WATCH:-}" &&
     { [ -n "$_pr_checks_creates" ] || [ "${#_pr_checks_gh_targets[@]}" -gt 0 ] ||
       { [ -n "$_pr_checks_push" ] && [ -d "$_HOOK_STATE_DIR/watch" ]; }; } &&
-    ! _hook_tool_runs_in_background && _hook_load_watch_github; then
+    _hook_load_watch_github; then
+    _pr_checks_background=''
+    if _hook_tool_runs_in_background; then
+      _pr_checks_background=1
+      _pr_checks_creates=''
+      _pr_checks_gh_targets=()
+    fi
     # The hint is free text the Stop hook repeats: how to start a watcher.
     # shellcheck disable=SC2016 # Backticks are literal Markdown for the agent.
     # A `<labels>` token in it is replaced by the pull requests a message names.
@@ -491,7 +499,13 @@ if [ -n "$_pr_checks_key" ] && [ "$(_hook_hm_tool_status)" = "0" ]; then
     [ -z "$_pr_checks_creates" ] || _pr_checks_record
     [ -d "$_HOOK_STATE_DIR/watch" ] || _pr_checks_gh_targets=()
     _pr_checks_rearm_gh
-    [ -z "$_pr_checks_push" ] || [ ! -d "$_HOOK_STATE_DIR/watch" ] || _pr_checks_rearm_push
+    if [ -n "$_pr_checks_push" ] && [ -d "$_HOOK_STATE_DIR/watch" ]; then
+      if [ -n "$_pr_checks_background" ]; then
+        _pr_checks_add_labels "$(_hook_watch_rearm "$_HOOK_GH_PR_TOOL_DIR" ALL)"
+      else
+        _pr_checks_rearm_push
+      fi
+    fi
   fi
   if [ -n "$_pr_checks_labels" ]; then
     # Every record or re-arm is new work, so it always reminds, even when the
@@ -501,7 +515,14 @@ if [ -n "$_pr_checks_key" ] && [ "$(_hook_hm_tool_status)" = "0" ]; then
       _hook_remind "PR checks gate: this started checks on $_pr_checks_labels, which is not done or green until they pass on the pushed commit. $AGENTGUARD_PR_WATCH_HINT"
     else
       _pr_checks_watch_commands
-      _hook_remind "PR checks gate: this started checks on $_pr_checks_labels, which is not done or green until they pass on the pushed commit. Watch them in the background with $_pr_checks_commands (Claude Code: run_in_background: true; never \`&\`, nohup, setsid, or disown) and act on its result when it exits; report pending or failing checks instead of calling it green."
+      _pr_checks_agent=''
+      _hook_agent_name _pr_checks_agent
+      if [ "$_pr_checks_agent" = claude ]; then
+        _pr_checks_background_advice='Claude Code: run_in_background: true'
+      else
+        _pr_checks_background_advice="your shell tool's background or yield option"
+      fi
+      _hook_remind "PR checks gate: this started checks on $_pr_checks_labels, which is not done or green until they pass on the pushed commit. Watch them in the background with $_pr_checks_commands ($_pr_checks_background_advice; never \`&\`, nohup, setsid, or disown) and act on its result when it exits; report pending or failing checks instead of calling it green. Restart it after every exit until it reports done, unless it reports a stall (report that instead); a foreground run is killed at the tool timeout and silently stops watching."
     fi
   # Otherwise remind once per prompt for the same push: re-reading a captured
   # pane or log while monitoring must not repeat the reminder.

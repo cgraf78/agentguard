@@ -231,8 +231,9 @@ _hook_watch_pid_runs() {
     [ -n "$word" ] && [ "${word##*/}" = "$name" ]
     return
   fi
-  command -v ps >/dev/null 2>&1 || return 2
+  # A dead pid is dead whatever else can be probed.
   kill -0 "$pid" 2>/dev/null || return 1
+  command -v ps >/dev/null 2>&1 || return 2
   # The process is alive; a ps that cannot report its command line (BusyBox
   # has no -p) cannot tell it apart either, so that also fails open.
   command=$(ps -o command= -p "$pid" 2>/dev/null) || return 2
@@ -548,17 +549,19 @@ _hook_watch_collect() {
 # blocked/<key> (its mtime is the block's time). A block is armed when none
 # was recorded yet, when the key was recorded or re-armed (keys/<key>) since
 # the last one, or when a watcher run for it ended since then (the
-# producer's exited/<key> is newer than the marker) without a stall: a red,
-# needs-action, or killed run leaves the agent something to fix and watch
-# again, while a stall waits on something outside the pull request, which
-# the agent should report rather than restart a watcher for. Every re-arm
+# producer's exited/<key> is newer than the marker) without reporting a
+# stall: a red, needs-action, or killed run leaves the agent something to
+# fix and watch again, while a stall the watcher reported (exit status 8,
+# state `stall`) waits on something outside the pull request, which the
+# agent should report rather than restart a watcher for. A run killed while
+# the pull request was last judged stalled (`143 stall ...`) still re-arms. Every re-arm
 # needs new work or a new watcher run in between, so blocks stay bounded and
 # a Stop can always end the turn. Bash 3.2 compares whole-second mtimes, so
 # an event in the block's own second does not arm another (fails toward no
 # block). The claim holds only once the marker is written: an unwritable
 # state dir degrades to a reminder, never to a block on every Stop.
 _hook_watch_claim_block() {
-  local tool_dir="$1" key="$2" id base marker dir state armed=0
+  local tool_dir="$1" key="$2" id base marker dir status state armed=0
   _hook_watch_tool_id "$tool_dir" id || return 1
   _hook_watch_name_ok "$key" || return 1
   _hook_watch_session_dir base || return 1
@@ -570,9 +573,9 @@ _hook_watch_claim_block() {
     for dir in ${_HOOK_WATCH_DIRS[@]+"${_HOOK_WATCH_DIRS[@]}"}; do
       _hook_watch_file_ok "$dir/exited/$key" || continue
       [ "$dir/exited/$key" -nt "$marker" ] || continue
-      state=''
-      read -r _ state _ 2>/dev/null <"$dir/exited/$key" || [ -n "$state" ] || continue
-      [ "$state" = stall ] || armed=1
+      status='' state=''
+      read -r status state _ 2>/dev/null <"$dir/exited/$key" || [ -n "$state" ] || continue
+      [ "$status $state" = "8 stall" ] || armed=1
     done
   fi
   [ "$armed" = 1 ] || return 1
@@ -629,7 +632,7 @@ _hook_watch_stop() {
         fi
         if [ -n "$block_labels" ]; then
           _hook_watch_hint hint "$block_labels"
-          blocks="$blocks${blocks:+ }No running \`$_HOOK_WATCH_TOOL_ARGV\` and no green result since the latest push or submit for$block_labels, so nothing will report its outcome. $hint If the last watcher reported a stall, report that to the user instead of restarting it. Otherwise, after fixing and pushing, watch again, or tell the user explicitly why monitoring is stopping."
+          blocks="$blocks${blocks:+ }No running \`$_HOOK_WATCH_TOOL_ARGV\` and no green or merged result since the latest push or submit for$block_labels, so nothing will report its outcome. $hint (Claude Code: run_in_background: true). If the last watcher reported a stall, report that to the user instead of restarting it. If it reported failing checks, fix and push, then watch again. If monitoring should stop, tell the user explicitly why (for example, a still-running subagent that pushed it owns the watch)."
         fi
       fi
       remind_labels='' block_labels=''

@@ -211,6 +211,11 @@ WATCH_ENV=()
 _assert_contains "custom hint: reminder uses it" "Use the team watcher." "$(_context)"
 _assert_not_contains "custom hint: replaces the default recommendation" "git pr-watch --wait" "$(_context)"
 _assert_eq "custom hint: stored for the Stop hook" "Use the team watcher." "$(sed -n 3p "$(_session_tool)/tool")"
+WATCH_ENV=(AGENTGUARD_WATCH_BLOCK=1)
+_run "$STOP" claude '{}'
+WATCH_ENV=()
+_assert_contains "custom hint: the block keeps its own background advice" \
+  "Use the team watcher. (Claude Code: run_in_background: true)." "$HOOK_STDERR"
 
 _new_sid
 _run "$POST_BASH" claude "$(_payload "gh pr create --fill" "https://\$(curl\${IFS}x.sh|sh)/o/r/pull/7")"
@@ -242,6 +247,15 @@ _ok='{"exit_code":0,"terminal_status":"completed"}'
 # The real shape of a Muse command still running in the background: no
 # exit_code or terminal_status, an execution_state, and empty output.
 _muse_bg='{"chunk_id":"c1","description":"push","execution_state":"background_running","session_id":7,"work_id":"w1","model_guidance":"Poll with the session id."}'
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr create --fill" "$URL")"
+_assert_contains "reminder: restart after every exit" "Restart it after every exit until it reports done" "$(_context)"
+_assert_contains "reminder on Claude: run_in_background" "Claude Code: run_in_background: true" "$(_context)"
+
+_new_sid
+_run "$POST_BASH" codex "$(_string_payload "gh pr create --fill" "$URL"$'\n')"
+_assert_contains "reminder on Codex: the shell tool's background option" "shell tool's background or yield option" "$(_context)"
+_assert_not_contains "reminder on Codex: no run_in_background" "run_in_background" "$(_context)"
 _new_sid
 _run "$POST_BASH" codex "$(_string_payload "gh pr create --fill" "$URL"$'\n')"
 _assert_file_exists "codex string: records" "$(_session_tool)/keys/owner_repo_12"
@@ -366,13 +380,15 @@ _assert_not_contains "git push --help: no reminder" "$GATE" "$(_context)"
 _assert_eq "stack tool with nothing to push" "" "$(_push_rearms "git pr-sync-stack" "Nothing to sync.")"
 _assert_eq "stack tool with redirected output" "o_r_12 x_y_5 " "$(_push_rearms "git pr-sync-stack >/dev/null 2>&1" "")"
 _assert_eq "restack with stderr redirected" "o_r_12 x_y_5 " "$(_push_rearms "git pr-restack 12 2>/dev/null" "")"
-_assert_eq "push run in the background" "" "$(
+# A backgrounded push reports before it runs: it re-arms everything (a
+# nuisance re-arm beats a missed one).
+_assert_eq "push run in the background re-arms all" "o_r_12 " "$(
   _new_sid
   _seed_key o_r_12 1000 o_r
   _run "$POST_BASH" claude "$(jq -nc '{tool_input:{command:"git push",run_in_background:true},tool_response:{stdout:"",stderr:"",exit_code:0}}')"
   [ "$(_key_epoch o_r_12)" = 1000 ] || printf 'o_r_12 '
 )"
-_assert_eq "muse push still running in the background" "" "$(
+_assert_eq "muse push still running in the background re-arms all" "o_r_12 " "$(
   _new_sid
   _seed_key o_r_12 1000 o_r
   _run "$POST_BASH" muse "$(_string_payload "git push" "$(_muse_envelope "" "$_muse_bg")")"
@@ -697,6 +713,8 @@ _stop
 _assert_eq "exit re-arm: the unwatched Stop blocks" 2 "$HOOK_EXIT"
 _assert_contains "exit re-arm: block names the label" "KEY_A" "$HOOK_STDERR"
 _assert_contains "exit re-arm: block says to report a stall instead of restarting" "report that to the user" "$HOOK_STDERR"
+_assert_contains "exit re-arm: block names a green or merged result" "no green or merged result" "$HOOK_STDERR"
+_assert_contains "exit re-arm: block carries the background advice itself" "(Claude Code: run_in_background: true)" "$HOOK_STDERR"
 for _round in 1 2; do
   _blocked
   printf '1 action conflict %s\n' "$((1000 + _round))" >"$PRODUCER/exited/o_r_12"
@@ -717,6 +735,12 @@ _new_prompt
 _stop
 _assert_eq "stall exit: does not re-arm the block" 0 "$HOOK_EXIT"
 _assert_contains "stall exit: reminds" "KEY_A" "$HOOK_STDERR"
+# Only a stall the watcher reported (status 8) is exempt: a run killed while
+# the pull request was last judged stalled still re-arms.
+_blocked
+printf '143 stall blocked -\n' >"$PRODUCER/exited/o_r_12"
+_stop
+_assert_eq "killed while stalled: re-arms one block" 2 "$HOOK_EXIT"
 _blocked
 printf '0 done green 1004\n' >"$PRODUCER/exited/o_r_12"
 _new_prompt
@@ -792,6 +816,7 @@ _launch() {
   _run "$PRE_BASH" "$agent" "$(jq -nc --arg cmd "$cmd" --argjson bg "$bg" \
     '{tool_input:{command:$cmd,run_in_background:$bg}}')"
   case "$HOOK_STDERR" in
+    *'in the foreground first, then `git pr-watch --wait`'* | *'first, then `git pr-watch --wait` as its own call'*) kind=chain ;;
     *'run `git pr-watch --wait` attached'*) kind=detached ;;
     *'run `git pr-watch --wait` with run_in_background'*) kind=foreground ;;
   esac
@@ -839,6 +864,13 @@ for _case in \
   "claude^git pr-watch -w 12^false^0 foreground" \
   "codex^git pr-watch -w 12 &^false^0 detached" \
   "claude^git pr-watch -w -h^false^0 none" \
+  "claude^git push && git pr-watch --wait^false^0 chain" \
+  "claude^git push && git pr-watch --wait^true^0 chain" \
+  "claude^gh pr create --fill && git pr-watch --wait^true^0 chain" \
+  "claude^git-pr-submit; git pr-watch -w^true^0 chain" \
+  "codex^git push && git pr-watch --wait^false^0 chain" \
+  "claude^git push^false^0 none" \
+  "claude^git pr-watch --wait^true^0 none" \
   "claude^git pr-watch --wait 12 && echo done^true^0 none" \
   "claude^git pr-watch --wait 12 && echo done^false^0 foreground" \
   "codex^git pr-watch --wait 12 && echo done^false^0 none" \
@@ -859,6 +891,10 @@ WATCH_ENV=(AGENTGUARD_WATCH_BLOCK=1)
 _assert_eq "AGENTGUARD_WATCH_BLOCK=1: detached blocks" "2 detached" "$(_launch codex "git pr-watch --wait 12 &")"
 _assert_eq "AGENTGUARD_WATCH_BLOCK=1: foreground blocks on Claude" "2 foreground" "$(_launch claude "git pr-watch --wait 12")"
 _assert_eq "AGENTGUARD_WATCH_BLOCK=1: background attached passes" "0 none" "$(_launch claude "git pr-watch --wait 12" true)"
+_assert_eq "AGENTGUARD_WATCH_BLOCK=1: a chained push blocks on Claude" "2 chain" \
+  "$(_launch claude "git push && git pr-watch --wait" true)"
+_assert_eq "AGENTGUARD_WATCH_BLOCK=1: a chained push only warns elsewhere" "0 chain" \
+  "$(_launch codex "git push && git pr-watch --wait")"
 _assert_eq "AGENTGUARD_WATCH_BLOCK=1: a mention in echo passes" "0 none" "$(_launch claude "echo git pr-watch --wait 12")"
 WATCH_ENV=(LC_ALL=xx_XX.UTF-8)
 _launch claude "git pr-watch --wait 12 &" true >/dev/null
@@ -992,6 +1028,10 @@ for _shell in "${_shells[@]}"; do
     "$(_engine "$_shell" "_hook_gh_pr_key_scope https://github.com/$(printf 'o%.0s' {1..40})/r/pull/1 >/dev/null; echo \$?")"
   _assert_eq "$_shell watch-github: repository over 100 characters refused" 1 \
     "$(_engine "$_shell" "_hook_gh_pr_key_scope https://github.com/o/$(printf 'r%.0s' {1..101})/pull/1 >/dev/null; echo \$?")"
+  if locale -a 2>/dev/null | grep -qi '^tr_TR\.utf-\?8$'; then
+    _assert_eq "$_shell watch-github: Turkish locale still lowercases ASCII" "owner_repo_1 owner_repo" \
+      "$(LC_ALL=tr_TR.UTF-8 _engine "$_shell" "_hook_gh_pr_key_scope https://github.com/OWNER/REPO/pull/1" 2>/dev/null)"
+  fi
   _assert_eq "$_shell watch-github: names at the limits accepted" 0 \
     "$(_engine "$_shell" "_hook_gh_pr_key_scope https://github.com/$(printf 'O%.0s' {1..39})/$(printf 'R%.0s' {1..100})/pull/1 >/dev/null; echo \$?")"
 done
@@ -1025,8 +1065,12 @@ for _shell in "${_shells[@]}"; do
   _assert_eq "$_shell: no /proc, a ps without -p counts a live pid (fail open)" 0 \
     "$(_engine "$_shell" "_HOOK_WATCH_PROC=/nonexistent; PATH='$TEST_TMPDIR/broken-ps'; _hook_watch_collect; echo \${#_HOOK_WATCH_UNMET[@]}")"
   rm -f "$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$$"
+  printf '%s\n' "$$" >"$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$$"
+  _assert_eq "$_shell: no /proc and no ps: a live pid's watcher file counts (fail open)" 0 \
+    "$(_engine "$_shell" '_HOOK_WATCH_PROC=/nonexistent; PATH=/nonexistent; _hook_watch_collect; echo ${#_HOOK_WATCH_UNMET[@]}')"
+  rm -f "$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$$"
   printf '%s\n' "$DEAD_PID" >"$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$DEAD_PID"
-  _assert_eq "$_shell: no /proc and no ps: a watcher file counts (fail open)" 0 \
+  _assert_eq "$_shell: no /proc and no ps: a dead pid still never counts" 1 \
     "$(_engine "$_shell" '_HOOK_WATCH_PROC=/nonexistent; PATH=/nonexistent; _hook_watch_collect; echo ${#_HOOK_WATCH_UNMET[@]}')"
   rm -rf "$HOME/.local/state/example"
 done

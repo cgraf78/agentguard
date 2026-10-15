@@ -22,16 +22,25 @@ _HOOK_GH_PR_TOOL_DIR='git-tools/pr-watch'
 _HOOK_GH_PR_WATCH_ARGV='git-pr-watch'
 _HOOK_GH_PR_STATE_VAR='GIT_PR_WATCH_STATE'
 
-# Lowercase ASCII $2 into the variable named by $1 without a fork. Bash 4
-# lowercases in one expansion; Bash 3.2 has none, so it walks the (length-
-# capped, see _hook_gh_owner_repo_ok) name a character at a time.
+# Lowercase ASCII $2 into the variable named by $1 without a fork, as the
+# producer does (`LC_ALL=C tr`). Bash 4 lowercases in one expansion, but by
+# the caller's locale (Turkish maps `I` to a dotless `ı`), so a result that
+# is not plain ASCII falls back to the walk Bash 3.2 always uses, a
+# character at a time over the (length-capped, see _hook_gh_owner_repo_ok)
+# name.
 _hook_gh_lower() {
   # Prefixed locals: $1 names a variable in the caller's scope.
   local _lc_in="$2" _lc_out='' _lc_c _lc_i _lc_upper='ABCDEFGHIJKLMNOPQRSTUVWXYZ'
   local _lc_lower='abcdefghijklmnopqrstuvwxyz' _lc_prefix
   if [ "${BASH_VERSINFO[0]:-0}" -ge 4 ]; then
-    printf -v "$1" '%s' "${_lc_in,,}"
-    return 0
+    _lc_out="${_lc_in,,}"
+    case "$_lc_out" in
+      *[!abcdefghijklmnopqrstuvwxyz0123456789._-]*) _lc_out='' ;;
+      *)
+        printf -v "$1" '%s' "$_lc_out"
+        return 0
+        ;;
+    esac
   fi
   for ((_lc_i = 0; _lc_i < ${#_lc_in}; _lc_i++)); do
     _lc_c="${_lc_in:_lc_i:1}"
@@ -268,4 +277,64 @@ _hook_gh_push_scopes() {
     done
   done
   return 0
+}
+
+# _hook_gh_watch_chain <variable>
+#
+# pre-bash only (needs the command classifier). Store in the variable named
+# by $1 the first command in the hook's command that records or re-arms a
+# pull request (`git push`, `git pr-open|pr-submit|pr-restack|pr-sync-stack`
+# or their dashed forms, `gh pr create|new|ready|reopen|update-branch`), as a
+# short display form, and succeed; fail when there is none. A watcher chained
+# behind one of those in one tool call is killed with it in the foreground,
+# and in the background post-bash sees the call before the push or the new
+# pull request exists.
+_hook_gh_watch_chain() {
+  local fragment word sub index
+  local -a words=()
+  case "${AGENTGUARD_CMD_TRIMMED:-}" in
+    *push* | *pr-open* | *pr-submit* | *pr-restack* | *pr-sync-stack* | *gh*) ;;
+    *) return 1 ;;
+  esac
+  if [ "${_HOOK_EXECUTABLE_FRAGMENTS_CACHE_TEXT+x}" != x ] ||
+    [ "$_HOOK_EXECUTABLE_FRAGMENTS_CACHE_TEXT" != "$AGENTGUARD_CMD_TRIMMED" ]; then
+    _hook_cache_executable_fragments "$AGENTGUARD_CMD_TRIMMED"
+  fi
+  while IFS= read -r fragment; do
+    case "$fragment" in
+      *push* | *pr-open* | *pr-submit* | *pr-restack* | *pr-sync-stack*)
+        for sub in push pr-open pr-submit pr-restack pr-sync-stack; do
+          if _git_subcommand_is "$fragment" "$sub"; then
+            printf -v "$1" '%s' "git $sub"
+            return 0
+          fi
+        done
+        _fragment_command_word "$fragment" word || continue
+        word="${word##*/}"
+        case "$word" in
+          git-pr-open | git-pr-submit | git-pr-restack | git-pr-sync-stack)
+            printf -v "$1" '%s' "git ${word#git-}"
+            return 0
+            ;;
+        esac
+        ;;
+    esac
+    case "$fragment" in *gh*pr*) ;; *) continue ;; esac
+    _command_subcommand_index "$fragment" gh pr index || continue
+    words=()
+    _fragment_token_words "$fragment" words
+    for ((index++; index < ${#words[@]}; index++)); do
+      _clean_command_word "${words[index]}" word
+      case "$word" in
+        -R | --repo) index=$((index + 1)) ;;
+        -*) ;;
+        create | new | ready | reopen | update-branch)
+          printf -v "$1" '%s' "gh pr $word"
+          return 0
+          ;;
+        *) break ;;
+      esac
+    done
+  done <<<"$_HOOK_EXECUTABLE_FRAGMENTS_CACHE_VALUE"
+  return 1
 }

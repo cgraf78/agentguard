@@ -151,11 +151,14 @@ turn ends; a subagent's own Stop enforces nothing.
   `AGENTGUARD_WATCH_BLOCK=1` on Claude Code, a block replaces the reminder
   once per record, re-arm, or watcher exit: it is armed when no block was
   recorded since the key's latest record or re-arm, or when a trusted
-  `exited/<key>` is newer (by mtime) than the last block and its state is not
-  `stall`. So a red, needs-action, or killed watcher exit re-arms one block,
-  a stall never re-arms (it waits on something outside the pull request,
-  which the agent should report rather than restart a watcher for), and any
-  later Stop ends the turn. Every re-arm needs new work or a new watcher
+  `exited/<key>` is newer (by mtime) than the last block and is not a stall
+  the watcher reported (status 8, state `stall`). So a red, needs-action, or
+  killed watcher exit re-arms one block (a run killed while the pull request
+  was last judged stalled included), a reported stall never re-arms (it
+  waits on something outside the pull request, which the agent should
+  report rather than restart a watcher for), and any later Stop ends the
+  turn. The block message itself carries the Claude Code background advice,
+  so it survives a custom hint. Every re-arm needs new work or a new watcher
   run, so blocks stay bounded. An unwritable state dir degrades a block to a
   reminder. Blocks are independent of extension blocks. A `<labels>` token
   in a tool's hint is replaced by the labels the message names.
@@ -168,7 +171,14 @@ turn ends; a subagent's own Stop enforces nothing.
   not with `--help`) launched detached (`&`, nohup, setsid, disown) gets a
   warning on every runtime; one launched in the foreground on Claude Code
   without `run_in_background` gets a warning too. Both become blocks under
-  `AGENTGUARD_WATCH_BLOCK=1`.
+  `AGENTGUARD_WATCH_BLOCK=1`. Checked first: a watcher chained in one call
+  behind a command that records or re-arms (`git push`, a `git pr-*` stack
+  or create command, `gh pr create|new|ready|reopen|update-branch`, as in
+  `git push && git pr-watch --wait`) gets advice to run that command in the
+  foreground and the watcher alone in the background, a block on Claude
+  Code under `AGENTGUARD_WATCH_BLOCK=1` and a warning elsewhere: in the
+  foreground the watcher dies at the tool timeout, and in the background
+  post-bash sees the call before the push or the new pull request exists.
 - Everything fails open: unreadable or untrusted state, or an unwritable
   session dir, means less enforcement, never a stuck turn.
 
@@ -198,10 +208,12 @@ Read from the hook environment, which an agent's tool shell cannot change:
 ## Pull-request recognition (post-bash)
 
 All of this happens only after a builtin prefilter matched a command in
-command position, and only for a successful command (status 0) that the host
-did not run in the background (a Claude Code `run_in_background` call, or a
-shell Muse reports with `execution_state: "background_running"`, reports
-before the command has done anything):
+command position, and only for a successful command (status 0). A call the
+host runs in the background (a Claude Code `run_in_background` call, or a
+shell Muse reports with `execution_state: "background_running"`) reports
+before the command has done anything: it records nothing and re-arms only
+through a push, which then re-arms everything (a nuisance re-arm beats a
+missed one, and the producer's push-race guard covers an early check).
 
 - **Record**: `gh pr create` or its alias `gh pr new` (not `--dry-run`),
   `git pr-open`, or `git pr-submit` (also the dashed `git-pr-*` forms; not
@@ -275,9 +287,10 @@ watcher basename.
 - Codex subagents run as their own sessions, so their pushes are enforced at
   their own Stop, not the parent's.
 - A producer started through Claude Code's `run_in_background` is not recorded
-  as such; only its watcher files count. A pull-request creation or push run
-  that way reports to post-bash before it has run, so it neither records nor
-  re-arms.
+  as such; only its watcher files count. A pull-request creation run that
+  way reports to post-bash before it has run, so it is not recorded, and a
+  `gh pr ready|reopen|update-branch` run that way does not re-arm; a push run
+  that way re-arms everything.
 - A command that fails after pushing or printing a pull-request URL (a
   PostToolUseFailure event) neither records nor re-arms. Muse reports every
   failed command that way (its `error` string carries the result), so

@@ -1401,12 +1401,25 @@ case "$-" in
     # Codex keeps long processes as polled sessions. A detached run is wrong
     # everywhere. Advice by default; AGENTGUARD_WATCH_BLOCK=1 blocks instead.
     _pre_bash_watch_advice() {
-      local agent message=''
+      local agent message='' chain='' block=1
       _hook_flag_disabled "${AGENTGUARD_WATCH:-}" && return 0
-      _hook_load_watch || return 0
+      _hook_load_watch_github || return 0
       _hook_watch_launch '--wait|-w' git pr-watch || return 0
       _hook_agent_name agent
-      if [ "$_HOOK_WATCH_DETACHED" = 1 ]; then
+      # A push or pull-request creation chained with the watcher in one call
+      # is checked first: in the foreground the watcher dies at the tool
+      # timeout, and in the background post-bash sees the call before the
+      # push lands, so nothing is recorded or re-armed. Blocks only on
+      # Claude Code, whose payload says how the call runs.
+      if _hook_gh_watch_chain chain; then
+        # shellcheck disable=SC2016 # Backticks are literal Markdown for the agent.
+        if [ "$agent" = claude ]; then
+          message="run \`$chain\` in the foreground first, then \`git pr-watch --wait\` as its own Bash call with run_in_background: true. In the foreground the watcher is killed at the tool timeout, and in the background the push runs after this hook has already checked it, so it is neither recorded nor re-armed."
+        else
+          block=0
+          message="run \`$chain\` first, then \`git pr-watch --wait\` as its own call, using your shell tool's background or yield option. Chained into one call, the watcher holds the call open, so the push or new pull request is seen only when the watcher ends, too late to be recorded or re-armed."
+        fi
+      elif [ "$_HOOK_WATCH_DETACHED" = 1 ]; then
         # The remedy is the runtime's own background execution. Muse refuses
         # a bare `&` and suggests `setsid -f`, which detaches just the same.
         # shellcheck disable=SC2016 # Backticks are literal Markdown for the agent.
@@ -1419,11 +1432,11 @@ case "$-" in
       else
         if [ "$agent" = claude ] && ! _hook_tool_runs_in_background; then
           # shellcheck disable=SC2016 # Backticks are literal Markdown for the agent.
-          message='run `git pr-watch --wait` with run_in_background: true. A foreground Bash call is killed at its timeout long before the watch ends, so watching would silently stop. Rerun the same command in the background, then act on its result when the completion notification arrives.'
+          message='run `git pr-watch --wait` with run_in_background: true. A foreground Bash call is killed at its timeout long before the watch ends, so watching would silently stop. Rerun the watcher alone in the background, then act on its result when the completion notification arrives.'
         fi
       fi
       [ -n "$message" ] || return 0
-      if _hook_flag_enabled "${AGENTGUARD_WATCH_BLOCK:-}"; then
+      if [ "$block" = 1 ] && _hook_flag_enabled "${AGENTGUARD_WATCH_BLOCK:-}"; then
         _hook_block "$message"
       else
         _hook_warn "$message"

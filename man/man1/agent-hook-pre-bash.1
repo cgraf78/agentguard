@@ -61,6 +61,10 @@ and, on Claude Code, when it runs in the foreground without
 either way nobody receives the watcher's result, while its watcher file still
 satisfies
 .BR agent-hook-stop (1).
+A watcher chained in one call behind a push or pull-request creation (as in
+.BR "git push && git pr-watch \-\-wait" )
+gets advice to run the push first and the watcher alone in the background:
+chained, the push is never recorded or re-armed.
 .PP
 The hook is agent-agnostic. Launchers identify the concrete runtime with
 .B AGENTGUARD_NAME
