@@ -192,9 +192,11 @@ _hook_watch_roots() {
 # argv[0] or argv[1] (a script may run as `bash /path/<name> ...`). A pid in a
 # watcher file can be reused after a crash, so liveness alone is not enough.
 # Linux reads argv from /proc with builtins; elsewhere `ps` prints the joined
-# command line, matched so a path containing spaces still works.
+# command line, matched so a path containing spaces still works. Termux runs
+# programs through Android's dynamic linker (argv[0] `linker64`), which is
+# skipped so the words after it count as argv[0] and argv[1].
 _hook_watch_pid_runs() {
-  local pid="$1" name="$2" argv0='' argv1='' command
+  local pid="$1" name="$2" argv0='' argv1='' argv2='' command
   case "$pid" in
     '' | 0* | *[!0-9]*) return 1 ;;
   esac
@@ -203,7 +205,14 @@ _hook_watch_pid_runs() {
     {
       IFS= read -r -d '' argv0 || true
       IFS= read -r -d '' argv1 || true
+      IFS= read -r -d '' argv2 || true
     } 2>/dev/null <"/proc/$pid/cmdline" || return 1
+    case "${argv0##*/}" in
+      linker | linker64)
+        argv0="$argv1"
+        argv1="$argv2"
+        ;;
+    esac
     [ "${argv0##*/}" = "$name" ] || [ "${argv1##*/}" = "$name" ]
     return
   fi

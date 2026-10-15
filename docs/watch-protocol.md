@@ -69,7 +69,9 @@ process's argv[0] or argv[1] has the recorded basename (a script may run as
 `bash /path/git-pr-watch ...`). On Linux, argv comes from
 `/proc/<pid>/cmdline` with shell builtins; elsewhere from
 `ps -o command= -p <pid>`, matched so a path containing spaces still works.
-A pid reused after a crash therefore does not count.
+On Termux, which runs programs through Android's dynamic linker, a leading
+`linker`/`linker64` argv[0] is skipped first. A pid reused after a crash
+therefore does not count.
 
 Per the producer contract, the engine lists `watchers/` before reading
 `done/`, and lists it once more when neither showed anything, because a
