@@ -263,6 +263,6 @@ watcher basename.
   `AGENTGUARD_WATCH_BLOCK=1` for a model-visible Stop.
 - Launch advice is a heuristic: it does not see a detached watcher inside
   `bash -c '...'` or `{ ...; } &`, and an `&` inside `$(...)` or ANSI-C
-  quoting on the launch line can read as backgrounding, as can any `&` on a
-  launch line over 8 KiB (read without unquoting to stay inside the
-  classification deadline).
+  quoting on the launch line can read as backgrounding. A launch line over
+  8 KiB is not checked for `&` at all (fail open, to stay inside the
+  classification deadline); nohup, setsid, and disown are still seen.

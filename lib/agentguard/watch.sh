@@ -687,21 +687,19 @@ _hook_watch_unquoted() {
 # its simple command with a `$2` word, so `echo pr-watch &` does not count.
 # A lone `&` anywhere in the rest of its and-or list (up to `;` or the line's
 # end, ignoring `&&`, `>&`, `&>`, `<&`, and `|&`) backgrounds the whole list.
-# Lines without both the name and an `&` are skipped unmasked, and a line
-# over 8 KiB is read raw: masking is linear in its quotes and backslashes
-# but each costs a copy of the rest, and pre-bash must stay inside its
-# classification deadline. An `&` inside `bash -c '...'`, `$(...)`,
+# Lines without both the name and an `&` are skipped unmasked, and so is a
+# line over 8 KiB: masking costs a copy of the rest of the line per quote or
+# backslash, pre-bash must stay inside its classification deadline, and
+# reading it raw could turn a quoted `&` into a false block. Skipping fails
+# open (nohup, setsid, and disown are still seen). An `&` inside `bash -c '...'`, `$(...)`,
 # `{ ...; } &`, or ANSI-C quoting is not modeled.
 _hook_watch_text_detaches() {
   local needle="$1" command="${2:-}" line rest before simple seg LC_ALL=C
   while IFS= read -r line; do
     case "$line" in *"$needle"*) ;; *) continue ;; esac
     case "$line" in *'&'*) ;; *) continue ;; esac
-    if [ "${#line}" -gt 8192 ]; then
-      rest="$line"
-    else
-      _hook_watch_unquoted "$line" rest
-    fi
+    [ "${#line}" -le 8192 ] || continue
+    _hook_watch_unquoted "$line" rest
     while :; do
       case "$rest" in *"$needle"*) ;; *) break ;; esac
       before="${rest%%"$needle"*}"

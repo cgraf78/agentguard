@@ -349,6 +349,7 @@ _assert_eq "git pr-restack --no-push" "" "$(_push_rearms "git pr-restack --no-pu
 _assert_eq "git pr-restack -n" "" "$(_push_rearms "git pr-restack -n 12" "$_ff")"
 _assert_eq "stack tool with nothing to push" "" "$(_push_rearms "git pr-sync-stack" "Nothing to sync.")"
 _assert_eq "stack tool with redirected output" "o_r_12 x_y_5 " "$(_push_rearms "git pr-sync-stack >/dev/null 2>&1" "")"
+_assert_eq "restack with stderr redirected" "o_r_12 x_y_5 " "$(_push_rearms "git pr-restack 12 2>/dev/null" "")"
 _assert_eq "push run in the background" "" "$(
   _new_sid
   _seed_key o_r_12 1000 o_r
@@ -710,11 +711,15 @@ WATCH_ENV=()
 # used to be quadratic in the line's length).
 _long=$(printf 'a%.0s' $(seq 1 60000))
 _started=$SECONDS
-_assert_eq "60 KB launch line with an &" "0 detached" "$(_launch claude "git pr-watch --wait $_long 'x&y' &" true)"
+_assert_eq "60 KB launch line with an &: not judged (fails open)" "0 none" "$(_launch claude "git pr-watch --wait $_long 'x&y' &" true)"
 _assert_eq "60 KB launch line: finishes in under 20 seconds" 1 "$((SECONDS - _started < 20))"
+_assert_eq "60 KB launch line behind nohup: still detached" "0 detached" \
+  "$(_launch claude "nohup git pr-watch --wait $_long" true)"
+_mid=$(printf "'a'%.0s" $(seq 1 2000))
+_assert_eq "6 KB quote-dense launch line with an &: judged" "0 detached" "$(_launch claude "git pr-watch --wait 1 $_mid &" true)"
 _quotes=$(printf "'a'%.0s" $(seq 1 20000))
 _started=$SECONDS
-_assert_eq "60 KB quote-dense launch line with an &" "0 detached" "$(_launch claude "git pr-watch --wait 1 $_quotes &" true)"
+_assert_eq "60 KB quote-dense launch line with an &: not judged (fails open)" "0 none" "$(_launch claude "git pr-watch --wait 1 $_quotes &" true)"
 _assert_eq "60 KB quote-dense launch line: finishes in under 20 seconds" 1 "$((SECONDS - _started < 20))"
 
 echo ""
