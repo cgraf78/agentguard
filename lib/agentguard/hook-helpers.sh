@@ -1422,13 +1422,41 @@ _hook_parse_command() {
   _hook_export_if_fits AGENTGUARD_CMD_TRIMMED AGENTGUARD_CMD_LINE1
 }
 
+# jq definitions shared by the tool payload adapters. Codex reports a shell
+# call's result as one plain string in tool_response (stdout and stderr
+# combined). Muse also sends a string, but one holding a JSON envelope whose
+# `output` is the combined text and whose `exit_code` / `terminal_status`
+# carry the result. A Codex command can print text shaped like that envelope,
+# so unwrapping needs both the detected runtime (`$agent`, passed with --arg)
+# and the envelope's shape; anything else is taken as the raw string.
+# shellcheck disable=SC2016 # jq variables, expanded by jq.
+_HOOK_TOOL_RESPONSE_JQ='
+  def muse_envelope:
+    fromjson? | objects
+    | select(has("output") and (has("exit_code") or has("terminal_status")));
+  # The combined output string, unwrapped from a Muse envelope.
+  def combined_output:
+    .tool_response? | strings
+    | if $agent == "muse" then (muse_envelope | .output | strings) // . else . end;
+  # The Muse envelope object, or nothing.
+  def muse_result:
+    if $agent == "muse" then .tool_response? | strings | muse_envelope else empty end;
+'
+
 # Extracts shell stdout from PostToolUse-style payloads. Claude Code uses
 # tool_response.stdout; other hook runners have used adjacent result/output
-# object names, so keep the base post-bash scanner wired through this adapter
-# instead of reading a Claude-shaped field directly.
+# object names, and Codex and Muse send one combined string (see
+# _HOOK_TOOL_RESPONSE_JQ), so keep the base post-bash scanner wired through
+# this adapter instead of reading a Claude-shaped field directly.
+#
+# The runtime lookup is cached per process, so a caller running this inside
+# `$(...)` should resolve _hook_agent_name in its own shell first; otherwise
+# the lookup forks again and its answer dies with the subshell.
 _hook_tool_stdout() {
   _hook_read_input || return 0
-  printf '%s' "$_HOOK_INPUT" | jq -r '
+  local _tool_stdout_agent
+  _hook_agent_name _tool_stdout_agent
+  printf '%s' "$_HOOK_INPUT" | jq -r --arg agent "$_tool_stdout_agent" "$_HOOK_TOOL_RESPONSE_JQ"'
     def text_value(v):
       if (v | type) == "string" then v else empty end;
     [
@@ -1438,9 +1466,23 @@ _hook_tool_stdout() {
       text_value(.tool_output.stdout?),
       text_value(.response.stdout?),
       text_value(.result.stdout?),
-      text_value(.stdout?)
+      text_value(.stdout?),
+      combined_output
     ] | map(select(. != "")) | .[0] // empty
   ' 2>/dev/null
+}
+
+# Succeeds when the payload's tool_response is a JSON string, the combined
+# stdout+stderr shape Codex and Muse send, which _hook_tool_stdout already
+# returns whole. Builtin, so a caller can skip _hook_tool_stderr's subshell
+# and jq. An unescaped `"tool_response"` followed by `:` can only be an object
+# key: inside a JSON string its quotes would be escaped.
+_hook_tool_response_is_string() {
+  _hook_read_input || return 1
+  # C locale: byte matching, several times faster than multibyte on large
+  # payloads.
+  local LC_ALL=C
+  [[ "$_HOOK_INPUT" =~ \"tool_response\"[[:space:]]*:[[:space:]]*\" ]]
 }
 
 # Extracts shell stderr from PostToolUse-style payloads, mirroring
@@ -1705,8 +1747,9 @@ _hook_hm_prompt_text() {
 
 _hook_hm_tool_status() {
   _hook_hm_read_input
-  local status
-  status=$(printf '%s' "${_HOOK_INPUT:-}" | jq -r '
+  local status _status_agent
+  _hook_agent_name _status_agent
+  status=$(printf '%s' "${_HOOK_INPUT:-}" | jq -r --arg agent "$_status_agent" "$_HOOK_TOOL_RESPONSE_JQ"'
     def status_code(v):
       if v == null then empty
       elif (v | type) == "number" then v
@@ -1719,12 +1762,22 @@ _hook_hm_tool_status() {
       elif (v | type) == "boolean" then
         if v then 1 else 0 end
       else empty end;
-    .tool_response.exit_code
-    // .tool_response.status
-    // .tool_result.exit_code
-    // .tool_result.status
-    // .toolResult.exit_code
-    // .toolResult.status
+    # A Muse call that ended without an exit code (cancelled, timed out,
+    # or failed to start) still did not succeed.
+    def muse_status:
+      muse_result
+      | if .exit_code != null then .exit_code
+        elif has("terminal_status") and .terminal_status != "completed" then 1
+        else empty end;
+    # `?` on the object lookups: a string tool_response (Codex, Muse) has no
+    # fields, and an unguarded lookup would fail the whole program.
+    muse_status
+    // .tool_response.exit_code?
+    // .tool_response.status?
+    // .tool_result.exit_code?
+    // .tool_result.status?
+    // .toolResult.exit_code?
+    // .toolResult.status?
     // .tool_result_is_error
     // .status
     // 0
@@ -2519,6 +2572,12 @@ _hook_hm_context_reset() {
 # Optional $1 overrides the derived status, for hooks that already know
 # whether the tool call failed in a runtime-specific shape.
 _hook_hm_tool_complete() {
+  local _complete_agent
+  # _hook_hm_tool_status reads the runtime inside the `$(...)` below, where a
+  # cache miss would fork and its answer would die with the subshell. Every
+  # hook resolves the runtime in this shell anyway (_hook_source_extensions),
+  # so resolving it here first costs nothing.
+  [ -n "${1:-}" ] || _hook_agent_name _complete_agent
   _hook_hm_event tool-complete --status "${1:-$(_hook_hm_tool_status)}"
 }
 

@@ -164,6 +164,87 @@ for _attempt in first second; do
   fi
 done
 
+echo ""
+echo "=== post-bash: PR checks gate from Codex and Muse payloads ==="
+
+# Codex sends a shell call's combined output as one string; Muse sends a
+# string holding a JSON envelope with the output and the call's result.
+_push_summary='To github.com:o/r.git
+   24a0da7..82fd152  main -> main'
+
+# Payload whose tool_response is the given string.
+_string_payload() {
+  jq -nc --arg cmd "$1" --arg resp "$2" '{tool_input:{command:$cmd},tool_response:$resp}'
+}
+
+# Prints a Muse-style envelope string around output and result fields.
+_muse_envelope() {
+  jq -nc --arg out "$1" --argjson fields "$2" '{command:"run", output:$out} + $fields'
+}
+
+_expect_agent() {
+  local expect="$1" agent="$2" desc="$3" payload="$4"
+  _run_case "$agent" "$payload"
+  _assert_eq "$desc: exits 0" "0" "$HOOK_EXIT"
+  if [ "$expect" = reminder ]; then
+    _assert_contains "$desc: reminds" "$GATE" "$(_context)"
+  else
+    _assert_not_contains "$desc: no reminder" "$GATE" "$HOOK_STDOUT"
+  fi
+}
+
+_ok='{"exit_code":0,"terminal_status":"completed"}'
+_expect_agent reminder codex "codex push summary string" \
+  "$(_string_payload "./scripts/release.sh" "$_push_summary")"
+_expect_agent reminder muse "muse push summary envelope" \
+  "$(_string_payload "./scripts/release.sh" "$(_muse_envelope "$_push_summary" "$_ok")")"
+_expect_agent quiet muse "muse failed push summary envelope" \
+  "$(_string_payload "./scripts/release.sh" "$(_muse_envelope "$_push_summary" '{"exit_code":1,"terminal_status":"failed"}')")"
+_expect_agent quiet muse "muse cancelled push without exit_code" \
+  "$(_string_payload "./scripts/release.sh" "$(_muse_envelope "$_push_summary" '{"terminal_status":"cancelled"}')")"
+_expect_agent quiet muse "muse failed git push command" \
+  "$(_string_payload "git push origin main" "$(_muse_envelope "" '{"exit_code":1,"terminal_status":"failed"}')")"
+_expect_agent reminder muse "muse git push command" \
+  "$(_string_payload "git push origin main" "$(_muse_envelope "" "$_ok")")"
+# Codex output never carries a status: envelope-shaped text is just output.
+_expect_agent reminder codex "codex git push printing failure-shaped JSON" \
+  "$(_string_payload "git push origin main" "$(_muse_envelope "" '{"exit_code":1,"terminal_status":"failed"}')")"
+
+# A combined string already holds the push summary, so the hook skips the
+# stderr adapter's jq that an object payload with the summary on stderr needs.
+# Runs one case and stores its jq call count in JQ_CALLS (not printed: a
+# `$(...)` caller would lose the hook output and the case counter).
+_count_jq() {
+  local agent="$1" payload="$2" mock_bin="$TEST_TMPDIR/pr-checks-jq-bin" real_jq
+  real_jq=$(type -P jq)
+  mkdir -p "$mock_bin"
+  # shellcheck disable=SC2016 # expanded by the mock script.
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "jq\n" >>"$PR_CHECKS_JQ_LOG"' \
+    'exec "$PR_CHECKS_REAL_JQ" "$@"' >"$mock_bin/jq"
+  chmod +x "$mock_bin/jq"
+  : >"$TEST_TMPDIR/pr-checks-jq.log"
+  _case_seq=$((_case_seq + 1))
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    AGENTGUARD_SESSION_ID="$TEST_SID-pr-$_case_seq"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="$agent"
+    CODEX_THREAD_ID=
+    PATH="$mock_bin:$PATH"
+    PR_CHECKS_JQ_LOG="$TEST_TMPDIR/pr-checks-jq.log"
+    PR_CHECKS_REAL_JQ="$real_jq"
+  )
+  _run_hook_env "$POST_BASH" "$payload"
+  JQ_CALLS=$(wc -l <"$TEST_TMPDIR/pr-checks-jq.log" | tr -d ' ')
+}
+_count_jq codex "$(_payload "./scripts/release.sh" "" 0 "$_push_summary")"
+_assert_contains "object push summary on stderr: reminds" "$GATE" "$(_context)"
+_object_jq=$JQ_CALLS
+_count_jq codex "$(_string_payload "./scripts/release.sh" "$_push_summary")"
+_assert_contains "string push summary: reminds" "$GATE" "$(_context)"
+_assert_eq "string push summary: skips the stderr jq" \
+  "$((_object_jq - 1))" "$JQ_CALLS"
+
 for _agent in codex muse; do
   _run_case "$_agent" "$(_payload "git push origin main")"
   _assert_contains "$_agent: reminder in additionalContext" "$GATE" "$(_context)"

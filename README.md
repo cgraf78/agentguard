@@ -432,7 +432,10 @@ To add a new managed agent runtime:
   URL (pushes run through a script or terminal multiplexer), it reminds once
   per prompt that the pull request is not done until its checks pass on the
   pushed commit. Output extraction is centralized so agent-specific payload
-  names do not leak into the base hook.
+  names do not leak into the base hook: it reads Claude-style output objects,
+  Codex's combined output string, and Muse's JSON output envelope (unwrapped
+  only when the detected runtime is Muse, whose `exit_code` or non-completed
+  `terminal_status` also decides whether the command succeeded).
 - `agent-hook-pre-edit` parses edited paths, blocks edits to secret and
   credential files (such as `.env`, SSH keys, `*.pem`, `credentials`, and
   `.netrc`), reminds once per user prompt on

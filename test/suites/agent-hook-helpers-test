@@ -1295,6 +1295,44 @@ _assert_contains "hm hook: tool-complete maps MCP error boolean to nonzero" \
 _assert_not_contains "hm hook: MCP tool-complete skips project argument" \
   "--project" "$(cat "$HM_LOG")"
 
+# Shell results per runtime shape. Muse sends a JSON envelope string whose
+# exit_code (or a non-completed terminal_status without one) is the result;
+# Codex sends plain output text, so envelope-shaped Codex output is not a
+# status. Fixtures are synthetic.
+_hm_status_envelope() {
+  jq -nc --argjson fields "$1" '{tool_input:{command:"run"},
+    tool_response:({command:"run", output:"text"} + $fields | tojson)}'
+}
+while IFS='|' read -r hm_status_agent hm_status_expected hm_status_desc hm_status_payload; do
+  : >"$HM_LOG"
+  HOME="$HM_HOME" \
+    PATH="$HM_BIN:$PATH" \
+    TMPDIR="$HM_TMP" \
+    HM_LOG="$HM_LOG" \
+    AGENTGUARD_HIVE_MEMORY_HOOKS=1 \
+    AGENTGUARD_NAME="$hm_status_agent" \
+    CODEX_THREAD_ID="" \
+    AGENTGUARD_SESSION_ID="hm-status-session" \
+    bash -c '
+      source "$1"
+      _HOOK_INPUT=$2
+      _hook_hm_tool_complete
+    ' _ "$HELPERS" "$hm_status_payload" >/dev/null 2>/dev/null
+  _assert_contains "hm hook: tool-complete status for $hm_status_desc" \
+    "args=hook tool-complete --json --status $hm_status_expected" "$(cat "$HM_LOG")"
+done <<EOF
+muse|0|muse completed envelope|$(_hm_status_envelope '{"exit_code":0,"terminal_status":"completed"}')
+muse|2|muse failed envelope exit code|$(_hm_status_envelope '{"exit_code":2,"terminal_status":"failed"}')
+muse|1|muse cancelled envelope without exit_code|$(_hm_status_envelope '{"terminal_status":"cancelled"}')
+muse|1|muse failed envelope with null exit_code|$(_hm_status_envelope '{"exit_code":null,"terminal_status":"failed"}')
+muse|0|muse completed envelope without exit_code|$(_hm_status_envelope '{"terminal_status":"completed"}')
+muse|0|muse string without result fields|$(_hm_status_envelope '{}')
+muse|0|muse plain string|{"tool_response":"plain text"}
+codex|0|codex failure-shaped output text|$(_hm_status_envelope '{"exit_code":2,"terminal_status":"failed"}')
+codex|0|codex plain string|{"tool_response":"plain text"}
+claude|3|claude object exit code|{"tool_response":{"stdout":"","exit_code":3}}
+EOF
+
 : >"$HM_LOG"
 HOME="$HM_HOME" \
   PATH="$HM_BIN:$PATH" \
