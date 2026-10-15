@@ -682,23 +682,41 @@ _hook_watch_unquoted() {
 # Whether the hook's command backgrounds a command named by $1 with a lone
 # `&`. Executable fragments drop that operator, so this reads the masked
 # text. Only a command-word occurrence counts (one that starts at a word,
-# `/`, or `-` boundary and ends at whitespace: `pr-watch.log` is a file), and
-# a lone `&` anywhere in the rest of its and-or list (up to `;` or the line's
+# `/`, or `-` boundary and ends at whitespace: `pr-watch.log` is a file);
+# when $1 is a subcommand of command $2, it must also follow `$2-` or share
+# its simple command with a `$2` word, so `echo pr-watch &` does not count.
+# A lone `&` anywhere in the rest of its and-or list (up to `;` or the line's
 # end, ignoring `&&`, `>&`, `&>`, `<&`, and `|&`) backgrounds the whole list.
-# Lines without both the name and an `&` are skipped unmasked. An `&` inside
-# `bash -c '...'`, `{ ...; } &`, and ANSI-C quoting are not modeled.
+# Lines without both the name and an `&` are skipped unmasked, and a line
+# over 8 KiB is read raw: masking is linear in its quotes and backslashes
+# but each costs a copy of the rest, and pre-bash must stay inside its
+# classification deadline. An `&` inside `bash -c '...'`, `$(...)`,
+# `{ ...; } &`, or ANSI-C quoting is not modeled.
 _hook_watch_text_detaches() {
-  local needle="$1" line rest before seg LC_ALL=C
+  local needle="$1" command="${2:-}" line rest before simple seg LC_ALL=C
   while IFS= read -r line; do
     case "$line" in *"$needle"*) ;; *) continue ;; esac
     case "$line" in *'&'*) ;; *) continue ;; esac
-    _hook_watch_unquoted "$line" rest
+    if [ "${#line}" -gt 8192 ]; then
+      rest="$line"
+    else
+      _hook_watch_unquoted "$line" rest
+    fi
     while :; do
       case "$rest" in *"$needle"*) ;; *) break ;; esac
       before="${rest%%"$needle"*}"
       rest="${rest:${#before}+${#needle}}"
       case "$rest" in '' | [[:space:]]*) ;; *) continue ;; esac
       case "$before" in '' | *[[:space:]/\(-]) ;; *) continue ;; esac
+      if [ -n "$command" ]; then
+        case "$before" in
+          *"$command-") ;;
+          *)
+            simple="${before##*[;&|(]}"
+            case " $simple" in *[[:space:]/]"$command "*) ;; *) continue ;; esac
+            ;;
+        esac
+      fi
       seg="${rest%%;*}"
       seg="${seg//'&&'/}"
       seg="${seg//'>&'/}"
@@ -716,7 +734,9 @@ _hook_watch_text_detaches() {
 # (or of the subcommand) in _HOOK_WATCH_START. Only the fragment's command
 # word counts, so `echo git pr-watch --wait` is not a launch: the classifier
 # resolves it behind its usual wrappers (env, nohup, timeout, sudo), and this
-# also skips the wrappers it keeps as the command word (setsid, stdbuf).
+# also skips the wrappers it keeps as the command word (setsid, stdbuf,
+# caffeinate) and accepts an interpreter running the command's script
+# (`bash /path/git-pr-watch`).
 _hook_watch_command_start() {
   local fragment="$1" command="$2" sub="${3:-}" k n word
   n="${#_HOOK_WATCH_WORDS[@]}"
@@ -737,6 +757,32 @@ _hook_watch_command_start() {
             *) break ;;
           esac
         done
+        ;;
+      caffeinate)
+        k=$((k + 1))
+        while [ "$k" -lt "$n" ]; do
+          _clean_command_word "${_HOOK_WATCH_WORDS[k]}" word
+          case "$word" in
+            -w | -t) k=$((k + 2)) ;;
+            -*) k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done
+        ;;
+      bash | sh | zsh | dash)
+        # An explicit interpreter running the command's script. A `-c`
+        # payload is a nested command the classifier already splits out.
+        k=$((k + 1))
+        while [ "$k" -lt "$n" ]; do
+          _clean_command_word "${_HOOK_WATCH_WORDS[k]}" word
+          case "$word" in
+            -c | -*c*) return 1 ;;
+            -o | +o) k=$((k + 2)) ;;
+            -* | +*) k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done
+        break
         ;;
       stdbuf)
         k=$((k + 1))
@@ -829,7 +875,7 @@ _hook_watch_launch() {
     done
   done <<<"$_HOOK_EXECUTABLE_FRAGMENTS_CACHE_VALUE"
   [ "$found" = 1 ] || return 1
-  if [ "$detached" = 1 ] || _hook_watch_text_detaches "$needle"; then
+  if [ "$detached" = 1 ] || _hook_watch_text_detaches "$needle" "${sub:+$command}"; then
     _HOOK_WATCH_DETACHED=1
   fi
   return 0

@@ -348,6 +348,7 @@ _assert_eq "git pr-sync-stack" "o_r_12 " "$(_push_rearms "git pr-sync-stack" "$_
 _assert_eq "git pr-restack --no-push" "" "$(_push_rearms "git pr-restack --no-push 12" "$_ff")"
 _assert_eq "git pr-restack -n" "" "$(_push_rearms "git pr-restack -n 12" "$_ff")"
 _assert_eq "stack tool with nothing to push" "" "$(_push_rearms "git pr-sync-stack" "Nothing to sync.")"
+_assert_eq "stack tool with redirected output" "o_r_12 x_y_5 " "$(_push_rearms "git pr-sync-stack >/dev/null 2>&1" "")"
 _assert_eq "push run in the background" "" "$(
   _new_sid
   _seed_key o_r_12 1000 o_r
@@ -687,7 +688,13 @@ for _case in \
   "claude^git pr-watch --wait 12 && echo ok &^true^0 detached" \
   "claude^sleep 1 & disown; git pr-watch --wait 12^true^0 none" \
   "claude^stdbuf -oL git pr-watch --wait 12^false^0 foreground" \
-  "claude^env A=1 nohup git-pr-watch --wait 12^true^0 detached"; do
+  "claude^env A=1 nohup git-pr-watch --wait 12^true^0 detached" \
+  "claude^bash /opt/git-tools/bin/git-pr-watch --wait 12^false^0 foreground" \
+  "claude^nohup bash git-pr-watch --wait 12 &^true^0 detached" \
+  "claude^bash -c 'git pr-watch --wait 12'^false^0 foreground" \
+  "claude^bash -n /opt/other-script --wait^false^0 none" \
+  "claude^caffeinate -i -t 600 git pr-watch --wait 12^false^0 foreground" \
+  "claude^echo pr-watch & git pr-watch --wait 1^true^0 none"; do
   IFS='^' read -r _agent _cmd _bg _want <<<"$_case"
   _assert_eq "$_agent '$_cmd' bg=$_bg" "$_want" "$(_launch "$_agent" "$_cmd" "$_bg")"
 done
@@ -705,6 +712,10 @@ _long=$(printf 'a%.0s' $(seq 1 60000))
 _started=$SECONDS
 _assert_eq "60 KB launch line with an &" "0 detached" "$(_launch claude "git pr-watch --wait $_long 'x&y' &" true)"
 _assert_eq "60 KB launch line: finishes in under 20 seconds" 1 "$((SECONDS - _started < 20))"
+_quotes=$(printf "'a'%.0s" $(seq 1 20000))
+_started=$SECONDS
+_assert_eq "60 KB quote-dense launch line with an &" "0 detached" "$(_launch claude "git pr-watch --wait 1 $_quotes &" true)"
+_assert_eq "60 KB quote-dense launch line: finishes in under 20 seconds" 1 "$((SECONDS - _started < 20))"
 
 echo ""
 echo "=== engine API: a second tool with neutral keys ==="
@@ -794,6 +805,12 @@ for _bad in http://user@github.com/o/r/pull/1 https://github.com:8443/o/r/pull/1
 done
 _assert_eq "watch-github: push scopes ALL for no output" "ALL" \
   "$(_engine bash "source '$WATCH_GH_LIB'; _hook_gh_push_scopes '' 'git push'")"
+_assert_eq "watch-github: wrapper with blank output re-arms ALL" "ALL" \
+  "$(_engine bash "source '$WATCH_GH_LIB'; _hook_gh_push_scopes ' ' 'ship-it'")"
+_assert_eq "watch-github: wrapper with other output re-arms nothing" "" \
+  "$(_engine bash "source '$WATCH_GH_LIB'; _hook_gh_push_scopes 'Nothing to ship.' 'ship-it'")"
+_assert_eq "watch-github: push command with other output re-arms ALL" "ALL" \
+  "$(_engine bash "source '$WATCH_GH_LIB'; _hook_gh_push_scopes 'Pushing...' 'tool push'")"
 _assert_eq "watch-github: inert command" "" \
   "$(_engine bash "source '$WATCH_GH_LIB'; _hook_gh_push_scopes '' 'git push --dry-run'")"
 

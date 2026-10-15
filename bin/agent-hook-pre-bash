@@ -525,7 +525,7 @@ case "$-" in
           coproc | time | command | builtin | nohup | nice | timeout | xargs)
           return 0
           ;;
-        *pr-watch | setsid | stdbuf)
+        *pr-watch | setsid | stdbuf | caffeinate)
           # A `git-pr-watch` launch needs the classifier to see how it runs
           # (`git pr-watch` already goes there as a git command), and so does
           # one behind a wrapper the classifier keeps as the command word.

@@ -189,9 +189,11 @@ done anything):
   - counted scopes that match recorded scopes re-arm those; a counted block
     matching none re-arms recorded scopes ending in `_<repository>` (a fork
     keeps the repository name);
-  - a successful `git push` with no `To` block and no `Everything up-to-date`
-    (a quiet or redirected push) re-arms everything; a stack command that
-    printed no `To` block had nothing to push and re-arms nothing;
+  - with no `To` block and no `Everything up-to-date`, a successful command
+    with blank output (a quiet or redirected push or stack command) re-arms
+    everything, and so does a `git push` with other output; a stack command
+    that printed something else (it said it had nothing to push) re-arms
+    nothing;
   - up-to-date, rejected-only, tag-only, and failed pushes re-arm nothing.
 - **Reminder**: one per post-bash call. Whenever it recorded or re-armed, it
   recommends `git pr-watch --wait <labels>`, one command per repository
@@ -216,7 +218,7 @@ instead of exiting, run under Bash 3.2, and are `set -u` clean.
 | `_hook_watch_claim_block <tool-dir> <key>` | claims the one Stop block per submit or watcher exit |
 | `_hook_watch_launch <option> <command> [<subcommand>]` | pre-bash only (needs the command classifier): whether the command runs a watcher with `<option>`; sets `_HOOK_WATCH_DETACHED` |
 | `_hook_gh_pr_key_scope <url>` | prints `<key> <scope>` for a pull-request URL and sets `_HOOK_GH_PR_KEY`, `_HOOK_GH_PR_SCOPE`, `_HOOK_GH_PR_NUMBER` |
-| `_hook_gh_push_scopes <output> <command>` | prints the recorded scopes a successful push re-arms, `ALL`, or nothing |
+| `_hook_gh_push_scopes <output> <command>` | prints the recorded scopes a successful push re-arms, `ALL`, or nothing. `<command>` decides two things: a dry-run, delete, `--no-push`, or help word means nothing re-arms, and only a command with a `push` word re-arms `ALL` when it printed output but no `To` block (blank output re-arms `ALL` for any command) |
 
 An extension that wraps pull-request creation records with
 `_hook_gh_pr_key_scope` plus
@@ -261,4 +263,6 @@ watcher basename.
   `AGENTGUARD_WATCH_BLOCK=1` for a model-visible Stop.
 - Launch advice is a heuristic: it does not see a detached watcher inside
   `bash -c '...'` or `{ ...; } &`, and an `&` inside `$(...)` or ANSI-C
-  quoting on the launch line can read as backgrounding.
+  quoting on the launch line can read as backgrounding, as can any `&` on a
+  launch line over 8 KiB (read without unquoting to stay inside the
+  classification deadline).

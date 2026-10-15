@@ -176,9 +176,11 @@ _hook_gh_push_command_inert() {
 #     the one place a scope is compared by part, so it can also re-arm a
 #     recorded scope whose repository name merely ends that way, and a
 #     renamed repository is a documented gap;
-#   - a push command (one with a `push` word) that printed no `To` block and
-#     no `Everything up-to-date` (a quiet or redirected push) re-arms ALL;
-#     any other command (a stack tool with nothing to push) re-arms nothing;
+#   - with no `To` block and no `Everything up-to-date`, blank output (a
+#     quiet or redirected push, from any command) re-arms ALL, and so does
+#     other output from a command with a `push` word; other output from any
+#     other command (a stack tool saying it had nothing to push) re-arms
+#     nothing;
 #   - an up-to-date, rejected-only, or tag-only push re-arms nothing.
 # The caller checks the push succeeded; a failed push never re-arms.
 _hook_gh_push_scopes() {
@@ -210,7 +212,11 @@ _hook_gh_push_scopes() {
     pushed="$pushed $scope/$_HOOK_GH_PUSH_REPO "
   fi
   if [ "$blocks" = 0 ]; then
-    [ "$uptodate" = 1 ] || [ "$_HOOK_GH_PUSH_WORD" = 0 ] || printf 'ALL\n'
+    [ "$uptodate" = 0 ] || return 0
+    case "$output" in
+      *[![:space:]]*) [ "$_HOOK_GH_PUSH_WORD" = 0 ] || printf 'ALL\n' ;;
+      *) printf 'ALL\n' ;;
+    esac
     return 0
   fi
   [ -n "$pushed" ] || return 0
