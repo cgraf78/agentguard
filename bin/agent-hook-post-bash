@@ -399,7 +399,8 @@ _pr_checks_rearm_gh() {
 # combined Codex or Muse string already holds them.
 _pr_checks_rearm_push() {
   local text="$_stdout" scope scopes=()
-  _hook_tool_response_is_string || text="$text"$'\n'"$(_hook_tool_stderr)"
+  # stderr: the same setlocale warning as the credential prefilter.
+  _hook_tool_response_is_string 2>/dev/null || text="$text"$'\n'"$(_hook_tool_stderr)"
   while IFS= read -r scope; do
     [ -n "$scope" ] && scopes+=("$scope")
   done < <(_hook_gh_push_scopes "$text" "$_pr_checks_push_fragment")

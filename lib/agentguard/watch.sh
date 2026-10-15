@@ -743,7 +743,9 @@ _hook_watch_unquoted() {
 # open (nohup, setsid, and disown are still seen). An `&` inside `bash -c '...'`, `$(...)`,
 # `{ ...; } &`, or ANSI-C quoting is not modeled.
 _hook_watch_text_detaches() {
-  local needle="$1" command="${2:-}" line rest before simple seg LC_ALL=C
+  # No local C locale: restoring an uninstalled caller locale on return
+  # makes bash print a setlocale warning on every launch check.
+  local needle="$1" command="${2:-}" line rest before simple seg
   while IFS= read -r line; do
     case "$line" in *"$needle"*) ;; *) continue ;; esac
     case "$line" in *'&'*) ;; *) continue ;; esac

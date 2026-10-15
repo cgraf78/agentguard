@@ -369,6 +369,19 @@ _assert_eq "muse push that completed" "o_r_12 " "$(
   _run "$POST_BASH" muse "$(_string_payload "git push" "$(_muse_envelope "$_ff" "$_ok")")"
   [ "$(_key_epoch o_r_12)" = 1000 ] || printf 'o_r_12 '
 )"
+# An uninstalled caller locale must not make the new paths print setlocale
+# warnings (bash warns when a function's local LC_ALL is restored).
+_new_sid
+_seed_key o_r_12 1000 o_r
+WATCH_ENV=(LC_ALL=xx_XX.UTF-8)
+_run "$POST_BASH" codex "$(_string_payload "git push" "$_ff")"
+# (Bash's own startup warning names no line.)
+_assert_not_contains "uninstalled locale: push re-arm prints no setlocale warning from hook lines" \
+  "line" "$(printf '%s\n' "$HOOK_STDERR" | grep 'setlocale')"
+_run "$POST_BASH" claude "$(jq -nc '{tool_input:{command:"git push",run_in_background:true},tool_response:{stdout:"",stderr:"",exit_code:0}}')"
+_assert_not_contains "uninstalled locale: background check prints no setlocale warning from hook lines" \
+  "line" "$(printf '%s\n' "$HOOK_STDERR" | grep 'setlocale')"
+WATCH_ENV=()
 _new_sid
 _seed_key o_r_12 1000 o_r
 _run "$POST_BASH" claude "$(_payload "git push" "" 0 "$_ff")"
@@ -743,6 +756,12 @@ _assert_eq "AGENTGUARD_WATCH_BLOCK=1: detached blocks" "2 detached" "$(_launch c
 _assert_eq "AGENTGUARD_WATCH_BLOCK=1: foreground blocks on Claude" "2 foreground" "$(_launch claude "git pr-watch --wait 12")"
 _assert_eq "AGENTGUARD_WATCH_BLOCK=1: background attached passes" "0 none" "$(_launch claude "git pr-watch --wait 12" true)"
 _assert_eq "AGENTGUARD_WATCH_BLOCK=1: a mention in echo passes" "0 none" "$(_launch claude "echo git pr-watch --wait 12")"
+WATCH_ENV=(LC_ALL=xx_XX.UTF-8)
+_launch claude "git pr-watch --wait 12 &" true >/dev/null
+# The secure launcher's own locale handling warns too; none may come from the
+# libraries.
+_assert_not_contains "uninstalled locale: launch check prints no setlocale warning from the libraries" \
+  "lib/agentguard" "$(printf '%s\n' "$HOOK_STDERR" | grep 'setlocale')"
 WATCH_ENV=(AGENTGUARD_WATCH=0)
 _assert_eq "AGENTGUARD_WATCH=0: no advice" "0 none" "$(_launch claude "git pr-watch --wait 12 &" true)"
 WATCH_ENV=()

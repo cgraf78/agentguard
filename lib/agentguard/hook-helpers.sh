@@ -1518,7 +1518,9 @@ _hook_tool_stderr() {
 # callers still ask only after a guard has already matched.
 _hook_tool_runs_in_background() {
   _hook_read_input || return 1
-  local LC_ALL=C _background_agent _background_muse='empty'
+  # No local C locale: restoring an uninstalled caller locale on return
+  # makes bash print a setlocale warning, and this runs only after a match.
+  local _background_agent _background_muse='empty'
   case "$_HOOK_INPUT" in
     *run_in_background* | *is_background* | *background_running*) ;;
     *) return 1 ;;
