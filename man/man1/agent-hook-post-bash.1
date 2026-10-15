@@ -22,7 +22,17 @@ agent once per prompt that the pull request is not done until its checks pass
 on the pushed commit.
 .PP
 The hook centralizes output extraction so agent-specific payload field names do
-not leak into local extension policy.
+not leak into local extension policy. It reads output objects, a combined
+output string (Codex), and a JSON output envelope string (Muse). The envelope
+is unwrapped only when the detected runtime is Muse; its
+.B exit_code
+then decides whether the command failed, and without one only a
+.B terminal_status
+of
+.B failed
+or
+.B timed_out
+counts as a failure.
 .SH EXIT STATUS
 .TP
 .B 0

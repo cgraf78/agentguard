@@ -197,7 +197,14 @@ _assert_eq "large clean output: allowed" "0" "$HOOK_EXIT"
 _assert_not_contains "large clean output: no WARNING" "WARNING" "$HOOK_STDERR"
 _assert_between "large clean output: cached payload uses one through five jq calls" \
   "1" "5" "$(wc -l <"$TEST_TMPDIR/post-bash-jq.log" | tr -d ' ')"
-_assert_eq "large clean output: credential prefilter uses exactly one grep call" \
+_assert_eq "large clean output: builtin credential prefilter forks no grep" \
+  "0" "$(wc -l <"$TEST_TMPDIR/post-bash-grep.log" | tr -d ' ')"
+
+# The builtin prefilter is a literal superset: ordinary words containing `sk-`
+# pass it, so the exact union scan runs once and still finds nothing.
+_run_post_bash_with_counting_tools "$(_post_bash_payload 'task-list disk-usage risk-free')"
+_assert_not_contains "superset-only hit: no WARNING" "WARNING" "$HOOK_STDERR"
+_assert_eq "superset-only hit: one exact union grep" \
   "1" "$(wc -l <"$TEST_TMPDIR/post-bash-grep.log" | tr -d ' ')"
 
 # Empty stdout — no warning
@@ -211,6 +218,157 @@ for _stdout_field in tool_result.stdout tool_output.stdout response.stdout resul
   _assert_eq "$_stdout_field: warns" "0" "$HOOK_EXIT"
   _assert_contains "$_stdout_field: WARNING" "WARNING" "$HOOK_STDERR"
 done
+
+echo ""
+echo "=== post-bash: runtime payload shapes ==="
+
+# Codex sends a shell call's combined output as a plain string; Muse sends a
+# string holding a JSON envelope. Fixtures are synthetic.
+_sk_key="sk-$(python3 -c 'print("c"*48)')"
+
+# Prints a Muse-style envelope string: output plus result fields.
+_muse_envelope() {
+  local output="$1" fields="${2:-{\"exit_code\":0,\"terminal_status\":\"completed\"\}}"
+  jq -nc --arg out "$output" --argjson fields "$fields" \
+    '{command:"run", description:"d", output:$out} + $fields'
+}
+
+# Payload whose tool_response is the given string.
+_string_payload() {
+  jq -nc --arg resp "$1" '{tool_input:{command:"run"},tool_response:$resp}'
+}
+
+# Runs one helper against a payload under a runtime, printing its stdout
+# followed by `|rc=<status>` so trailing text and status are both visible.
+_adapter() {
+  local agent="$1" helper="$2" payload="$3"
+  # shellcheck disable=SC2016 # expanded by the child shell.
+  env AGENTGUARD_NAME="$agent" CODEX_THREAD_ID= AGENTGUARD_SESSION_ID="$TEST_SID-adapter" \
+    TMPDIR="$TEST_TMPDIR" bash -c '
+      source "$1"
+      _HOOK_INPUT=$3
+      out=$("$2"; printf x)
+      rc=0
+      "$2" >/dev/null || rc=$?
+      printf "%s|rc=%s" "${out%x}" "$rc"
+    ' _ "$HELPERS" "$helper" "$payload" 2>/dev/null
+}
+
+_assert_eq "adapter: claude object stdout" "out
+|rc=0" "$(_adapter claude _hook_tool_stdout '{"tool_response":{"stdout":"out","stderr":"err"}}')"
+_assert_eq "adapter: codex plain string" "line 1
+line 2
+|rc=0" "$(_adapter codex _hook_tool_stdout "$(_string_payload $'line 1\nline 2')")"
+_assert_eq "adapter: codex JSON-looking string stays raw" '{"k":1}
+|rc=0' "$(_adapter codex _hook_tool_stdout "$(_string_payload '{"k":1}')")"
+_codex_envelope=$(_muse_envelope "inner")
+_assert_eq "adapter: codex envelope-looking string stays raw" "$_codex_envelope
+|rc=0" "$(_adapter codex _hook_tool_stdout "$(_string_payload "$_codex_envelope")")"
+_assert_eq "adapter: muse envelope unwraps output" "inner
+|rc=0" "$(_adapter muse _hook_tool_stdout "$(_string_payload "$_codex_envelope")")"
+_assert_eq "adapter: muse cancelled envelope without exit_code unwraps output" "partial
+|rc=0" "$(_adapter muse _hook_tool_stdout "$(_string_payload "$(_muse_envelope partial '{"terminal_status":"cancelled"}')")")"
+_assert_eq "adapter: muse envelope with only exit_code unwraps output" "x
+|rc=0" "$(_adapter muse _hook_tool_stdout "$(_string_payload "$(_muse_envelope x '{"exit_code":0}')")")"
+_assert_eq "adapter: muse envelope with empty output prints nothing" "|rc=0" \
+  "$(_adapter muse _hook_tool_stdout "$(_string_payload "$(_muse_envelope '')")")"
+_muse_no_result='{"output":"x","command":"run"}'
+_assert_eq "adapter: muse JSON without result fields stays raw" "$_muse_no_result
+|rc=0" "$(_adapter muse _hook_tool_stdout "$(_string_payload "$_muse_no_result")")"
+_muse_null_output='{"output":null,"exit_code":0}'
+_assert_eq "adapter: muse envelope with non-string output stays raw" "$_muse_null_output
+|rc=0" "$(_adapter muse _hook_tool_stdout "$(_string_payload "$_muse_null_output")")"
+_assert_eq "adapter: muse plain string stays raw" "plain
+|rc=0" "$(_adapter muse _hook_tool_stdout "$(_string_payload plain)")"
+_assert_eq "adapter: muse JSON array string stays raw" "[1]
+|rc=0" "$(_adapter muse _hook_tool_stdout "$(_string_payload '[1]')")"
+_assert_eq "adapter: muse JSON number string stays raw" "5
+|rc=0" "$(_adapter muse _hook_tool_stdout "$(_string_payload 5)")"
+_muse_no_output='{"exit_code":0,"terminal_status":"completed"}'
+_assert_eq "adapter: muse result fields without output stay raw" "$_muse_no_output
+|rc=0" "$(_adapter muse _hook_tool_stdout "$(_string_payload "$_muse_no_output")")"
+_assert_eq "adapter: muse object payload still reads stdout" "out
+|rc=0" "$(_adapter muse _hook_tool_stdout '{"tool_response":{"stdout":"out"}}')"
+
+_assert_eq "string shape: codex string" "|rc=0" \
+  "$(_adapter codex _hook_tool_response_is_string "$(_string_payload x)")"
+_assert_eq "string shape: spaced key" "|rc=0" \
+  "$(_adapter codex _hook_tool_response_is_string '{"tool_response" :  "x"}')"
+_assert_eq "string shape: claude object" "|rc=1" \
+  "$(_adapter claude _hook_tool_response_is_string '{"tool_response":{"stdout":"x"}}')"
+_assert_eq "string shape: escaped key inside a command string" "|rc=1" \
+  "$(_adapter claude _hook_tool_response_is_string \
+    "$(jq -nc '{tool_input:{command:"echo \"tool_response\": \"x\""},tool_response:{stdout:"x"}}')")"
+
+# Credential scan through the hook for each runtime shape.
+_run_hook_named_agent codex "$POST_BASH" "$(_string_payload "token $_sk_key")"
+_assert_contains "codex string: credential warns" "sk- prefix" "$HOOK_STDERR"
+_run_hook_named_agent codex "$POST_BASH" "$(_string_payload "{\"token\":\"$_sk_key\"}")"
+_assert_contains "codex JSON-looking string: credential warns" "sk- prefix" "$HOOK_STDERR"
+_run_hook_named_agent muse "$POST_BASH" "$(_string_payload "$(_muse_envelope "token $_sk_key")")"
+_assert_contains "muse envelope: credential in output warns" "sk- prefix" "$HOOK_STDERR"
+_run_hook_named_agent muse "$POST_BASH" "$(_string_payload "$(_muse_envelope "token $_sk_key" '{"terminal_status":"failed","exit_code":1}')")"
+_assert_contains "muse failed envelope: credential in output warns" "sk- prefix" "$HOOK_STDERR"
+
+# The runtime gate: credential text outside `output` (here in the envelope's
+# command field) is scanned for Codex, which never unwraps, but not for Muse,
+# whose scanned text is the unwrapped output.
+_gate_envelope=$(jq -nc --arg cmd "echo $_sk_key" \
+  '{command:$cmd, output:"clean", exit_code:0, terminal_status:"completed"}')
+_run_hook_named_agent codex "$POST_BASH" "$(_string_payload "$_gate_envelope")"
+_assert_contains "runtime gate: codex scans envelope-looking text raw" "sk- prefix" "$HOOK_STDERR"
+_run_hook_named_agent muse "$POST_BASH" "$(_string_payload "$_gate_envelope")"
+_assert_not_contains "runtime gate: muse scans only unwrapped output" "WARNING" "$HOOK_STDERR"
+
+_run_hook_named_agent codex "$POST_BASH" "$(_string_payload 'total 0')"
+_assert_not_contains "codex clean string: no WARNING" "WARNING" "$HOOK_STDERR"
+
+# Invalid UTF-8 bytes around a credential must not defeat the builtin
+# prefilter (it matches bytes in the C locale).
+_invalid_utf8_payload=$(printf '{"tool_input":{"command":"cat blob"},"tool_response":{"stdout":"\xff\xfe %s \xff"}}' "$_sk_key")
+_run_hook "$POST_BASH" "$_invalid_utf8_payload"
+_assert_contains "invalid UTF-8 around a credential: warns" "sk- prefix" "$HOOK_STDERR"
+_run_hook_env_utf8() {
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    AGENTGUARD_SESSION_ID="$TEST_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="agent"
+    CODEX_THREAD_ID=
+    LC_ALL=en_US.UTF-8
+  )
+  _run_hook_env "$@"
+}
+_run_hook_env_utf8 "$POST_BASH" "$_invalid_utf8_payload"
+_assert_contains "invalid UTF-8 under a UTF-8 locale: warns" "sk- prefix" "$HOOK_STDERR"
+
+# post-bash resolves the runtime once, in its own shell, before the
+# `$(...)` adapters read it; a lookup inside the subshell would fork again
+# and lose its cached answer. xtrace (inherited through SHELLOPTS) marks each
+# call of the uncached resolver. The default PS4 is used because Bash running
+# as root (CI containers) ignores an inherited PS4.
+_runtime_lookups=$(
+  printf '%s' "$(_string_payload 'a b')" |
+    env -u PS4 SHELLOPTS=xtrace AGENTGUARD_NAME=codex CODEX_THREAD_ID= \
+      AGENTGUARD_SESSION_ID="$TEST_SID-lookups" TMPDIR="$TEST_TMPDIR" \
+      "$POST_BASH" 2>&1 >/dev/null | grep -cE '^[+]+ _agent_name$'
+)
+_assert_eq "post-bash resolves the runtime exactly once" "1" "$_runtime_lookups"
+
+# A combined string needs the same subprocesses as a Claude object: one
+# adapter jq and no grep for clean output.
+_large_clean_codex=$(python3 -c '
+import json
+print(json.dumps({"tool_input": {"command": "run tests"},
+                  "tool_response": "ordinary build output\n" * 50000}))
+')
+_run_post_bash_with_counting_tools "$_large_clean_payload"
+_object_jq_calls=$(wc -l <"$TEST_TMPDIR/post-bash-jq.log" | tr -d ' ')
+_run_post_bash_with_counting_tools "$_large_clean_codex"
+_assert_eq "large clean codex string: same jq calls as an object" \
+  "$_object_jq_calls" "$(wc -l <"$TEST_TMPDIR/post-bash-jq.log" | tr -d ' ')"
+_assert_eq "large clean codex string: no grep" \
+  "0" "$(wc -l <"$TEST_TMPDIR/post-bash-grep.log" | tr -d ' ')"
 
 # No tool_response field at all (pre-bash-style payload) — no crash
 _run_hook "$POST_BASH" '{"tool_input":{"command":"ls"}}'

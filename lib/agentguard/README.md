@@ -197,7 +197,10 @@ Each hook emits one JSON response through `_hook_finish`.
   `_hook_context` directly for context that should not appear as a warning or
   reminder in stderr)
 - parsers: `_hook_parse_command`, `_hook_parse_edit_files`, `_hook_parse_mcp`
-- tool payload adapters: `_hook_tool_stdout`
+- tool payload adapters: `_hook_tool_stdout`, `_hook_tool_stderr`,
+  `_hook_tool_response_is_string` (Claude-style objects, Codex's combined
+  output string, and Muse's JSON envelope string, unwrapped only when the
+  detected runtime is Muse)
 - Hive Memory adapters: `_hook_hm_session_start`, `_hook_hm_prompt_submit`,
   `_hook_hm_tool_complete`, `_hook_hm_stop`, `_hook_hm_context_reset`
   (delivery-tracking policy per runtime lives in `_hook_hm_delivery_policy`)

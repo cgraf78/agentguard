@@ -48,7 +48,10 @@ _hook_parse_command # reads stdin → $_HOOK_INPUT, sets $AGENTGUARD_CMD_TRIMMED
 
 # Scan stdout for credential-like patterns. Detection is advisory only —
 # the command has already run. Low-false-positive patterns only; omit
-# generic high-entropy heuristics to avoid noise.
+# generic high-entropy heuristics to avoid noise. The adapter reads the
+# runtime; resolving it in this shell first lets the `$(...)` reuse the cached
+# answer, and _hook_source_extensions needs it here anyway.
+_hook_agent_name _post_bash_agent
 _stdout=$(_hook_tool_stdout)
 
 if [ -n "$_stdout" ]; then
@@ -69,10 +72,26 @@ if [ -n "$_stdout" ]; then
   _sk_credential_pattern='(^|[^A-Za-z0-9_-])sk-[A-Za-z0-9]{32,}'
   _credential_union_pattern="($_pem_credential_pattern)|($_aws_credential_pattern)|($_github_credential_pattern)|($_anthropic_credential_pattern)|($_sk_credential_pattern)"
 
-  # Most command output is credential-free. One exact union scan keeps that
-  # common path bounded; a possible match still runs every existing classifier
-  # below so warning types and multi-credential behavior remain unchanged.
-  if printf '%s' "$_stdout" | grep -qE -e "$_credential_union_pattern"; then
+  # Every credential class above contains one of these literals, so a builtin
+  # match on them is a superset of the union scan: the common credential-free
+  # output costs no fork. `sk-` alone also hits ordinary words ("task-list"),
+  # so a hit still runs one exact union scan, and only a real match runs
+  # every classifier below, keeping warning types and multi-credential
+  # behavior unchanged.
+  # `BEGIN ` rather than the PEM header's leading dashes: a `-` run (common in
+  # tables and separators) would start a match attempt at every dash.
+  _credential_literal_pattern='BEGIN |AKIA|gh[psrou]_|github_pat_|sk-'
+  # Byte matching in the C locale: the literals are ASCII, and some libc
+  # regex engines refuse to match at all (REG_ILLSEQ) when a multibyte locale
+  # meets invalid UTF-8 in the output.
+  _output_has_credential_literal() {
+    local LC_ALL=C
+    [[ "$_stdout" =~ $_credential_literal_pattern ]]
+  }
+  # stderr: restoring an uninstalled caller LC_ALL after the helper's local
+  # C locale makes bash print a setlocale warning.
+  if _output_has_credential_literal 2>/dev/null &&
+    printf '%s' "$_stdout" | grep -qE -e "$_credential_union_pattern"; then
     # PEM private key or certificate block headers — unambiguous format.
     # Use -e to avoid grep treating the leading dashes as option flags.
     if printf '%s' "$_stdout" | grep -qE -e "$_pem_credential_pattern"; then
@@ -203,9 +222,14 @@ if [[ "$AGENTGUARD_CMD_TRIMMED" =~ $_pr_checks_git_push || "$AGENTGUARD_CMD_TRIM
 elif ! [[ "$AGENTGUARD_CMD_TRIMMED" =~ (^|[[:space:];\&\|\(])gh[[:space:]] ]]; then
   _pr_checks_text="$_stdout"
   # git push writes its summary to stderr; read it only when the raw payload
-  # could hold one.
+  # could hold one. A combined Codex or Muse string already carries it, so
+  # skip the read and its subshell outright.
   case "${_HOOK_INPUT:-}" in
-    *"To "*" -> "*) _pr_checks_text="$_pr_checks_text"$'\n'"$(_hook_tool_stderr)" ;;
+    *"To "*" -> "*)
+      # stderr: same setlocale warning as the credential prefilter above.
+      _hook_tool_response_is_string 2>/dev/null ||
+        _pr_checks_text="$_pr_checks_text"$'\n'"$(_hook_tool_stderr)"
+      ;;
   esac
   case "$_pr_checks_text" in
     *github.com/*/pull/* | *" -> "*)
