@@ -775,12 +775,19 @@ _hook_watch_unquoted() {
 # and disown are still seen). An `&` inside `bash -c '...'`, `$(...)`,
 # `{ ...; } &`, or ANSI-C quoting is not modeled.
 _hook_watch_text_detaches() {
-  # No local C locale: restoring an uninstalled caller locale on return
-  # makes bash print a setlocale warning on every launch check.
-  local needle="$1" command="${2:-}" line rest before simple seg budget=16384
+  # A C locale: the scan looks only at ASCII operators, and multibyte
+  # matching in a UTF-8 caller locale roughly doubles its cost. Restoring an
+  # uninstalled caller locale on return prints a setlocale warning, so the
+  # caller sends this function's stderr to /dev/null.
+  local needle="$1" command="${2:-}" line rest before simple seg budget=16384 LC_ALL=C
   while IFS= read -r line; do
     case "$line" in *"$needle"*) ;; *) continue ;; esac
     case "$line" in *'&'*) ;; *) continue ;; esac
+    # A subcommand needs its command on the same line; checked raw, before
+    # paying for the mask.
+    if [ -n "$command" ]; then
+      case "$line" in *"$command"*) ;; *) continue ;; esac
+    fi
     [ "${#line}" -le 8192 ] && [ "${#line}" -le "$budget" ] || continue
     budget=$((budget - ${#line}))
     _hook_watch_unquoted "$line" rest
@@ -957,7 +964,8 @@ _hook_watch_launch() {
     done
   done <<<"$_HOOK_EXECUTABLE_FRAGMENTS_CACHE_VALUE"
   [ "$found" = 1 ] || return 1
-  if [ "$detached" = 1 ] || _hook_watch_text_detaches "$needle" "${sub:+$command}"; then
+  # stderr: the setlocale warning from the scan's local C locale.
+  if [ "$detached" = 1 ] || _hook_watch_text_detaches "$needle" "${sub:+$command}" 2>/dev/null; then
     _HOOK_WATCH_DETACHED=1
   fi
   return 0
