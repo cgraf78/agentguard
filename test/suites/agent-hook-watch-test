@@ -1001,6 +1001,15 @@ for _shell in "${_shells[@]}"; do
     _stop_watcher
     rm -f "$HOME/.local/state/example/tracker/watchers/EXAMPLE-3".*
   fi
+  # A ps that cannot report a live process's command line (BusyBox has no
+  # -p) cannot tell a reused pid apart either: fail open.
+  mkdir -p "$TEST_TMPDIR/broken-ps"
+  printf '#!/bin/sh\nexit 1\n' >"$TEST_TMPDIR/broken-ps/ps"
+  chmod +x "$TEST_TMPDIR/broken-ps/ps"
+  printf '%s\n' "$$" >"$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$$"
+  _assert_eq "$_shell: no /proc, a ps without -p counts a live pid (fail open)" 0 \
+    "$(_engine "$_shell" "_HOOK_WATCH_PROC=/nonexistent; PATH='$TEST_TMPDIR/broken-ps'; _hook_watch_collect; echo \${#_HOOK_WATCH_UNMET[@]}")"
+  rm -f "$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$$"
   printf '%s\n' "$DEAD_PID" >"$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$DEAD_PID"
   _assert_eq "$_shell: no /proc and no ps: a watcher file counts (fail open)" 0 \
     "$(_engine "$_shell" '_HOOK_WATCH_PROC=/nonexistent; PATH=/nonexistent; _hook_watch_collect; echo ${#_HOOK_WATCH_UNMET[@]}')"

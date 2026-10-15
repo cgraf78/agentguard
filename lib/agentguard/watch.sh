@@ -200,9 +200,10 @@ _hook_watch_roots() {
 # launcher repeats the interpreter, as Termux does
 # (`bash /path/to/bash /path/<name>`), a first word whose basename the next
 # word repeats is skipped (at most twice). Returns 0 when it runs the
-# program, 1 when it does not, and 2 when liveness cannot be probed at all
-# (no /proc and no ps), which callers treat as watched: enforcing nothing
-# beats nagging about a watcher that may be alive.
+# program, 1 when it does not, and 2 when that cannot be probed (no /proc,
+# and no ps or one that cannot report a live process's command line), which
+# callers treat as watched: enforcing nothing beats nagging about a watcher
+# that may be alive.
 _HOOK_WATCH_PROC=/proc
 _hook_watch_pid_runs() {
   local pid="$1" name="$2" word i=0 command
@@ -233,7 +234,10 @@ _hook_watch_pid_runs() {
   fi
   command -v ps >/dev/null 2>&1 || return 2
   kill -0 "$pid" 2>/dev/null || return 1
-  command=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
+  # The process is alive; a ps that cannot report its command line (BusyBox
+  # has no -p) cannot tell it apart either, so that also fails open.
+  command=$(ps -o command= -p "$pid" 2>/dev/null) || return 2
+  [ -n "$command" ] || return 2
   case " $command " in
     *" $name "* | *"/$name "*) return 0 ;;
   esac

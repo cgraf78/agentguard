@@ -276,8 +276,10 @@ watcher basename.
 - A Codex command that outlives the shell tool's `yield_time_ms` keeps
   running as a polled session and gets no PostToolUse, so a long push or
   pull-request creation there neither records nor re-arms.
-- On a host without `/proc` and without `ps`, liveness cannot be probed:
-  any watcher file then counts as a live watcher (fail open).
+- On a host without `/proc` and without a `ps` that can report a live
+  process's command line, liveness cannot be probed: any watcher file whose
+  pid is alive (or, with no `ps` at all, any watcher file) then counts as a
+  live watcher (fail open).
 - Indirect pushes (a script, or a `git push` mixing deletions and updates in
   one refspec list) do not re-arm; the general reminder still fires on their
   printed summary.
