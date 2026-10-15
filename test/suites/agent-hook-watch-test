@@ -556,21 +556,27 @@ rm -f "$PRODUCER/done/o_r_12"
 _assert_eq "done for the unscoped key satisfies it" "a" "$(_unmet_after)"
 _producer_reset
 
-# An exited record satisfies when its result epoch (fourth field) is newer
-# than the submit: the watcher ran after it and delivered its result,
-# whatever the state. A run cut short writes `-`.
+# An exited record satisfies only when its state (second field) is `done`,
+# a green or merged result, and its epoch (fourth field) is newer than the
+# submit. Red, needs-action, stalled, pending, and cut-short exits do not.
+printf '0 done green 1001\n' >"$PRODUCER/exited/o_r_12"
+_assert_eq "done-state exit after the submit satisfies" "b" "$(_unmet_after)"
+printf '0 done merged 1001\n' >"$PRODUCER/exited/o_r_12"
+_assert_eq "merged exit after the submit satisfies" "b" "$(_unmet_after)"
 printf '1 action failed 1001\n' >"$PRODUCER/exited/o_r_12"
-_assert_eq "exited after the submit satisfies" "b" "$(_unmet_after)"
+_assert_eq "red exit after the submit does not" "ab" "$(_unmet_after)"
 printf '8 stall blocked 1001\n' >"$PRODUCER/exited/o_r_12"
-_assert_eq "stall exit after the submit satisfies" "b" "$(_unmet_after)"
-printf '1 action failed 999\n' >"$PRODUCER/exited/o_r_12"
-_assert_eq "exited before the submit does not" "ab" "$(_unmet_after)"
-printf '1 action failed 1000\n' >"$PRODUCER/exited/o_r_12"
-_assert_eq "exited in the submit's second does not" "ab" "$(_unmet_after)"
+_assert_eq "stall exit after the submit does not" "ab" "$(_unmet_after)"
+printf '8 pending checks-running -\n' >"$PRODUCER/exited/o_r_12"
+_assert_eq "pending exit does not" "ab" "$(_unmet_after)"
+printf '0 done green 999\n' >"$PRODUCER/exited/o_r_12"
+_assert_eq "done-state exit before the submit does not" "ab" "$(_unmet_after)"
+printf '0 done green 1000\n' >"$PRODUCER/exited/o_r_12"
+_assert_eq "done-state exit in the submit's second does not" "ab" "$(_unmet_after)"
 printf '143 pending checks-running -\n' >"$PRODUCER/exited/o_r_12"
 _assert_eq "killed watcher (epoch -) does not" "ab" "$(_unmet_after)"
-printf '1 action failed\n' >"$PRODUCER/exited/o_r_12"
-_assert_eq "exited without an epoch does not" "ab" "$(_unmet_after)"
+printf '0 done green\n' >"$PRODUCER/exited/o_r_12"
+_assert_eq "done-state exit without an epoch does not" "ab" "$(_unmet_after)"
 # Multi-PR run: green early (older done record), re-armed by a push, and
 # still re-judged by the same run, which exits with a newer result epoch.
 printf '%s green 900\n' "$(printf 'c%.0s' {1..40})" >"$PRODUCER/done/o_r_12"
@@ -596,8 +602,8 @@ WATCH_ENV=(XDG_STATE_HOME="$TEST_TMPDIR/xdg-state")
 _assert_eq "newest done across two roots counts" "b" "$(_unmet_after)"
 rm -f "$PRODUCER/done/o_r_12"
 mkdir -p "$TEST_TMPDIR/xdg-state/git-tools/pr-watch/exited"
-printf '1 action failed 900\n' >"$TEST_TMPDIR/xdg-state/git-tools/pr-watch/exited/o_r_12"
-printf '1 action failed 1001\n' >"$PRODUCER/exited/o_r_12"
+printf '0 done green 900\n' >"$TEST_TMPDIR/xdg-state/git-tools/pr-watch/exited/o_r_12"
+printf '0 done green 1001\n' >"$PRODUCER/exited/o_r_12"
 _assert_eq "newest exited across two roots counts" "b" "$(_unmet_after)"
 rm -f "$PRODUCER/exited/o_r_12" "$TEST_TMPDIR/xdg-state/git-tools/pr-watch/exited/o_r_12"
 WATCH_ENV=(XDG_STATE_HOME=relative/state)
@@ -630,7 +636,7 @@ printf 'x green 1001\n' >"$TEST_TMPDIR/real-done"
 ln -sf "$TEST_TMPDIR/real-done" "$PRODUCER/done/x_9"
 _assert_eq "symlinked done record is not trusted" "b" "$(_unmet_after)"
 rm -f "$PRODUCER/done/o_r_12"
-printf '1 action failed 1001\n' >"$TEST_TMPDIR/real-exited"
+printf '0 done green 1001\n' >"$TEST_TMPDIR/real-exited"
 ln -sf "$TEST_TMPDIR/real-exited" "$PRODUCER/exited/o_r_12"
 _assert_eq "symlinked exited record is not trusted" "ab" "$(_unmet_after)"
 _producer_reset
@@ -680,43 +686,52 @@ _stop
 _assert_eq "block: a new submit re-arms" 2 "$HOOK_EXIT"
 _stop
 _assert_eq "block: then ends again" 0 "$HOOK_EXIT"
-# A watcher that exits red at once (a conflict, a failure) delivered its
-# result: replaying the watch-and-exit loop blocks only the first Stop.
+# A watcher exit re-arms one block unless it was a stall. Block markers are
+# aged before each exit so the whole-second mtime comparison is decisive;
+# everything happens within one prompt.
+_blocked() { touch -t 200001010000 "$(_session_tool)/blocked/o_r_12" "$(_session_tool)/keys/o_r_12"; }
 _producer_reset
 _new_sid
 _seed_key o_r_12 1000 o_r KEY_A
 _stop
-_assert_eq "red-exit loop: the unwatched Stop blocks" 2 "$HOOK_EXIT"
-for _round in 1 2 3 4; do
+_assert_eq "exit re-arm: the unwatched Stop blocks" 2 "$HOOK_EXIT"
+_assert_contains "exit re-arm: block names the label" "KEY_A" "$HOOK_STDERR"
+_assert_contains "exit re-arm: block says to report a stall instead of restarting" "report that to the user" "$HOOK_STDERR"
+for _round in 1 2; do
+  _blocked
   printf '1 action conflict %s\n' "$((1000 + _round))" >"$PRODUCER/exited/o_r_12"
-  _new_prompt
   _stop
-  _assert_eq "red-exit loop round $_round: ends the turn" 0 "$HOOK_EXIT"
-  _assert_not_contains "red-exit loop round $_round: no reminder" "KEY_A" "$HOOK_STDERR"
+  _assert_eq "red exit round $_round: re-arms exactly one block" 2 "$HOOK_EXIT"
+  _stop
+  _assert_eq "red exit round $_round: the next Stop ends the turn" 0 "$HOOK_EXIT"
 done
+_blocked
+printf '143 pending checks-running -\n' >"$PRODUCER/exited/o_r_12"
+_stop
+_assert_eq "killed watcher (-): re-arms one block" 2 "$HOOK_EXIT"
+_stop
+_assert_eq "killed watcher (-): the next Stop ends the turn" 0 "$HOOK_EXIT"
+_blocked
+printf '8 stall blocked 1003\n' >"$PRODUCER/exited/o_r_12"
+_new_prompt
+_stop
+_assert_eq "stall exit: does not re-arm the block" 0 "$HOOK_EXIT"
+_assert_contains "stall exit: reminds" "KEY_A" "$HOOK_STDERR"
+_blocked
+printf '0 done green 1004\n' >"$PRODUCER/exited/o_r_12"
+_new_prompt
+_stop
+_assert_eq "done-state exit: satisfies, no block" 0 "$HOOK_EXIT"
+_assert_not_contains "done-state exit: no reminder" "KEY_A" "$HOOK_STDERR"
 _producer_reset
-# The same rule within one prompt (no new prompt between Stops).
+# A red exit with a newer epoch, before any block: unmet, so it blocks.
 _new_sid
 _seed_key o_r_12 1000 o_r KEY_A
 printf '1 action failed 1001\n' >"$PRODUCER/exited/o_r_12"
 _stop
-_assert_eq "one prompt: newer exit satisfies, no block" 0 "$HOOK_EXIT"
-_assert_not_contains "one prompt: newer exit satisfies, no reminder" "KEY_A" "$HOOK_STDERR"
-printf '143 pending checks-running -\n' >"$PRODUCER/exited/o_r_12"
+_assert_eq "red exit newer than the submit: does not satisfy, blocks" 2 "$HOOK_EXIT"
 _stop
-_assert_eq "one prompt: an exit with - is unmet and blocks" 2 "$HOOK_EXIT"
-_stop
-_assert_eq "one prompt: but only once per submit" 0 "$HOOK_EXIT"
-# An exit that does not satisfy does not re-arm the block either: with the
-# key older than the last block and a fresh prompt, a new `-` exit record
-# (newer than the block marker) still only reminds.
-touch -t 200001010000 "$(_session_tool)/keys/o_r_12"
-touch -t 200101010000 "$(_session_tool)/blocked/o_r_12"
-printf '143 pending checks-running -\n' >"$PRODUCER/exited/o_r_12"
-_new_prompt
-_stop
-_assert_eq "an unsatisfying exit does not re-arm the block" 0 "$HOOK_EXIT"
-_assert_contains "an unsatisfying exit still reminds" "KEY_A" "$HOOK_STDERR"
+_assert_eq "red exit newer than the submit: only once" 0 "$HOOK_EXIT"
 _new_sid
 _seed_key o_r_12 1000 o_r KEY_A
 printf '%s green 900\n' "$(printf 'd%.0s' {1..40})" >"$PRODUCER/done/o_r_12"

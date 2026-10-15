@@ -46,7 +46,6 @@ _HOOK_WATCH_KEY_SCOPE=''
 _HOOK_WATCH_KEY_LABEL=''
 _HOOK_WATCH_DONE_EPOCH=0
 _HOOK_WATCH_DONE_WORD=''
-_HOOK_WATCH_EXITED_EPOCH=0
 _HOOK_WATCH_DETACHED=0
 
 # Whether $1 is safe as a single path component: keys, scopes, and tool-dir
@@ -306,22 +305,24 @@ _hook_watch_done() {
   return "$found"
 }
 
-# Read the newest result epoch of exited/<key> across the accepted producer
-# dirs into _HOOK_WATCH_EXITED_EPOCH. The content is "<status> <state>
-# <reason> <epoch>", the epoch being when the check behind the result the run
-# delivered started; a run cut short (a signal, an error, GitHub unreadable)
-# writes `-`. The file's mtime plays no part.
-_hook_watch_exited() {
-  local key="$1" dir file epoch
-  _HOOK_WATCH_EXITED_EPOCH=0
+# Whether any accepted producer dir holds an exited/<key> record whose state
+# field is `done` (the run's last result was green or merged) and whose
+# epoch, when the check behind that result started, is strictly newer than
+# $2. The content is "<status> <state> <reason> <epoch>"; red, needs-action,
+# stalled, pending, and cut-short (`-`) exits never count. The file's mtime
+# plays no part here (see _hook_watch_claim_block for that).
+_hook_watch_exited_done() {
+  local key="$1" since="$2" dir file state epoch
   for dir in ${_HOOK_WATCH_DIRS[@]+"${_HOOK_WATCH_DIRS[@]}"}; do
     file="$dir/exited/$key"
     _hook_watch_file_ok "$file" || continue
-    epoch=''
-    read -r _ _ _ epoch _ 2>/dev/null <"$file" || [ -n "$epoch" ] || continue
+    state='' epoch=''
+    read -r _ state _ epoch _ 2>/dev/null <"$file" || [ -n "$epoch" ] || continue
+    [ "$state" = 'done' ] || continue
     _hook_watch_epoch epoch "$epoch"
-    [ "$epoch" -le "$_HOOK_WATCH_EXITED_EPOCH" ] || _HOOK_WATCH_EXITED_EPOCH="$epoch"
+    [ "$epoch" -le "$since" ] || return 0
   done
+  return 1
 }
 
 # Whether key $1's newest done record says the item can no longer change
@@ -494,24 +495,23 @@ _hook_watch_list() {
 
 # Whether recorded key $1 (scope $2, submitted or re-armed at epoch $3) is
 # satisfied: a live watcher or matching pending file; a done record whose
-# check started after the submit; or an exited record whose result came from
-# a check that started after it. A watcher that delivered a result after the
-# submit means the agent got that result, whatever it was (red, stalled), and
-# the obligation only exists to stop an agent walking away without watching
-# at all; requiring a live watcher instead re-blocked on every exit of a
-# persistently red pull request. A check that started in the same second may
-# not have seen the submit, so only strictly newer epochs count. Per the
-# producer contract, watchers/ is listed before the records and once more
-# when nothing showed, because one listing can miss a watcher file while
-# another replaces it.
+# check started after the submit; or an exited record of a run whose last
+# result was green or merged (state `done`) from a check that started after
+# it. The exited case covers a multi-pull-request run whose done record
+# predates a later push but which went on judging the pull request. A red,
+# needs-action, stalled, or cut-short exit does not satisfy: the agent must
+# act on it and watch again (see _hook_watch_claim_block). A check that
+# started in the same second may not have seen the submit, so only strictly
+# newer epochs count. Per the producer contract, watchers/ is listed before
+# the records and once more when nothing showed, because one listing can
+# miss a watcher file while another replaces it.
 _hook_watch_satisfied() {
   local key="$1" scope="$2" epoch="$3" argv="$4"
   _hook_watch_watched "$key" "$scope" "$argv" && return 0
   if _hook_watch_done "$key" && [ "$_HOOK_WATCH_DONE_EPOCH" -gt "$epoch" ]; then
     return 0
   fi
-  _hook_watch_exited "$key"
-  [ "$_HOOK_WATCH_EXITED_EPOCH" -le "$epoch" ] || return 0
+  _hook_watch_exited_done "$key" "$epoch" && return 0
   _hook_watch_watched "$key" "$scope" "$argv"
 }
 
@@ -544,25 +544,38 @@ _hook_watch_collect() {
 
 # _hook_watch_claim_block <tool-dir> <key>
 #
-# Claim the one Stop block a key gets per submit or re-arm, writing
+# Claim the one Stop block a key gets per submit or watcher exit, writing
 # blocked/<key> (its mtime is the block's time). A block is armed when none
-# was recorded yet or the key was recorded or re-armed (keys/<key>) since the
-# last one, so every block needs new work in between and a Stop can always
-# end the turn. A watcher exit does not re-arm it: an exit that delivered a
-# result satisfies the key instead. Bash 3.2 compares whole-second mtimes, so
-# a re-arm in the block's own second does not arm another (fails toward no
+# was recorded yet, when the key was recorded or re-armed (keys/<key>) since
+# the last one, or when a watcher run for it ended since then (the
+# producer's exited/<key> is newer than the marker) without a stall: a red,
+# needs-action, or killed run leaves the agent something to fix and watch
+# again, while a stall waits on something outside the pull request, which
+# the agent should report rather than restart a watcher for. Every re-arm
+# needs new work or a new watcher run in between, so blocks stay bounded and
+# a Stop can always end the turn. Bash 3.2 compares whole-second mtimes, so
+# an event in the block's own second does not arm another (fails toward no
 # block). The claim holds only once the marker is written: an unwritable
 # state dir degrades to a reminder, never to a block on every Stop.
 _hook_watch_claim_block() {
-  local tool_dir="$1" key="$2" id base marker
+  local tool_dir="$1" key="$2" id base marker dir state armed=0
   _hook_watch_tool_id "$tool_dir" id || return 1
   _hook_watch_name_ok "$key" || return 1
   _hook_watch_session_dir base || return 1
   base="$base/$id"
   marker="$base/blocked/$key"
-  if [ -e "$marker" ] && ! [ "$base/keys/$key" -nt "$marker" ]; then
-    return 1
+  if [ ! -e "$marker" ] || [ "$base/keys/$key" -nt "$marker" ]; then
+    armed=1
+  elif _hook_watch_roots "$tool_dir"; then
+    for dir in ${_HOOK_WATCH_DIRS[@]+"${_HOOK_WATCH_DIRS[@]}"}; do
+      _hook_watch_file_ok "$dir/exited/$key" || continue
+      [ "$dir/exited/$key" -nt "$marker" ] || continue
+      state=''
+      read -r _ state _ 2>/dev/null <"$dir/exited/$key" || [ -n "$state" ] || continue
+      [ "$state" = stall ] || armed=1
+    done
   fi
+  [ "$armed" = 1 ] || return 1
   [ -d "$base/blocked" ] || _hook_mkstate "$base/blocked" || return 1
   # Write content, not just truncate: O_TRUNC on an empty file need not bump
   # its mtime, which is what the arming comparison reads.
@@ -585,7 +598,7 @@ _hook_watch_hint() {
 #
 # The Stop hook's watch pass. Call it only for a foreground Stop. Reminds on
 # stderr once per prompt per key and submit; with AGENTGUARD_WATCH_BLOCK=1 on
-# Claude, blocks instead, once per submit or re-arm (see
+# Claude, blocks instead, once per submit or non-stall watcher exit (see
 # _hook_watch_claim_block). A `<labels>` token in a tool's hint is replaced
 # by the labels the message names. Each argument names the hook-environment variable
 # that turns a tool's producer state off when set to the literal `0`; such a
@@ -616,7 +629,7 @@ _hook_watch_stop() {
         fi
         if [ -n "$block_labels" ]; then
           _hook_watch_hint hint "$block_labels"
-          blocks="$blocks${blocks:+ }Not watched since the last push or submit:$block_labels. $hint"
+          blocks="$blocks${blocks:+ }No running \`$_HOOK_WATCH_TOOL_ARGV\` and no green result since the latest push or submit for$block_labels, so nothing will report its outcome. $hint If the last watcher reported a stall, report that to the user instead of restarting it. Otherwise, after fixing and pushing, watch again, or tell the user explicitly why monitoring is stopping."
         fi
       fi
       remind_labels='' block_labels=''
@@ -645,20 +658,23 @@ _hook_watch_stop() {
       remind_labels="$remind_labels $_HOOK_WATCH_KEY_LABEL"
       continue
     fi
-    # One message per prompt per key and submit, a block when armed and a
-    # reminder otherwise. The prompt marker is claimed first, so a key this
-    # Stop blocks for is not reminded again by the Stop that follows in the
-    # same prompt; a block is armed only by a new record or re-arm, which
-    # also changes the epoch and so the marker.
-    _hook_once_per_prompt "watch-$id-$key-$_HOOK_WATCH_KEY_EPOCH" || continue
-    if [ "$block" = 1 ] && _hook_watch_claim_block "$_HOOK_WATCH_TOOL_DIR" "$key"; then
+    # A block when armed; otherwise one reminder per prompt per key and
+    # submit. The prompt marker is claimed even for a block, so the Stop
+    # that follows a block in the same prompt does not remind again; a
+    # watcher exit can re-arm a block within the prompt without changing the
+    # key's epoch, so an existing marker does not rule a block out.
+    if _hook_once_per_prompt "watch-$id-$key-$_HOOK_WATCH_KEY_EPOCH"; then
+      if [ "$block" = 1 ] && _hook_watch_claim_block "$_HOOK_WATCH_TOOL_DIR" "$key"; then
+        block_labels="$block_labels $_HOOK_WATCH_KEY_LABEL"
+      else
+        remind_labels="$remind_labels $_HOOK_WATCH_KEY_LABEL"
+      fi
+    elif [ "$block" = 1 ] && _hook_watch_claim_block "$_HOOK_WATCH_TOOL_DIR" "$key"; then
       block_labels="$block_labels $_HOOK_WATCH_KEY_LABEL"
-    else
-      remind_labels="$remind_labels $_HOOK_WATCH_KEY_LABEL"
     fi
   done
   if [ -n "$blocks" ]; then
-    _hook_block "$blocks (AGENTGUARD_WATCH_BLOCK=1 blocks one Stop per push or submit.)"
+    _hook_block "$blocks This blocks once per push, submit, or watcher exit (a stall never re-arms it); later Stops do not."
   fi
   if [ -n "$remind" ]; then
     # stderr only: a Stop response's context is not delivered to the model

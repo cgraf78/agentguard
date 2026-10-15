@@ -64,9 +64,10 @@ because the hook's environment may differ from the agent shell's.
   pull request (exit status 0, 1, or 8, with it done, needing action, or
   stalled). A run cut short (a signal, an internal error, GitHub unreadable),
   and a pull request still pending when the run ended, get `-`, which counts
-  as before any event. The engine reads only that epoch, never the file's
-  mtime: an epoch strictly newer than the key's means the pull request was
-  watched after the work and its result delivered, whatever its final state.
+  as before any event. The engine reads the second field, the state, and
+  that epoch: an exit with state `done` (green or merged) and an epoch
+  strictly newer than the key's counts like a newer `done/` record. The
+  file's mtime matters only for re-arming an opted-in block (see below).
 
 ### Liveness
 
@@ -103,9 +104,10 @@ A producer that wants AgentGuard to see it must:
   and write the watcher files before removing a pending file;
 - write `done/<key>` only once the item is really finished, with the epoch of
   the check that judged it;
-- write `exited/<key>` when a watching run ends (before removing its watcher
-  files), with the epoch of the check behind the result it delivered, or `-`
-  when it delivered none;
+- write `exited/<key>` when a watching run ends, including when it is cut
+  short (before removing its watcher files), with its last state and the
+  epoch of the check behind the final result it delivered, or `-` when it
+  delivered none;
 - replace files atomically through names containing `~`, create directories
   private to the user, and never put `~`, `/`, or whitespace in keys or scopes;
 - keep its argv[0] or argv[1] basename stable.
@@ -139,16 +141,24 @@ turn ends; a subagent's own Stop enforces nothing.
 - **Satisfied**: a live watcher, a matching live pending file (an unscoped
   one matches every key; a scoped one matches keys recorded with exactly that
   scope, so never a key recorded with scope `-`), a `done/` record whose
-  epoch is newer than the key's, or an `exited/` record whose result epoch is
-  newer than the key's. All epoch comparisons are strict: a check that
-  started in the key's own second may not have seen the work.
+  epoch is newer than the key's, or an `exited/` record with state `done`
+  (a green or merged result) whose epoch is newer than the key's. A red,
+  needs-action, stalled, pending, or cut-short exit does not satisfy. All
+  epoch comparisons are strict: a check that started in the key's own second
+  may not have seen the work.
 - **Stop** (foreground only, after extensions): an unsatisfied key gets one
-  reminder on stderr per prompt per key and submit. With
-  `AGENTGUARD_WATCH_BLOCK=1` on Claude Code, the first Stop after a record or
-  re-arm blocks instead (once), naming the keys; any later Stop ends the
-  turn. An unwritable state dir degrades a block to a reminder. Blocks are
-  independent of extension blocks. A `<labels>` token in a tool's hint is
-  replaced by the labels the message names.
+  reminder on stderr per prompt per key and submit, stalls included. With
+  `AGENTGUARD_WATCH_BLOCK=1` on Claude Code, a block replaces the reminder
+  once per record, re-arm, or watcher exit: it is armed when no block was
+  recorded since the key's latest record or re-arm, or when a trusted
+  `exited/<key>` is newer (by mtime) than the last block and its state is not
+  `stall`. So a red, needs-action, or killed watcher exit re-arms one block,
+  a stall never re-arms (it waits on something outside the pull request,
+  which the agent should report rather than restart a watcher for), and any
+  later Stop ends the turn. Every re-arm needs new work or a new watcher
+  run, so blocks stay bounded. An unwritable state dir degrades a block to a
+  reminder. Blocks are independent of extension blocks. A `<labels>` token
+  in a tool's hint is replaced by the labels the message names.
 - **Producer state off**: when the hook environment sets
   `GIT_PR_WATCH_STATE=0` (the variable that turns `git pr-watch`'s state
   files off), the Stop hook says so once per prompt instead of reminding or
@@ -162,19 +172,18 @@ turn ends; a subagent's own Stop enforces nothing.
 - Everything fails open: unreadable or untrusted state, or an unwritable
   session dir, means less enforcement, never a stuck turn.
 
-### Why an exited watcher satisfies
+### Exits: what satisfies and what re-arms
 
-The original design counted only a live watcher or a newer `done/` record,
-and re-armed an opted-in block on every watcher exit. That looped: a pull
-request with a conflict or a persistent failure makes the watcher exit at
-once, the next Stop blocked again with "not watched", the agent re-ran the
-watcher, and so on, although the agent already had the result. In a
-multi-pull-request run, a pull request that went green early kept its old
-`done/` epoch after a later push, so it read as unwatched although the same
-run went on judging it. An obligation exists to stop an agent walking away
-without watching at all, so a watcher that delivered a result after the
-work (its `exited/` epoch) now satisfies it, whatever the result, and a
-block happens once per record or re-arm.
+An opted-in block happens once per submit or watcher exit, with two
+refinements. A watcher exit whose last result was green or merged (state
+`done`) satisfies the key outright: in a multi-pull-request run, a pull
+request that went green early keeps an old `done/` epoch after a later push,
+yet the same run goes on judging it and ends with a newer green result. And
+a stall exit never re-arms a block: the pull request waits on something
+outside it (a review, an approval), so the agent should report the stall
+instead of restarting a watcher. A red, needs-action, or killed exit does
+re-arm one block, because the agent has something to fix and watch again;
+the next Stop ends the turn.
 
 ### Settings
 
@@ -183,7 +192,7 @@ Read from the hook environment, which an agent's tool shell cannot change:
 | Variable | Effect |
 | --- | --- |
 | `AGENTGUARD_WATCH=0` | turns recording, re-arming, Stop checks, and launch advice off |
-| `AGENTGUARD_WATCH_BLOCK=1` | Stop blocks once per record or re-arm (Claude Code), and launch advice blocks |
+| `AGENTGUARD_WATCH_BLOCK=1` | Stop blocks once per record, re-arm, or non-stall watcher exit (Claude Code), and launch advice blocks |
 | `AGENTGUARD_PR_WATCH_HINT` | replaces the pull-request watching advice in the post-bash reminder and the Stop message |
 
 ## Pull-request recognition (post-bash)
