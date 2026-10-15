@@ -280,6 +280,13 @@ _assert_eq "adapter: muse envelope with non-string output stays raw" "$_muse_nul
 |rc=0" "$(_adapter muse _hook_tool_stdout "$(_string_payload "$_muse_null_output")")"
 _assert_eq "adapter: muse plain string stays raw" "plain
 |rc=0" "$(_adapter muse _hook_tool_stdout "$(_string_payload plain)")"
+_assert_eq "adapter: muse JSON array string stays raw" "[1]
+|rc=0" "$(_adapter muse _hook_tool_stdout "$(_string_payload '[1]')")"
+_assert_eq "adapter: muse JSON number string stays raw" "5
+|rc=0" "$(_adapter muse _hook_tool_stdout "$(_string_payload 5)")"
+_muse_no_output='{"exit_code":0,"terminal_status":"completed"}'
+_assert_eq "adapter: muse result fields without output stay raw" "$_muse_no_output
+|rc=0" "$(_adapter muse _hook_tool_stdout "$(_string_payload "$_muse_no_output")")"
 _assert_eq "adapter: muse object payload still reads stdout" "out
 |rc=0" "$(_adapter muse _hook_tool_stdout '{"tool_response":{"stdout":"out"}}')"
 
@@ -315,6 +322,38 @@ _assert_not_contains "runtime gate: muse scans only unwrapped output" "WARNING" 
 
 _run_hook_named_agent codex "$POST_BASH" "$(_string_payload 'total 0')"
 _assert_not_contains "codex clean string: no WARNING" "WARNING" "$HOOK_STDERR"
+
+# Invalid UTF-8 bytes around a credential must not defeat the builtin
+# prefilter (it matches bytes in the C locale).
+_invalid_utf8_payload=$(printf '{"tool_input":{"command":"cat blob"},"tool_response":{"stdout":"\xff\xfe %s \xff"}}' "$_sk_key")
+_run_hook "$POST_BASH" "$_invalid_utf8_payload"
+_assert_contains "invalid UTF-8 around a credential: warns" "sk- prefix" "$HOOK_STDERR"
+_run_hook_env_utf8() {
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    AGENTGUARD_SESSION_ID="$TEST_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="agent"
+    CODEX_THREAD_ID=
+    LC_ALL=en_US.UTF-8
+  )
+  _run_hook_env "$@"
+}
+_run_hook_env_utf8 "$POST_BASH" "$_invalid_utf8_payload"
+_assert_contains "invalid UTF-8 under a UTF-8 locale: warns" "sk- prefix" "$HOOK_STDERR"
+
+# post-bash resolves the runtime once, in its own shell, before the
+# `$(...)` adapters read it; a lookup inside the subshell would fork again
+# and lose its cached answer. xtrace (inherited through SHELLOPTS) marks each
+# call of the uncached resolver. The default PS4 is used because Bash running
+# as root (CI containers) ignores an inherited PS4.
+_runtime_lookups=$(
+  printf '%s' "$(_string_payload 'a b')" |
+    env -u PS4 SHELLOPTS=xtrace AGENTGUARD_NAME=codex CODEX_THREAD_ID= \
+      AGENTGUARD_SESSION_ID="$TEST_SID-lookups" TMPDIR="$TEST_TMPDIR" \
+      "$POST_BASH" 2>&1 >/dev/null | grep -cE '^[+]+ _agent_name$'
+)
+_assert_eq "post-bash resolves the runtime exactly once" "1" "$_runtime_lookups"
 
 # A combined string needs the same subprocesses as a Claude object: one
 # adapter jq and no grep for clean output.

@@ -200,8 +200,14 @@ _expect_agent reminder muse "muse push summary envelope" \
   "$(_string_payload "./scripts/release.sh" "$(_muse_envelope "$_push_summary" "$_ok")")"
 _expect_agent quiet muse "muse failed push summary envelope" \
   "$(_string_payload "./scripts/release.sh" "$(_muse_envelope "$_push_summary" '{"exit_code":1,"terminal_status":"failed"}')")"
-_expect_agent quiet muse "muse cancelled push without exit_code" \
+# A cancelled command may already have pushed, and a backgrounded one is
+# still running; only a known failure state silences the reminder.
+_expect_agent reminder muse "muse cancelled push without exit_code" \
   "$(_string_payload "./scripts/release.sh" "$(_muse_envelope "$_push_summary" '{"terminal_status":"cancelled"}')")"
+_expect_agent reminder muse "muse backgrounded git push" \
+  "$(_string_payload "git push origin main" "$(_muse_envelope "" '{"terminal_status":"background_running"}')")"
+_expect_agent quiet muse "muse timed-out push without exit_code" \
+  "$(_string_payload "./scripts/release.sh" "$(_muse_envelope "$_push_summary" '{"terminal_status":"timed_out"}')")"
 _expect_agent quiet muse "muse failed git push command" \
   "$(_string_payload "git push origin main" "$(_muse_envelope "" '{"exit_code":1,"terminal_status":"failed"}')")"
 _expect_agent reminder muse "muse git push command" \

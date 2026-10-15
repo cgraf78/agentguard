@@ -323,7 +323,10 @@ Each hook emits one JSON response through `_hook_finish`.
   `_hook_context` directly for context that should not appear as a warning or
   reminder in stderr)
 - parsers: `_hook_parse_command`, `_hook_parse_edit_files`, `_hook_parse_mcp`
-- tool payload adapters: `_hook_tool_stdout`
+- tool payload adapters: `_hook_tool_stdout`, `_hook_tool_stderr`,
+  `_hook_tool_response_is_string` (Claude-style objects, Codex's combined
+  output string, and Muse's JSON envelope string, unwrapped only when the
+  detected runtime is Muse)
 - Hive Memory adapters: `_hook_hm_session_start`, `_hook_hm_prompt_submit`,
   `_hook_hm_tool_complete`, `_hook_hm_stop`
 - once markers: `_hook_prompt_cycle_reset`, `_hook_once_per_prompt`,
@@ -451,8 +454,9 @@ To add a new managed agent runtime:
   [`docs/watch-protocol.md`](docs/watch-protocol.md). Output extraction is centralized so agent-specific payload
   names do not leak into the base hook: it reads Claude-style output objects,
   Codex's combined output string, and Muse's JSON output envelope (unwrapped
-  only when the detected runtime is Muse, whose `exit_code` or non-completed
-  `terminal_status` also decides whether the command succeeded).
+  only when the detected runtime is Muse, whose `exit_code`, or without one a
+  `failed` or `timed_out` `terminal_status`, also decides whether the command
+  failed).
 - `agent-hook-pre-edit` parses edited paths, blocks edits to secret and
   credential files (such as `.env`, SSH keys, `*.pem`, `credentials`, and
   `.netrc`), reminds once per user prompt on
