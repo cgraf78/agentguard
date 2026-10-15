@@ -9,6 +9,13 @@ export AGENTGUARD_HIVE_MEMORY_HOOKS=0
 # explicit agent env, and the "no env" cases should stay no-env even when
 # their parent process is Codex.
 export AGENTGUARD_PROCESS_DETECT=0
+# Fake ancestor pids for canned `ps` tables. They sit above every supported
+# kernel's pid ceiling (Linux PID_MAX_LIMIT is 4194304; macOS and the BSDs stop
+# at 99999), so no real process can hold one. A small constant could be the
+# shell under test's own pid on a busy runner (macOS hands out pids in the low
+# thousands mid-suite), turning the canned chain into a self-loop that reads
+# as a complete non-match.
+export MOCK_AGENT_PID=9004242 MOCK_WRAPPER_PID=9004243
 # Same reasoning for inherited identity env: the runner may be launched by any
 # agent (Claude exports CLAUDE_CODE_SESSION_ID into tool subprocesses, Codex
 # CODEX_THREAD_ID, etc.). Scrub those so "no env" and explicit-agent fixtures are

@@ -392,10 +392,10 @@ done
 case "$field:$pid" in
   comm=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash" ;;
   args=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash -c hm remember --text only codex exec headless" ;;
-  ppid=:"${MOCK_CHILD_PID:-}") printf '%s\n' "4242" ;;
-  comm=:4242) printf '%s\n' "zsh" ;;
-  args=:4242) printf '%s\n' "zsh -i" ;;
-  ppid=:4242) printf '%s\n' "1" ;;
+  ppid=:"${MOCK_CHILD_PID:-}") printf '%s\n' "$MOCK_AGENT_PID" ;;
+  comm=:"$MOCK_AGENT_PID") printf '%s\n' "zsh" ;;
+  args=:"$MOCK_AGENT_PID") printf '%s\n' "zsh -i" ;;
+  ppid=:"$MOCK_AGENT_PID") printf '%s\n' "1" ;;
   comm=:1) printf '%s\n' "init" ;;
   args=:1) printf '%s\n' "init" ;;
   ppid=:1) printf '%s\n' "0" ;;
@@ -2095,10 +2095,10 @@ done
 case "$field:$pid" in
   comm=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash" ;;
   args=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash -c hook" ;;
-  ppid=:"${MOCK_CHILD_PID:-}") printf '%s\n' "4242" ;;
-  comm=:4242) printf '%s\n' "codex" ;;
-  args=:4242) printf '%s\n' "/usr/local/bin/codex --profile test" ;;
-  ppid=:4242) printf '%s\n' "1" ;;
+  ppid=:"${MOCK_CHILD_PID:-}") printf '%s\n' "$MOCK_AGENT_PID" ;;
+  comm=:"$MOCK_AGENT_PID") printf '%s\n' "codex" ;;
+  args=:"$MOCK_AGENT_PID") printf '%s\n' "/usr/local/bin/codex --profile test" ;;
+  ppid=:"$MOCK_AGENT_PID") printf '%s\n' "1" ;;
   comm=:1) printf '%s\n' "init" ;;
   args=:1) printf '%s\n' "init" ;;
   ppid=:1) printf '%s\n' "0" ;;
@@ -2135,9 +2135,9 @@ fi
 if [ "${MOCK_SNAPSHOT_UNRELATED:-}" = "1" ]; then
   printf '%s %s %s\n' "$MOCK_CHILD_PID" 1 bash
 else
-  printf '%s %s %s\n' "$MOCK_CHILD_PID" 4242 bash
+  printf '%s %s %s\n' "$MOCK_CHILD_PID" "$MOCK_AGENT_PID" bash
 fi
-printf '%s %s %s\n' 4242 1 /usr/local/bin/codex
+printf '%s %s %s\n' "$MOCK_AGENT_PID" 1 /usr/local/bin/codex
 printf '%s %s %s\n' 1 0 init
 SCRIPT
 chmod +x "$MOCK_PS_SNAPSHOT_DIR/ps"
@@ -2187,7 +2187,7 @@ cat >"$MOCK_PS_INCOMPLETE_DIR/ps" <<'SCRIPT'
 #!/usr/bin/env bash
 if [[ "$*" = "-axo pid=,ppid=,comm=" ]]; then
   if [ "${MOCK_SNAPSHOT_MODE:-}" = "partial-chain" ]; then
-    printf '%s\n' "$MOCK_CHILD_PID 4242 bash"
+    printf '%s\n' "$MOCK_CHILD_PID $MOCK_AGENT_PID bash"
   fi
   printf '%s\n' "1 0 init"
   exit 0
@@ -2205,9 +2205,9 @@ done
 
 case "$field:$pid" in
   comm=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash" ;;
-  ppid=:"${MOCK_CHILD_PID:-}") printf '%s\n' "4242" ;;
-  comm=:4242) printf '%s\n' "codex" ;;
-  ppid=:4242) printf '%s\n' "1" ;;
+  ppid=:"${MOCK_CHILD_PID:-}") printf '%s\n' "$MOCK_AGENT_PID" ;;
+  comm=:"$MOCK_AGENT_PID") printf '%s\n' "codex" ;;
+  ppid=:"$MOCK_AGENT_PID") printf '%s\n' "1" ;;
   comm=:1) printf '%s\n' "init" ;;
   ppid=:1) printf '%s\n' "0" ;;
   *) exit 1 ;;
@@ -2265,10 +2265,10 @@ done
 case "$field:$pid" in
   comm=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash" ;;
   args=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash -c hm remember --text only codex exec headless" ;;
-  ppid=:"${MOCK_CHILD_PID:-}") printf '%s\n' "4242" ;;
-  comm=:4242) printf '%s\n' "zsh" ;;
-  args=:4242) printf '%s\n' "zsh -i" ;;
-  ppid=:4242) printf '%s\n' "1" ;;
+  ppid=:"${MOCK_CHILD_PID:-}") printf '%s\n' "$MOCK_AGENT_PID" ;;
+  comm=:"$MOCK_AGENT_PID") printf '%s\n' "zsh" ;;
+  args=:"$MOCK_AGENT_PID") printf '%s\n' "zsh -i" ;;
+  ppid=:"$MOCK_AGENT_PID") printf '%s\n' "1" ;;
   comm=:1) printf '%s\n' "init" ;;
   args=:1) printf '%s\n' "init" ;;
   ppid=:1) printf '%s\n' "0" ;;
@@ -2309,10 +2309,10 @@ done
 case "$field:$pid" in
   comm=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash" ;;
   args=:"${MOCK_CHILD_PID:-}") printf '%s\n' "bash -c hook" ;;
-  ppid=:"${MOCK_CHILD_PID:-}") printf '%s\n' "4242" ;;
-  comm=:4242) printf '%s\n' "codex" ;;
-  args=:4242) printf '%s\n' "node /opt/codexless/server.js" ;;
-  ppid=:4242) printf '%s\n' "1" ;;
+  ppid=:"${MOCK_CHILD_PID:-}") printf '%s\n' "$MOCK_AGENT_PID" ;;
+  comm=:"$MOCK_AGENT_PID") printf '%s\n' "codex" ;;
+  args=:"$MOCK_AGENT_PID") printf '%s\n' "node /opt/codexless/server.js" ;;
+  ppid=:"$MOCK_AGENT_PID") printf '%s\n' "1" ;;
   comm=:1) printf '%s\n' "init" ;;
   args=:1) printf '%s\n' "init" ;;
   ppid=:1) printf '%s\n' "0" ;;

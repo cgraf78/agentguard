@@ -513,13 +513,14 @@ _wrap_result=$(env -u AGENTGUARD_SESSION_ID -u MUSE_SESSION_ID \
   AGENTGUARD_NAME=grok AGENTGUARD_PROCESS_DETECT=1 TMPDIR="$TEST_TMPDIR" \
   XDG_RUNTIME_DIR="$TEST_TMPDIR" \
   bash -c '
-    printf "%s 4243 bash\n4243 4242 sh\n4242 1 grok\n1 0 init\n" "$$" >"$1/snap-grok"
+    printf "%s %s bash\n%s %s sh\n%s 1 grok\n1 0 init\n" "$$" \
+      "$MOCK_WRAPPER_PID" "$MOCK_WRAPPER_PID" "$MOCK_AGENT_PID" "$MOCK_AGENT_PID" >"$1/snap-grok"
     export MOCK_PS_SNAPSHOT="$1/snap-grok" PATH="$1:$PATH"
     source "$2"
     printf "hook=%s cli=%s" "$_HOOK_SESSION_KEY" "$(_hook_agent_ancestor_key)"
   ' _ "$_mock_ps_dir" "$HELPERS" 2>/dev/null)
 _assert_eq "wrapper: grok hook uses agent pid, not wrapper" \
-  "hook=grok-4242 cli=grok-4242" "$_wrap_result"
+  "hook=grok-$MOCK_AGENT_PID cli=grok-$MOCK_AGENT_PID" "$_wrap_result"
 
 # shellcheck disable=SC2016 # Single quotes are intentional: expansion happens in the mock-ps child, not here.
 _wrap_result=$(env -u AGENTGUARD_SESSION_ID -u MUSE_SESSION_ID \
@@ -529,12 +530,13 @@ _wrap_result=$(env -u AGENTGUARD_SESSION_ID -u MUSE_SESSION_ID \
   AGENTGUARD_NAME=muse AGENTGUARD_PROCESS_DETECT=1 TMPDIR="$TEST_TMPDIR" \
   XDG_RUNTIME_DIR="$TEST_TMPDIR" \
   bash -c '
-    printf "%s 4243 bash\n4243 4242 sh\n4242 1 muse\n1 0 init\n" "$$" >"$1/snap-muse"
+    printf "%s %s bash\n%s %s sh\n%s 1 muse\n1 0 init\n" "$$" \
+      "$MOCK_WRAPPER_PID" "$MOCK_WRAPPER_PID" "$MOCK_AGENT_PID" "$MOCK_AGENT_PID" >"$1/snap-muse"
     export MOCK_PS_SNAPSHOT="$1/snap-muse" PATH="$1:$PATH"
     source "$2"
     printf "hook=%s cli=%s" "$_HOOK_SESSION_KEY" "$(_hook_agent_ancestor_key)"
   ' _ "$_mock_ps_dir" "$HELPERS" 2>/dev/null)
 _assert_eq "wrapper: muse hook uses agent pid, not hook pid" \
-  "hook=4242 cli=4242" "$_wrap_result"
+  "hook=$MOCK_AGENT_PID cli=$MOCK_AGENT_PID" "$_wrap_result"
 
 _test_summary

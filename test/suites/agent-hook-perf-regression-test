@@ -44,16 +44,16 @@ _run_hook_unmanaged() {
 
 echo "=== perf-regression: one ps snapshot per hook ==="
 
-# Mock ps serves a fixed table (this shell under a codex ancestor) and logs
-# every snapshot call. The Init/awk pipeline sees $$, so resolutions succeed.
+# Mock ps serves a fixed table (a fake child under a codex ancestor) and logs
+# every snapshot call.
 _mock_ps_dir=$(_tmpdir)
 _mock_ps_calls="$_mock_ps_dir/calls"
 cat >"$_mock_ps_dir/ps" <<'SCRIPT'
 #!/usr/bin/env bash
 if [[ "$*" = "-axo pid=,ppid=,comm=" ]]; then
   printf 'call\n' >>"$MOCK_PS_CALLS"
-  printf '%s %s %s\n' "$MOCK_CHILD_PID" 4242 bash
-  printf '%s %s %s\n' 4242 1 /usr/local/bin/codex
+  printf '%s %s %s\n' "$MOCK_CHILD_PID" "$MOCK_AGENT_PID" bash
+  printf '%s %s %s\n' "$MOCK_AGENT_PID" 1 /usr/local/bin/codex
   printf '%s %s %s\n' 1 0 init
   exit 0
 fi
@@ -72,7 +72,7 @@ _ps_snapshots_for_hook() {
   local _UNMANAGED_EXTRA=(
     "PATH=$_mock_ps_dir:$PATH"
     "MOCK_PS_CALLS=$_mock_ps_calls"
-    "MOCK_CHILD_PID=4243"
+    "MOCK_CHILD_PID=$MOCK_WRAPPER_PID"
   )
   _run_hook_unmanaged "$hook" "$input"
   wc -l <"$_mock_ps_calls" | tr -d ' '

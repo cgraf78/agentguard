@@ -62,14 +62,38 @@ else
   _fuzz_wall_cmd=()
 fi
 
-_fuzz_check() {
-  local desc="$1" hook="$2" payload_file="$3" status out err
-  out="$TEST_TMPDIR/fuzz.out"
-  err="$TEST_TMPDIR/fuzz.err"
+_fuzz_run() {
+  local hook="$1" payload_file="$2" out="$3" err="$4"
   env AGENTGUARD_SESSION_ID="$TEST_SID" TMPDIR="$TEST_TMPDIR" \
     AGENTGUARD_NAME=claude AGENTGUARD_CLASSIFY_TIMEOUT=5 \
     ${_fuzz_wall_cmd[@]+"${_fuzz_wall_cmd[@]}"} "$hook" <"$payload_file" >"$out" 2>"$err"
+}
+
+_fuzz_check() {
+  local desc="$1" hook="$2" payload_file="$3" status first out err
+  out="$TEST_TMPDIR/fuzz.out"
+  err="$TEST_TMPDIR/fuzz.err"
+  _fuzz_run "$hook" "$payload_file" "$out" "$err"
   status=$?
+  # An interpreter crash (128+N for a crash signal; `timeout` re-raises its
+  # child's signal, and the exit trap turns every other status into 0 or 2)
+  # gets one rerun. The rerun reuses the identical payload, so an AgentGuard
+  # defect that kills the interpreter (say, runaway recursion overflowing the
+  # stack) dies again and still fails. A one-off crash does not: Termux's
+  # Bash 5.3 once segfaulted on a payload that passed thousands of reruns and
+  # valgrind on a local build of the same release, and the next Termux CI
+  # run. Log it, don't fail on it. SIGKILL (the OOM killer) is not retried.
+  if [ "$status" -gt 128 ]; then
+    case "$(kill -l $((status - 128)) 2>/dev/null)" in
+      SEGV | BUS | ILL | ABRT | FPE)
+        first=$status
+        _fuzz_run "$hook" "$payload_file" "$out" "$err"
+        status=$?
+        [ "$status" -gt 128 ] ||
+          echo "  NOTE: $desc: exit $first, then $status on an identical rerun (seed $_fuzz_seed)"
+        ;;
+    esac
+  fi
   case "$status" in
     0 | 2) ;;
     *)
