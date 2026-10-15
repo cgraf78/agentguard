@@ -475,24 +475,25 @@ _assert_eq "scope with a dot: pending matches whole scope" "none" "$(
 rm -f "$PRODUCER/watchers/pending.o_r.js.$WATCHER_PID"
 _stop_watcher
 
-# Termux runs programs through Android's dynamic linker, so argv reads
-# `linker64 <bash> <script>`. Mimic that shape: argv[0] is the linker and
-# argv[1] a script named bash that keeps running with argv[2] the watcher.
+# Termux execs programs through Android's dynamic linker, which repeats the
+# program's path after argv[0]: `bash /data/.../bash <script> --wait`. Mimic
+# that shape with a script named bash that keeps running, so the watcher's
+# name is argv[2].
 if [ -r /proc/self/cmdline ]; then
   _linker_dir="$TEST_TMPDIR/linker"
   mkdir -p "$_linker_dir"
   printf '%s\n' '#!/usr/bin/env bash' "trap 'kill \$c 2>/dev/null; exit 0' TERM" \
     'sleep 300 & c=$!' 'wait' >"$_linker_dir/bash"
   : >"$_linker_dir/git-pr-watch"
-  (exec -a /system/bin/linker64 bash "$_linker_dir/bash" "$_linker_dir/git-pr-watch" --wait \
+  (exec -a bash bash "$_linker_dir/bash" "$_linker_dir/git-pr-watch" --wait \
     </dev/null >/dev/null 2>&1) &
   WATCHER_PID=$!
   for ((_i = 0; _i < 100; _i++)); do
-    tr '\0' ' ' <"/proc/$WATCHER_PID/cmdline" 2>/dev/null | grep -q 'linker64.*git-pr-watch' && break
+    tr '\0' ' ' <"/proc/$WATCHER_PID/cmdline" 2>/dev/null | grep -q 'linker/git-pr-watch' && break
     sleep 0.05
   done
   printf '%s\n' "$WATCHER_PID" >"$PRODUCER/watchers/o_r_12.$WATCHER_PID"
-  _assert_eq "watcher behind a dynamic linker argv[0] counts" "b" "$(_unmet_after)"
+  _assert_eq "watcher whose argv repeats the program path counts" "b" "$(_unmet_after)"
   rm -f "$PRODUCER/watchers/o_r_12.$WATCHER_PID"
   _stop_watcher
 fi

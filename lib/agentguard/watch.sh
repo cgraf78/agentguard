@@ -192,28 +192,31 @@ _hook_watch_roots() {
 # argv[0] or argv[1] (a script may run as `bash /path/<name> ...`). A pid in a
 # watcher file can be reused after a crash, so liveness alone is not enough.
 # Linux reads argv from /proc with builtins; elsewhere `ps` prints the joined
-# command line, matched so a path containing spaces still works. Termux runs
-# programs through Android's dynamic linker (argv[0] `linker64`), which is
-# skipped so the words after it count as argv[0] and argv[1].
+# command line, matched so a path containing spaces still works. Termux execs
+# programs through Android's dynamic linker, which repeats the program's path
+# after its argv[0] (`bash /data/.../bash /path/<name>`), so a leading word
+# whose basename the next word repeats is skipped (at most twice).
 _hook_watch_pid_runs() {
-  local pid="$1" name="$2" argv0='' argv1='' argv2='' command
+  local pid="$1" name="$2" word i=0 command
+  local -a words=()
   case "$pid" in
     '' | 0* | *[!0-9]*) return 1 ;;
   esac
   if [ -r /proc/self/cmdline ]; then
     [ -r "/proc/$pid/cmdline" ] || return 1
     {
-      IFS= read -r -d '' argv0 || true
-      IFS= read -r -d '' argv1 || true
-      IFS= read -r -d '' argv2 || true
+      while [ "${#words[@]}" -lt 4 ] && IFS= read -r -d '' word; do
+        words[${#words[@]}]="$word"
+      done
     } 2>/dev/null <"/proc/$pid/cmdline" || return 1
-    case "${argv0##*/}" in
-      linker | linker64)
-        argv0="$argv1"
-        argv1="$argv2"
-        ;;
-    esac
-    [ "${argv0##*/}" = "$name" ] || [ "${argv1##*/}" = "$name" ]
+    while [ "$i" -lt 2 ] && [ "${#words[@]}" -gt $((i + 1)) ] &&
+      [ "${words[i]##*/}" = "${words[i + 1]##*/}" ]; do
+      i=$((i + 1))
+    done
+    word="${words[i]:-}"
+    [ "${word##*/}" != "$name" ] || return 0
+    word="${words[i + 1]:-}"
+    [ -n "$word" ] && [ "${word##*/}" = "$name" ]
     return
   fi
   kill -0 "$pid" 2>/dev/null || return 1

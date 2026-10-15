@@ -69,8 +69,9 @@ process's argv[0] or argv[1] has the recorded basename (a script may run as
 `bash /path/git-pr-watch ...`). On Linux, argv comes from
 `/proc/<pid>/cmdline` with shell builtins; elsewhere from
 `ps -o command= -p <pid>`, matched so a path containing spaces still works.
-On Termux, which runs programs through Android's dynamic linker, a leading
-`linker`/`linker64` argv[0] is skipped first. A pid reused after a crash
+On Termux, which execs programs through Android's dynamic linker and so
+repeats the program's path after argv[0] (`bash /data/.../bash <script>`), a
+leading word whose basename the next word repeats is skipped first. A pid reused after a crash
 therefore does not count.
 
 Per the producer contract, the engine lists `watchers/` before reading
@@ -162,8 +163,9 @@ Read from the hook environment, which an agent's tool shell cannot change:
 
 All of this happens only after a builtin prefilter matched a command in
 command position, and only for a successful command (status 0) that the host
-did not run in the background (a Claude Code `run_in_background` call
-reports before the command has done anything):
+did not run in the background (a Claude Code `run_in_background` call, or a
+shell Muse reports as `background_running`, reports before the command has
+done anything):
 
 - **Record**: `gh pr create` (not `--dry-run`), `git pr-open`, or
   `git pr-submit` (also the dashed `git-pr-*` forms; not `-n`, `--dry-run`, or
