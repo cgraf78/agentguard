@@ -127,9 +127,12 @@ _assert_eq "trailing continuation at EOF: classified" "0" "$HOOK_EXIT"
 echo ""
 echo "=== pre-bash: oversized or slow input fails closed ==="
 
+# Scanners skip runs of plain characters in bulk, so a long plain word no
+# longer outlasts a 1 s deadline. Alternating quotes keep every character
+# significant, which still forces a character-by-character scan.
 {
   printf 'echo '
-  head -c 64000 /dev/zero | tr '\0' 'a'
+  for ((_i = 0; _i < 16000; _i++)); do printf '"a"'; done
   printf '; true'
 } >"$_bounds_command"
 _bounds_run 60 AGENTGUARD_CLASSIFY_TIMEOUT=1

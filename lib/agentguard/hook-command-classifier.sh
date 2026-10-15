@@ -5,22 +5,70 @@
 # conservative classification for guard policies such as nested shell payloads
 # and protected bare-Git untracked scans.
 
-_strip_outer_quotes() {
-  local value="$1"
-  value="${value%\"}"
-  value="${value#\"}"
-  value="${value%\'}"
-  value="${value#\'}"
-  printf '%s' "$value"
+# Word helpers below print their result, or with an optional output variable
+# name store it there instead. The guards call them several times per word, and
+# each `$(...)` capture forked a subshell: three nested forks per
+# _clean_command_word were most of the classifier's latency. The stored result
+# is exactly what the capture produced, trailing newlines stripped included, so
+# both forms agree. Locals carry a per-helper prefix so a caller's output name
+# (`word`, `value`) never resolves to the helper's own local. The word helpers
+# never touch BASH_REMATCH; the scanners do, and since they now run in the
+# caller's shell, callers must read BASH_REMATCH right after their own match
+# (every current one does).
+
+# Store $2 in the variable named by $1 minus trailing newlines, as `$(...)`
+# would have. One-character suffix removal and a trailing-literal match are
+# linear, unlike a `%%` over a long run.
+_store_captured() {
+  local _stc_value="$2"
+  while [[ "$_stc_value" == *$'\n' ]]; do
+    _stc_value="${_stc_value%$'\n'}"
+  done
+  printf -v "$1" '%s' "$_stc_value"
 }
 
+# Store $2 in the variable named by $1 as above, or print it when $1 is empty.
+_emit_result() {
+  if [ -n "$1" ]; then
+    _store_captured "$1" "$2"
+  else
+    printf '%s' "$2"
+  fi
+}
+
+_strip_outer_quotes() {
+  local _soq_value="$1"
+  _soq_value="${_soq_value%\"}"
+  _soq_value="${_soq_value#\"}"
+  _soq_value="${_soq_value%\'}"
+  _soq_value="${_soq_value#\'}"
+  _emit_result "${2:-}" "$_soq_value"
+}
+
+# _strip_outer_quotes, then drop every quote and backslash. The quote strip is
+# inlined, and so is the trailing-newline strip its capture used to apply,
+# because this runs for nearly every word and each Bash function call costs
+# about as much as the string work itself.
 _shell_word_token() {
-  local value
-  value="$(_strip_outer_quotes "$1")"
-  value="${value//\"/}"
-  value="${value//\'/}"
-  value="${value//\\/}"
-  printf '%s' "$value"
+  local _swt_value="$1"
+  _swt_value="${_swt_value%\"}"
+  _swt_value="${_swt_value#\"}"
+  _swt_value="${_swt_value%\'}"
+  _swt_value="${_swt_value#\'}"
+  while [[ "$_swt_value" == *$'\n' ]]; do
+    _swt_value="${_swt_value%$'\n'}"
+  done
+  _swt_value="${_swt_value//\"/}"
+  _swt_value="${_swt_value//\'/}"
+  _swt_value="${_swt_value//\\/}"
+  if [ -n "${2:-}" ]; then
+    while [[ "$_swt_value" == *$'\n' ]]; do
+      _swt_value="${_swt_value%$'\n'}"
+    done
+    printf -v "$2" '%s' "$_swt_value"
+  else
+    printf '%s' "$_swt_value"
+  fi
 }
 
 _trim_hook_fragment() {
@@ -106,6 +154,47 @@ _scan_char_at() {
   next2="${_sc_chunk:k+2:1}"
 }
 
+# Skip a scanner past a run of characters its current state treats as inert.
+# Call right after `_scan_char_at "$i"`. $1 is a bracket-expression body
+# naming the characters that are NOT inert in that state (Bash compiles
+# regexes without REG_NEWLINE, so a significant newline must be listed). On
+# success the run, which starts with the character at i and stays inside the
+# loaded chunk, is in _sc_run and i is left on its last character so the
+# caller's `i++` resumes right after it. Fails, changing nothing, when the
+# character at i is significant or unreadable (past the deadline, an invalid
+# byte), so callers fall back to their one-character handling. One regex
+# replaces a loop iteration per character, the scanners' dominant cost on
+# long commands.
+_scan_skip_inert() {
+  # A run of one gains nothing over the caller's own handling, so skip the
+  # regex unless the next character is plainly inert in every state too:
+  # dense quoting or operators then cost no more than before.
+  case "$next" in
+    [[:alnum:]_./-]) ;;
+    *) return 1 ;;
+  esac
+  local re="^[^$1]+"
+  [[ "${_sc_chunk:i-_sc_start}" =~ $re ]] || return 1
+  _sc_run="${BASH_REMATCH[0]}"
+  # An optional $2 bounds the run below that index for scanners that stop
+  # short of the text's end (_lc_scan).
+  if [ -n "${2:-}" ] && [ $((i + ${#_sc_run})) -gt "$2" ]; then
+    _sc_run="${_sc_run:0:$2-i}"
+  fi
+  i=$((i + ${#_sc_run} - 1))
+}
+
+# _scan_skip_inert for the scanners' shared quote rules, reading the caller's
+# $quote: inside single quotes only the closing quote matters; inside double
+# quotes or $'...' a backslash escapes too.
+_scan_skip_quoted_inert() {
+  case "$quote" in
+    "'") _scan_skip_inert "'" "${1:-}" ;;
+    ansi) _scan_skip_inert "'\\" "${1:-}" ;;
+    *) _scan_skip_inert "\"\\" "${1:-}" ;;
+  esac
+}
+
 # Heredoc delimiters decide whether the body is executable input or inert prose.
 # Keep that parsing centralized so the line splitter, generic command guards,
 # and protected bare-Git scan blocker agree on multiple heredocs, quoted delimiters, and
@@ -114,7 +203,7 @@ _heredoc_specs() {
   local line="$1" quote="" ch next next2 delim active strip_tabs marker_quote="" escaped=0 in_arith=0 arith_depth=0
   local i j
 
-  local _sc_text="$line" _sc_start=-256 _sc_chunk="" _sc_len next next2
+  local _sc_text="$line" _sc_start=-256 _sc_chunk="" _sc_len next next2 _sc_run
   _sc_len=${#_sc_text}
   for ((i = 0; i < _sc_len; i++)); do
     _scan_char_at "$i"
@@ -128,6 +217,7 @@ _heredoc_specs() {
       continue
     fi
     if [ -n "$quote" ]; then
+      _scan_skip_quoted_inert && continue
       if [ "$quote" = "ansi" ]; then
         [ "$ch" = "'" ] && quote=""
       else
@@ -153,6 +243,9 @@ _heredoc_specs() {
       esac
       continue
     fi
+    # Outside quotes and arithmetic only these characters can change state
+    # or start a heredoc operator.
+    _scan_skip_inert "\\\$'\"(<" && continue
     case "$ch" in
       "$")
         if [ "$next" = "'" ]; then
@@ -286,7 +379,7 @@ _lc_scan() {
   local in_backtick="$_LC_BACKTICK" in_paren="$_LC_PAREN" in_arith="$_LC_ARITH"
   local paren_depth="$_LC_PDEPTH" arith_depth="$_LC_ADEPTH"
 
-  local _sc_text="$text" _sc_start=-256 _sc_chunk=""
+  local _sc_text="$text" _sc_start=-256 _sc_chunk="" _sc_run
   for ((i = _LC_POS; i < end; i++)); do
     _scan_char_at "$i"
 
@@ -300,6 +393,7 @@ _lc_scan() {
     fi
 
     if [ "$in_backtick" -eq 1 ]; then
+      _scan_skip_inert "\\\`" "$end" && continue
       [ "$ch" = "\`" ] && in_backtick=0
       continue
     fi
@@ -389,6 +483,13 @@ _lc_scan() {
       esac
       continue
     fi
+
+    # Top level: skip runs of characters that cannot change the state.
+    case "$quote" in
+      "") _scan_skip_inert "\\\$'\"\`<>" "$end" && continue ;;
+      '"') _scan_skip_inert "\\\$\"\`<>" "$end" && continue ;;
+      *) _scan_skip_quoted_inert "$end" && continue ;;
+    esac
 
     if [ "$quote" = "ansi" ]; then
       [ "$ch" = "'" ] && quote=""
@@ -644,6 +745,34 @@ _append_heredoc_body_line() {
   printf '%s' "$current"
 }
 
+# Cheap text tests run before a generator's process substitution: a test
+# fails only when the generator would print nothing, so a caller can skip the
+# fork for ordinary text without changing what it scans.
+#
+# _executable_expansion_payloads emits only from a backtick, `$(`, `<(`, or
+# `>(` (`$((` contains `$(`).
+_may_have_expansion_payloads() {
+  case "$1" in
+    *\`* | *\$\(* | *\<\(* | *\>\(*) return 0 ;;
+  esac
+  return 1
+}
+
+# _structural_shell_payloads needs an unquoted `)` (a case arm) or `{` (a
+# function body).
+_may_have_structural_payloads() {
+  [[ "$1" == *')'* || "$1" == *'{'* ]]
+}
+
+# _env_split_payloads needs a token that cleans to env or */env. Tokens only
+# drop quotes, backslashes, and the `$` of `$'...'`, so the text must hold e,
+# n, v with nothing else between them. (A regex, because deleting those
+# characters with `${1//...}` is quadratic on long runs of them.)
+_may_have_env_split_payloads() {
+  local re="e[\\\\'\"\$]*n[\\\\'\"\$]*v"
+  [[ "$1" =~ $re ]]
+}
+
 _flush_active_heredoc_payloads() {
   local body="$1" active="${2:-0}"
   # Bash accepts a heredoc that reaches EOF before its delimiter, emits a
@@ -660,7 +789,7 @@ _split_command_fragments() {
   local line="$1" buf="" quote="" ch next fragment escaped=0
   local i
 
-  local _sc_text="$line" _sc_start=-256 _sc_chunk="" _sc_len next next2
+  local _sc_text="$line" _sc_start=-256 _sc_chunk="" _sc_len next next2 _sc_run
   _sc_len=${#_sc_text}
   for ((i = 0; i < _sc_len; i++)); do
     _scan_char_at "$i"
@@ -675,6 +804,10 @@ _split_command_fragments() {
       continue
     fi
     if [ -n "$quote" ]; then
+      if _scan_skip_quoted_inert; then
+        buf+="$_sc_run"
+        continue
+      fi
       if [ "$quote" = "ansi" ]; then
         [ "$ch" = "'" ] && quote=""
       else
@@ -707,7 +840,11 @@ _split_command_fragments() {
         fi
         ;;
       *)
-        buf+="$ch"
+        if _scan_skip_inert "\\\$'\";&|"; then
+          buf+="$_sc_run"
+        else
+          buf+="$ch"
+        fi
         ;;
     esac
   done
@@ -725,11 +862,15 @@ _hook_command_fragments() {
   done < <(_hook_command_lines "$text")
 }
 
+# Index of the first unquoted, unescaped $2 in $1, stored in
+# _UNQUOTED_CHAR_INDEX (a global so callers need no `$(...)` fork).
+_UNQUOTED_CHAR_INDEX=''
+
 _unquoted_char_index() {
   local text="$1" needle="$2" quote="" ch next escaped=0
   local i
 
-  local _sc_text="$text" _sc_start=-256 _sc_chunk="" _sc_len next next2
+  local _sc_text="$text" _sc_start=-256 _sc_chunk="" _sc_len next next2 _sc_run
   _sc_len=${#_sc_text}
   for ((i = 0; i < _sc_len; i++)); do
     _scan_char_at "$i"
@@ -743,6 +884,7 @@ _unquoted_char_index() {
       continue
     fi
     if [ -n "$quote" ]; then
+      _scan_skip_quoted_inert && continue
       if { [ "$quote" = "ansi" ] && [ "$ch" = "'" ]; } ||
         { [ "$quote" != "ansi" ] && [ "$ch" = "$quote" ]; }; then
         quote=""
@@ -764,8 +906,14 @@ _unquoted_char_index() {
         ;;
     esac
 
+    # The needle joins a bracket expression, where `]`, `^`, `-`, and `[` are
+    # syntax; callers pass `)` or `{`, and anything else keeps the slow path.
+    case "$needle" in
+      "]" | "^" | "-" | "[") ;;
+      *) [ "$ch" != "$needle" ] && _scan_skip_inert "\\\$'\"$needle" && continue ;;
+    esac
     if [ "$ch" = "$needle" ]; then
-      printf '%s' "$i"
+      _UNQUOTED_CHAR_INDEX="$i"
       return 0
     fi
   done
@@ -774,12 +922,10 @@ _unquoted_char_index() {
 }
 
 _function_definition_name() {
-  local fragment="$1" word raw0 raw1 raw2 name
+  local fragment="$1" raw0 raw1 raw2 name
   local -a words=()
 
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
+  _fragment_token_words "$fragment" words
   [ "${#words[@]}" -gt 0 ] || return 1
 
   raw0="${words[0]}"
@@ -810,17 +956,19 @@ _function_body_payload() {
   local fragment="$1" index payload
 
   _function_definition_name "$fragment" >/dev/null || return 1
-  index="$(_unquoted_char_index "$fragment" "{")" || return 1
-  payload="$(_trim_hook_fragment "${fragment:$((index + 1))}")"
+  _unquoted_char_index "$fragment" "{" || return 1
+  index="$_UNQUOTED_CHAR_INDEX"
+  _trim_hook_fragment "${fragment:$((index + 1))}" payload
   [ -n "$payload" ] || return 1
   printf '%s\n' "$payload"
 }
 
 _case_arm_payload() {
   local fragment="$1" word first index payload
-  word="$(_fragment_command_word "$fragment")" || return 1
+  _fragment_command_word "$fragment" word || return 1
   if [ "$word" != "case" ]; then
-    first="$(_first_shell_word "$fragment")" || return 1
+    _first_shell_word "$fragment" || return 1
+    first="$_FIRST_SHELL_WORD"
     # `_split_command_fragments` separates `;;`, so later case arms arrive as
     # `pattern) command`. Treat only a leading pattern terminator as a case body
     # to avoid interpreting arbitrary arguments containing `)` as shell code.
@@ -830,8 +978,9 @@ _case_arm_payload() {
     esac
   fi
 
-  index="$(_unquoted_char_index "$fragment" ")")" || return 1
-  payload="$(_trim_hook_fragment "${fragment:$((index + 1))}")"
+  _unquoted_char_index "$fragment" ")" || return 1
+  index="$_UNQUOTED_CHAR_INDEX"
+  _trim_hook_fragment "${fragment:$((index + 1))}" payload
   [ -n "$payload" ] || return 1
   printf '%s\n' "$payload"
 }
@@ -855,7 +1004,7 @@ _executable_expansion_payloads() {
   local fragment="$1" ch next next2 quote="" paren_outer_quote="" payload="" arith_payload="" escaped=0 depth=0 arith_depth=0 in_paren=0 in_backtick=0 in_arith=0
   local i
 
-  local _sc_text="$fragment" _sc_start=-256 _sc_chunk="" _sc_len next next2
+  local _sc_text="$fragment" _sc_start=-256 _sc_chunk="" _sc_len next next2 _sc_run
   _sc_len=${#_sc_text}
   for ((i = 0; i < _sc_len; i++)); do
     _scan_char_at "$i"
@@ -881,6 +1030,10 @@ _executable_expansion_payloads() {
     fi
 
     if [ "$in_backtick" -eq 1 ]; then
+      if _scan_skip_inert "\\\`"; then
+        payload+="$_sc_run"
+        continue
+      fi
       if [ "$ch" = "\`" ]; then
         [ -n "$payload" ] && printf '%s\0' "$payload"
         payload=""
@@ -944,6 +1097,10 @@ _executable_expansion_payloads() {
 
     if [ "$in_paren" -eq 1 ]; then
       if [ -n "$quote" ]; then
+        if _scan_skip_quoted_inert; then
+          payload+="$_sc_run"
+          continue
+        fi
         if { [ "$quote" = "ansi" ] && [ "$ch" = "'" ]; } ||
           { [ "$quote" != "ansi" ] && [ "$ch" = "$quote" ]; }; then
           quote=""
@@ -982,11 +1139,22 @@ _executable_expansion_payloads() {
           fi
           ;;
         *)
-          payload+="$ch"
+          if _scan_skip_inert "\\\$'\"()"; then
+            payload+="$_sc_run"
+          else
+            payload+="$ch"
+          fi
           ;;
       esac
       continue
     fi
+
+    # Top level: plain characters only matter inside a substitution.
+    case "$quote" in
+      "") _scan_skip_inert "\\\$'\"\`<>" && continue ;;
+      '"') _scan_skip_inert "\\\$\"\`<>" && continue ;;
+      *) _scan_skip_quoted_inert && continue ;;
+    esac
 
     if [ "$quote" = "ansi" ]; then
       [ "$ch" = "'" ] && quote=""
@@ -1166,9 +1334,11 @@ _hook_executable_fragments_uncached() {
             _agentguard_plain_fragment_command_word "$fragment" >/dev/null; }; then
           continue
         fi
-        while IFS= read -r payload; do
-          _hook_executable_fragments "$payload" $((depth + 1))
-        done < <(_structural_shell_payloads "$fragment")
+        if _may_have_structural_payloads "$fragment"; then
+          while IFS= read -r payload; do
+            _hook_executable_fragments "$payload" $((depth + 1))
+          done < <(_structural_shell_payloads "$fragment")
+        fi
         while IFS= read -r payload; do
           _hook_executable_fragments "$payload" $((depth + 1))
         done < <(_nested_shell_payloads "$fragment")
@@ -1176,9 +1346,11 @@ _hook_executable_fragments_uncached() {
         # runs, not only as the first command. `true; env -S 'rm -rf /'` is one
         # line but the env invocation is the second fragment. (The protected
         # bare-Git scanner already calls this per fragment.)
-        while IFS= read -r payload; do
-          _hook_executable_fragments "$payload" $((depth + 1))
-        done < <(_env_split_payloads "$fragment")
+        if _may_have_env_split_payloads "$fragment"; then
+          while IFS= read -r payload; do
+            _hook_executable_fragments "$payload" $((depth + 1))
+          done < <(_env_split_payloads "$fragment")
+        fi
       fi
     done < <(_split_command_fragments "${command//$'\n'/ }")
 
@@ -1186,9 +1358,11 @@ _hook_executable_fragments_uncached() {
     # unbounded shell interpreter. Two levels catches normal agent-generated
     # wrappers while preventing pathological input from burning hook time.
     if [ "$depth" -lt 2 ]; then
-      while IFS= read -r -d '' payload; do
-        _hook_executable_fragments "$payload" $((depth + 1))
-      done < <(_executable_expansion_payloads "$command")
+      if _may_have_expansion_payloads "$command"; then
+        while IFS= read -r -d '' payload; do
+          _hook_executable_fragments "$payload" $((depth + 1))
+        done < <(_executable_expansion_payloads "$command")
+      fi
     fi
   done < <(_hook_command_lines "$text")
 
@@ -1196,9 +1370,11 @@ _hook_executable_fragments_uncached() {
   # stdin. Scan only those executable expansion payloads; the surrounding body
   # text remains prose so commit messages and generated files do not false-block.
   if [ "$depth" -lt 2 ]; then
-    while IFS= read -r -d '' payload; do
-      _hook_executable_fragments "$payload" $((depth + 1))
-    done < <(_active_heredoc_payloads "$text")
+    if [[ "$text" == *"<<"* ]]; then
+      while IFS= read -r -d '' payload; do
+        _hook_executable_fragments "$payload" $((depth + 1))
+      done < <(_active_heredoc_payloads "$text")
+    fi
   fi
 }
 
@@ -1331,15 +1507,17 @@ _agentguard_direct_simple_fragment_command_word() {
   # Control syntax outside quotes and substitutions inside double quotes can
   # introduce another command. A backslash inside a single-quoted format string
   # is inert; double-quoted escapes remain on the conservative parser path.
-  local _sc_text="$text" _sc_start=-256 _sc_chunk="" _sc_len next next2
+  local _sc_text="$text" _sc_start=-256 _sc_chunk="" _sc_len next next2 _sc_run
   _sc_len=${#_sc_text}
   for ((i = 0; i < _sc_len; i++)); do
     _scan_char_at "$i"
     if [ "$quote" = "'" ]; then
+      _scan_skip_inert "'" && continue
       [ "$ch" = "'" ] && quote=""
       continue
     fi
     if [ "$quote" = '"' ]; then
+      _scan_skip_inert "\"\\\`\$" && continue
       case "$ch" in
         '"') quote="" ;;
         \\ | \`) return 1 ;;
@@ -1348,6 +1526,7 @@ _agentguard_direct_simple_fragment_command_word() {
       continue
     fi
 
+    _scan_skip_inert "'\"\\\`\$;|&<>(){}"$'\n' && continue
     case "$ch" in
       "'") quote="'" ;;
       '"') quote='"' ;;
@@ -1445,7 +1624,7 @@ _agentguard_command_facts_array_json() {
   fi
 
   while IFS= read -r fragment; do
-    command="$(_fragment_command_word "$fragment")" || continue
+    _fragment_command_word "$fragment" command || continue
     _agentguard_command_fact_is_executable "$command" || continue
     [ -n "$command" ] || continue
     if [ "$first" -eq 1 ]; then
@@ -1492,36 +1671,78 @@ agentguard_classify_command_record_json() {
 _FRAGMENT_TOKENS_CACHE_FRAG=''
 _FRAGMENT_TOKENS_CACHE_LINES=''
 _FRAGMENT_TOKENS_CACHE_SET=''
+# Earlier primes in this shell, as parallel arrays (values carry the same `x`
+# sentinel). Guards walk all fragments once per guard, so the single entry
+# above alone missed about three times in four. Indexed arrays rather than an
+# associative one: `_hook_load_command_classifier` sources this file inside a
+# function, where `declare -A` would be local and a later lookup would
+# arithmetic-evaluate the fragment text as an index. The cap bounds the linear
+# lookup on commands with thousands of fragments.
+_FRAGMENT_TOKENS_MEMO_KEYS=()
+_FRAGMENT_TOKENS_MEMO_LINES=()
+_FRAGMENT_TOKENS_MEMO_MAX=64
 
 _fragment_prime_token_cache() {
-  local fragment="$1" lines
+  local fragment="$1" lines='' k
   if [ -n "$_FRAGMENT_TOKENS_CACHE_SET" ] && [ "$_FRAGMENT_TOKENS_CACHE_FRAG" = "$fragment" ]; then
     return 0
   fi
-  # Fetch before publishing: the fetch itself consults the cache, and the
-  # old fragment key must still be in place so the fetch misses and computes.
-  # The `x` sentinel preserves trailing newlines through the `$()` capture
-  # (which strips them): without it an all-empty token stream replays as
-  # empty instead of emitting its newline.
-  lines="$(
-    _fragment_tokens "$fragment"
-    printf x
-  )"
+  for ((k = 0; k < ${#_FRAGMENT_TOKENS_MEMO_KEYS[@]}; k++)); do
+    if [ "${_FRAGMENT_TOKENS_MEMO_KEYS[k]}" = "$fragment" ]; then
+      lines="${_FRAGMENT_TOKENS_MEMO_LINES[k]}"
+      break
+    fi
+  done
+  if [ -z "$lines" ]; then
+    # Scan in this shell: a `$(...)` capture here forked once per miss.
+    _fragment_tokens_scan "$fragment" lines
+    lines+=x
+    if [ "${#_FRAGMENT_TOKENS_MEMO_KEYS[@]}" -lt "$_FRAGMENT_TOKENS_MEMO_MAX" ]; then
+      _FRAGMENT_TOKENS_MEMO_KEYS+=("$fragment")
+      _FRAGMENT_TOKENS_MEMO_LINES+=("$lines")
+    fi
+  fi
   _FRAGMENT_TOKENS_CACHE_FRAG="$fragment"
   _FRAGMENT_TOKENS_CACHE_LINES="$lines"
   _FRAGMENT_TOKENS_CACHE_SET=1
 }
 
-_fragment_tokens() {
-  local fragment="$1" ch quote="" word="" escaped=0 started=0
-  local i
+# Fill the array named by $2 with the tokens of fragment $1, exactly as
+# `while IFS= read -r w; do arr+=("$w"); done < <(_fragment_tokens ...)` did
+# into an empty array, without the process substitution's fork. That loop
+# split the token stream on newlines and dropped an unterminated tail; a
+# token holding a quoted newline therefore spans two elements, and that
+# behavior is kept. A here-string adds the final newline the stream already
+# had, and an empty stream must yield no elements rather than one empty one.
+_fragment_token_words() {
+  local _ftw_lines
+  _fragment_prime_token_cache "$1"
+  _ftw_lines="${_FRAGMENT_TOKENS_CACHE_LINES%x}"
+  case "$_ftw_lines" in
+    *$'\n') mapfile -t "$2" <<<"${_ftw_lines%$'\n'}" ;;
+    *$'\n'*) mapfile -t "$2" <<<"${_ftw_lines%$'\n'*}" ;;
+    *) mapfile -t "$2" </dev/null ;;
+  esac
+}
 
-  if [ -n "$_FRAGMENT_TOKENS_CACHE_SET" ] && [ "$_FRAGMENT_TOKENS_CACHE_FRAG" = "$fragment" ]; then
+_fragment_tokens() {
+  local tokens
+  if [ -n "$_FRAGMENT_TOKENS_CACHE_SET" ] && [ "$_FRAGMENT_TOKENS_CACHE_FRAG" = "$1" ]; then
     printf '%s' "${_FRAGMENT_TOKENS_CACHE_LINES%x}"
     return 0
   fi
+  _fragment_tokens_scan "$1" tokens
+  printf '%s' "$tokens"
+}
 
-  local _sc_text="$fragment" _sc_start=-256 _sc_chunk="" _sc_len next next2
+# Store the newline-terminated token stream of fragment $1 in the variable
+# named by $2 (the stream _fragment_tokens prints); $2 must not name one of
+# this scanner's locals.
+_fragment_tokens_scan() {
+  local fragment="$1" ch quote="" word="" escaped=0 started=0 _fts_out=""
+  local i
+
+  local _sc_text="$fragment" _sc_start=-256 _sc_chunk="" _sc_len next next2 _sc_run
   _sc_len=${#_sc_text}
   for ((i = 0; i < _sc_len; i++)); do
     _scan_char_at "$i"
@@ -1539,6 +1760,11 @@ _fragment_tokens() {
     fi
 
     if [ -n "$quote" ]; then
+      if _scan_skip_quoted_inert; then
+        word+="$_sc_run"
+        started=1
+        continue
+      fi
       if { [ "$quote" = "ansi" ] && [ "$ch" = "'" ]; } ||
         { [ "$quote" != "ansi" ] && [ "$ch" = "$quote" ]; }; then
         quote=""
@@ -1566,13 +1792,17 @@ _fragment_tokens() {
         ;;
       [[:space:]])
         if [ "$started" -eq 1 ]; then
-          printf '%s\n' "$word"
+          _fts_out+="$word"$'\n'
           word=""
           started=0
         fi
         ;;
       *)
-        word+="$ch"
+        if _scan_skip_inert "\\\$'\"[:space:]"; then
+          word+="$_sc_run"
+        else
+          word+="$ch"
+        fi
         started=1
         ;;
     esac
@@ -1581,7 +1811,8 @@ _fragment_tokens() {
   if [ "$escaped" -eq 1 ]; then
     word+="\\"
   fi
-  [ "$started" -eq 1 ] && printf '%s\n' "$word"
+  [ "$started" -eq 1 ] && _fts_out+="$word"$'\n'
+  printf -v "$2" '%s' "$_fts_out"
 }
 
 _protected_bare_git_configured() {
@@ -1777,7 +2008,7 @@ _expand_path_aliases() {
         ;;
     esac
 
-    replacement="$(_strip_outer_quotes "$replacement")"
+    _strip_outer_quotes "$replacement" replacement
     replacement="${replacement//\"/}"
     replacement="${replacement//\'/}"
     replacement="${replacement//\\/}"
@@ -1818,7 +2049,7 @@ _expand_home_path_token() {
 _is_protected_bare_git_path() {
   local value protected
   _protected_bare_git_configured || return 1
-  value="$(_strip_outer_quotes "$1")"
+  _strip_outer_quotes "$1" value
   value="${value//\"/}"
   value="${value//\'/}"
   value="${value//\\/}"
@@ -1884,14 +2115,14 @@ _remember_protected_bare_git_path_assignments() {
   read -r -a words <<<"$fragment"
   [ "${#words[@]}" -gt 0 ] || return 0
 
-  word="$(_clean_command_word "${words[$i]}")"
+  _clean_command_word "${words[$i]}" word
   case "$word" in
     export)
       assignment_builtin=1
       export_assignment=1
       ((i++))
       while [ "$i" -lt "${#words[@]}" ]; do
-        word="$(_strip_outer_quotes "${words[$i]}")"
+        _strip_outer_quotes "${words[$i]}" word
         [[ "$word" == -* ]] || break
         [ "$word" = "--" ] && {
           ((i++))
@@ -1914,7 +2145,7 @@ _remember_protected_bare_git_path_assignments() {
       readonly_assignment=1
       ((i++))
       while [ "$i" -lt "${#words[@]}" ]; do
-        word="$(_strip_outer_quotes "${words[$i]}")"
+        _strip_outer_quotes "${words[$i]}" word
         [[ "$word" == -* ]] || break
         [ "$word" = "--" ] && {
           ((i++))
@@ -1927,7 +2158,7 @@ _remember_protected_bare_git_path_assignments() {
       assignment_builtin=1
       ((i++))
       while [ "$i" -lt "${#words[@]}" ]; do
-        word="$(_strip_outer_quotes "${words[$i]}")"
+        _strip_outer_quotes "${words[$i]}" word
         [[ "$word" == [-+]* ]] || break
         [ "$word" = "--" ] && {
           ((i++))
@@ -1953,7 +2184,7 @@ _remember_protected_bare_git_path_assignments() {
       unset_builtin=1
       ((i++))
       while [ "$i" -lt "${#words[@]}" ]; do
-        word="$(_strip_outer_quotes "${words[$i]}")"
+        _strip_outer_quotes "${words[$i]}" word
         [[ "$word" == -* ]] || break
         [ "$word" = "--" ] && {
           ((i++))
@@ -1972,7 +2203,7 @@ _remember_protected_bare_git_path_assignments() {
   while [ "$i" -lt "${#words[@]}" ]; do
     word="${words[$i]}"
     ((i++))
-    word="$(_strip_outer_quotes "$word")"
+    _strip_outer_quotes "$word" word
     case "$word" in
       -*)
         [ "$assignment_builtin" -eq 1 ] && continue
@@ -2038,21 +2269,29 @@ _remember_assignment() {
   fi
 }
 
+# The hottest word helper: the result store is inlined (see _shell_word_token).
 _clean_command_word() {
-  local word
-  word="$(_shell_word_token "$1")"
-  while [[ "$word" == "("* || "$word" == "{"* ]]; do
-    word="${word#?}"
+  local _ccw_word
+  _shell_word_token "$1" _ccw_word
+  while [[ "$_ccw_word" == "("* || "$_ccw_word" == "{"* ]]; do
+    _ccw_word="${_ccw_word#?}"
   done
-  while [[ "$word" == *")" || "$word" == *"}" ]]; do
-    word="${word%?}"
+  while [[ "$_ccw_word" == *")" || "$_ccw_word" == *"}" ]]; do
+    _ccw_word="${_ccw_word%?}"
   done
-  printf '%s' "$word"
+  if [ -n "${2:-}" ]; then
+    while [[ "$_ccw_word" == *$'\n' ]]; do
+      _ccw_word="${_ccw_word%$'\n'}"
+    done
+    printf -v "$2" '%s' "$_ccw_word"
+  else
+    printf '%s' "$_ccw_word"
+  fi
 }
 
 _word_is_command_prefix() {
   local word
-  word="$(_clean_command_word "$1")"
+  _clean_command_word "$1" word
   case "$word" in
     "" | "(" | "{" | "!" | if | then | elif | while | until | do | else | coproc | command | builtin | exec | time | noglob)
       return 0
@@ -2063,7 +2302,7 @@ _word_is_command_prefix() {
 
 _word_is_git_executable() {
   local word
-  word="$(_clean_command_word "$1")"
+  _clean_command_word "$1" word
   case "$word" in
     git | */git)
       return 0
@@ -2074,7 +2313,7 @@ _word_is_git_executable() {
 
 _word_is_env_executable() {
   local word
-  word="$(_clean_command_word "$1")"
+  _clean_command_word "$1" word
   case "$word" in
     env | */env)
       return 0
@@ -2085,7 +2324,7 @@ _word_is_env_executable() {
 
 _word_is_shell_executable() {
   local word
-  word="$(_clean_command_word "$1")"
+  _clean_command_word "$1" word
   case "$word" in
     bash | sh | zsh | */bash | */sh | */zsh)
       return 0
@@ -2105,7 +2344,7 @@ _word_is_wait_until_executable() {
     *wait-until*) ;;
     *) return 1 ;;
   esac
-  word="$(_clean_command_word "$1")"
+  _clean_command_word "$1" word
   case "$word" in
     wait-until | */wait-until)
       return 0
@@ -2113,6 +2352,12 @@ _word_is_wait_until_executable() {
   esac
   return 1
 }
+
+# The three wrapper skippers below take a word index and the words, and on
+# success store the index just past the wrapper and its options in
+# _SKIP_WRAPPER_NEXT (a global, not a printed value, so callers need no
+# `$(...)` fork; nothing runs between a skipper's return and that read).
+_SKIP_WRAPPER_NEXT=''
 
 _skip_env_wrapper() {
   local i="$1" word
@@ -2122,7 +2367,7 @@ _skip_env_wrapper() {
   _word_is_env_executable "${words[$i]:-}" || return 1
   ((i++))
   while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
+    _clean_command_word "${words[$i]}" word
     case "$word" in
       -u | --unset | -C | --chdir | -S | --split-string)
         i=$((i + 2))
@@ -2143,12 +2388,12 @@ _skip_env_wrapper() {
     esac
   done
 
-  printf '%s' "$i"
+  _SKIP_WRAPPER_NEXT="$i"
 }
 
 _word_is_privilege_wrapper() {
   local word
-  word="$(_clean_command_word "$1")"
+  _clean_command_word "$1" word
   case "$word" in
     sudo | */sudo | doas | */doas)
       return 0
@@ -2188,12 +2433,12 @@ _skip_privilege_wrapper() {
   local -a words=("$@")
 
   _word_is_privilege_wrapper "${words[$i]:-}" || return 1
-  wrapper="$(_clean_command_word "${words[$i]}")"
+  _clean_command_word "${words[$i]}" wrapper
   wrapper="${wrapper##*/}"
   ((i++))
 
   while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
+    _clean_command_word "${words[$i]}" word
     case "$word" in
       --)
         ((i++))
@@ -2241,7 +2486,7 @@ _skip_privilege_wrapper() {
     esac
   done
 
-  printf '%s' "$i"
+  _SKIP_WRAPPER_NEXT="$i"
 }
 
 # `nohup`, `nice`, and `timeout` are transparent execution wrappers: they
@@ -2250,7 +2495,7 @@ _skip_privilege_wrapper() {
 # command word `nohup` and the rm guard would never fire.
 _word_is_execution_wrapper() {
   local word
-  word="$(_clean_command_word "$1")"
+  _clean_command_word "$1" word
   case "$word" in
     nohup | */nohup | nice | */nice | timeout | */timeout | xargs | */xargs)
       return 0
@@ -2270,7 +2515,7 @@ _skip_execution_wrapper() {
   local -a words=("$@")
 
   _word_is_execution_wrapper "${words[$i]:-}" || return 1
-  wrapper="$(_clean_command_word "${words[$i]}")"
+  _clean_command_word "${words[$i]}" wrapper
   wrapper="${wrapper##*/}"
   ((i++))
 
@@ -2280,7 +2525,7 @@ _skip_execution_wrapper() {
       ;;
     nice)
       while [ "$i" -lt "${#words[@]}" ]; do
-        word="$(_clean_command_word "${words[$i]}")"
+        _clean_command_word "${words[$i]}" word
         case "$word" in
           -n)
             i=$((i + 2))
@@ -2307,7 +2552,7 @@ _skip_execution_wrapper() {
     timeout)
       # Skip options first, then the mandatory DURATION positional arg.
       while [ "$i" -lt "${#words[@]}" ]; do
-        word="$(_clean_command_word "${words[$i]}")"
+        _clean_command_word "${words[$i]}" word
         case "$word" in
           -k | --kill-after | -s | --signal)
             i=$((i + 2))
@@ -2334,7 +2579,7 @@ _skip_execution_wrapper() {
       # options — value-taking ones consume the next token; the first positional
       # is the command word.
       while [ "$i" -lt "${#words[@]}" ]; do
-        word="$(_clean_command_word "${words[$i]}")"
+        _clean_command_word "${words[$i]}" word
         case "$word" in
           -i | --replace)
             # GNU xargs `-i[replstr]` / `--replace[=replstr]` take an OPTIONAL
@@ -2366,12 +2611,12 @@ _skip_execution_wrapper() {
       ;;
   esac
 
-  printf '%s' "$i"
+  _SKIP_WRAPPER_NEXT="$i"
 }
 
 _word_is_protected_bare_git_launcher() {
   local word="$1" path dir base dir_phys launcher launcher_dir command_path
-  word="$(_clean_command_word "$word")"
+  _clean_command_word "$word" word
   launcher="$(_protected_bare_git_launcher)" || return 1
 
   if [ "$word" = "git" ]; then
@@ -2631,14 +2876,14 @@ _protected_bare_real_git() {
 # plain `git` launcher for ambient work-tree paths.
 _protected_bare_git_context() {
   local fragment="$1"
-  local word value git_word="" seen_git_dir=0 explicit_context=0 effective_dir="$PWD" i=0 next_i
+  local word value git_word="" seen_git_dir=0 explicit_context=0 effective_dir="$PWD" i=0
   local -a words=()
 
   read -r -a words <<<"$fragment"
   [ "${#words[@]}" -gt 0 ] || return 1
 
   while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
+    _clean_command_word "${words[$i]}" word
     case "$word" in
       GIT_DIR=*)
         _word_after_first "$word" = value
@@ -2661,16 +2906,16 @@ _protected_bare_git_context() {
           ((i++))
           continue
         fi
-        if next_i="$(_skip_env_wrapper "$i" "${words[@]}")"; then
-          i="$next_i"
+        if _skip_env_wrapper "$i" "${words[@]}"; then
+          i="$_SKIP_WRAPPER_NEXT"
           continue
         fi
-        if next_i="$(_skip_privilege_wrapper "$i" "${words[@]}")"; then
-          i="$next_i"
+        if _skip_privilege_wrapper "$i" "${words[@]}"; then
+          i="$_SKIP_WRAPPER_NEXT"
           continue
         fi
-        if next_i="$(_skip_execution_wrapper "$i" "${words[@]}")"; then
-          i="$next_i"
+        if _skip_execution_wrapper "$i" "${words[@]}"; then
+          i="$_SKIP_WRAPPER_NEXT"
           continue
         fi
         ;;
@@ -2694,10 +2939,10 @@ _protected_bare_git_context() {
 
   ((i++))
   while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_shell_word_token "${words[$i]}")"
+    _shell_word_token "${words[$i]}" word
     case "$word" in
       -C)
-        value="$(_shell_word_token "${words[$((i + 1))]:-}")"
+        _shell_word_token "${words[$((i + 1))]:-}" value
         effective_dir=$(_hook_resolve_dir "$effective_dir" "$value") || return 1
         i=$((i + 2))
         continue
@@ -2713,7 +2958,7 @@ _protected_bare_git_context() {
         explicit_context=1
         ;;
       --git-dir)
-        value="$(_shell_word_token "${words[$((i + 1))]:-}")"
+        _shell_word_token "${words[$((i + 1))]:-}" value
         _is_protected_bare_git_path "$value" && return 0
         explicit_context=1
         ((i++))
@@ -2753,13 +2998,18 @@ _protected_bare_git_context() {
   return 1
 }
 
+# Index of the command word in the words given as arguments, after
+# assignments, command prefixes, and wrappers. Stores it in
+# _FRAGMENT_COMMAND_INDEX on success (see _SKIP_WRAPPER_NEXT for why a global).
+_FRAGMENT_COMMAND_INDEX=''
+
 _fragment_command_index_from_words() {
-  local i=0 next_i
+  local i=0
   local word
   local -a words=("$@")
 
   while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
+    _clean_command_word "${words[$i]}" word
     case "$word" in
       [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
         ((i++))
@@ -2769,19 +3019,19 @@ _fragment_command_index_from_words() {
           ((i++))
           continue
         fi
-        if next_i="$(_skip_env_wrapper "$i" "${words[@]}")"; then
-          i="$next_i"
+        if _skip_env_wrapper "$i" "${words[@]}"; then
+          i="$_SKIP_WRAPPER_NEXT"
           continue
         fi
-        if next_i="$(_skip_privilege_wrapper "$i" "${words[@]}")"; then
-          i="$next_i"
+        if _skip_privilege_wrapper "$i" "${words[@]}"; then
+          i="$_SKIP_WRAPPER_NEXT"
           continue
         fi
-        if next_i="$(_skip_execution_wrapper "$i" "${words[@]}")"; then
-          i="$next_i"
+        if _skip_execution_wrapper "$i" "${words[@]}"; then
+          i="$_SKIP_WRAPPER_NEXT"
           continue
         fi
-        printf '%s' "$i"
+        _FRAGMENT_COMMAND_INDEX="$i"
         return 0
         ;;
     esac
@@ -2790,23 +3040,24 @@ _fragment_command_index_from_words() {
   return 1
 }
 
+# Print the command word index of fragment $1, or store it in the variable
+# named by $2. Locals carry a prefix so $2 never names one of them.
 _fragment_command_index() {
-  local fragment="$1" word
-  local -a words=()
-  _fragment_prime_token_cache "$fragment"
-
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
-  [ "${#words[@]}" -gt 0 ] || return 1
-  _fragment_command_index_from_words "${words[@]}"
+  local -a _fci_words=()
+  _fragment_token_words "$1" _fci_words
+  if [ "${#_fci_words[@]}" -gt 0 ] && _fragment_command_index_from_words "${_fci_words[@]}"; then
+    _emit_result "${2:-}" "$_FRAGMENT_COMMAND_INDEX"
+    return 0
+  fi
+  _emit_result "${2:-}" ""
+  return 1
 }
 
 # Match a command word by basename. This keeps `/bin/rm`, `./git`, and `sl`
 # consistent across classifiers without giving hook scripts their own tests.
 _word_matches_command() {
   local word="$1" name="$2"
-  word="$(_clean_command_word "$word")"
+  _clean_command_word "$word" word
   case "$word" in
     "$name" | */"$name")
       return 0
@@ -2818,17 +3069,19 @@ _word_matches_command() {
 # Extract the command word after the same wrappers Bash users commonly reach
 # for in hook payloads. Several classifiers share this so their definition of
 # "the command" stays aligned.
+#
+# Prints the word, or stores it in the variable named by $2 (empty when there
+# is none, as a capture of the printed form would be).
 _fragment_command_word() {
-  local fragment="$1" i word
-  local -a words=()
-  _fragment_prime_token_cache "$fragment"
-
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
-  i="$(_fragment_command_index "$fragment")" || return 1
-  [ "$i" -lt "${#words[@]}" ] || return 1
-  _clean_command_word "${words[$i]}"
+  local _fcw_i
+  local -a _fcw_words=()
+  _fragment_token_words "$1" _fcw_words
+  if _fragment_command_index "$1" _fcw_i && [ "$_fcw_i" -lt "${#_fcw_words[@]}" ]; then
+    _clean_command_word "${_fcw_words[$_fcw_i]}" "${2:-}"
+    return 0
+  fi
+  _emit_result "${2:-}" ""
+  return 1
 }
 
 # Return the first argument after the command word in a fragment, with shell
@@ -2837,13 +3090,9 @@ _fragment_command_word() {
 _fragment_first_arg() {
   local fragment="$1" i word
   local -a words=()
-  _fragment_prime_token_cache "$fragment"
-
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
+  _fragment_token_words "$fragment" words
   [ "${#words[@]}" -gt 0 ] || return 1
-  i="$(_fragment_command_index "$fragment")" || return 1
+  _fragment_command_index "$fragment" i || return 1
 
   # Skip the command word itself
   [ "$i" -lt "${#words[@]}" ] || return 1
@@ -2856,15 +3105,11 @@ _fragment_initial_cd_target() {
   local fragment="$1" word
   local i=0
   local -a words=()
-  _fragment_prime_token_cache "$fragment"
-
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
+  _fragment_token_words "$fragment" words
   [ "${#words[@]}" -gt 0 ] || return 1
 
   while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
+    _clean_command_word "${words[$i]}" word
     case "$word" in
       [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
         ((i++))
@@ -2879,12 +3124,12 @@ _fragment_initial_cd_target() {
   done
 
   [ "$i" -lt "${#words[@]}" ] || return 1
-  word="$(_clean_command_word "${words[$i]}")"
+  _clean_command_word "${words[$i]}" word
   [ "$word" = "cd" ] || return 1
   ((i++))
 
   while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
+    _clean_command_word "${words[$i]}" word
     case "$word" in
       --)
         ((i++))
@@ -2937,12 +3182,17 @@ _join_fragment_tokens_from() {
   printf '%s\n' "$result"
 }
 
+# First shell word of fragment $1, quotes removed, stored in _FIRST_SHELL_WORD
+# with trailing newlines dropped, exactly as a `$(...)` capture of the old
+# printed form would have held it.
+_FIRST_SHELL_WORD=''
+
 _first_shell_word() {
   local text ch quote="" buf="" escaped=0 started=0
   local i
-  text="$(_trim_hook_fragment "$1")"
+  _trim_hook_fragment "$1" text
 
-  local _sc_text="$text" _sc_start=-256 _sc_chunk="" _sc_len next next2
+  local _sc_text="$text" _sc_start=-256 _sc_chunk="" _sc_len next next2 _sc_run
   _sc_len=${#_sc_text}
   for ((i = 0; i < _sc_len; i++)); do
     _scan_char_at "$i"
@@ -2958,6 +3208,11 @@ _first_shell_word() {
       continue
     fi
     if [ -n "$quote" ]; then
+      if _scan_skip_quoted_inert; then
+        buf+="$_sc_run"
+        started=1
+        continue
+      fi
       if { [ "$quote" = "ansi" ] && [ "$ch" = "'" ]; } ||
         { [ "$quote" != "ansi" ] && [ "$ch" = "$quote" ]; }; then
         quote=""
@@ -2987,22 +3242,26 @@ _first_shell_word() {
         [ "$started" -eq 1 ] && break
         ;;
       *)
-        buf+="$ch"
+        if _scan_skip_inert "\\\$'\"[:space:]"; then
+          buf+="$_sc_run"
+        else
+          buf+="$ch"
+        fi
         started=1
         ;;
     esac
   done
 
   [ -n "$buf" ] || return 1
-  printf '%s' "$buf"
+  _store_captured _FIRST_SHELL_WORD "$buf"
 }
 
 _first_shell_word_with_remainder() {
   local text ch quote="" buf="" escaped=0 started=0 end_index="" tail
   local i j
-  text="$(_trim_hook_fragment "$1")"
+  _trim_hook_fragment "$1" text
 
-  local _sc_text="$text" _sc_start=-256 _sc_chunk="" _sc_len next next2
+  local _sc_text="$text" _sc_start=-256 _sc_chunk="" _sc_len next next2 _sc_run
   _sc_len=${#_sc_text}
   for ((i = 0; i < _sc_len; i++)); do
     _scan_char_at "$i"
@@ -3018,6 +3277,11 @@ _first_shell_word_with_remainder() {
       continue
     fi
     if [ -n "$quote" ]; then
+      if _scan_skip_quoted_inert; then
+        buf+="$_sc_run"
+        started=1
+        continue
+      fi
       if { [ "$quote" = "ansi" ] && [ "$ch" = "'" ]; } ||
         { [ "$quote" != "ansi" ] && [ "$ch" = "$quote" ]; }; then
         quote=""
@@ -3050,7 +3314,11 @@ _first_shell_word_with_remainder() {
         fi
         ;;
       *)
-        buf+="$ch"
+        if _scan_skip_inert "\\\$'\"[:space:]"; then
+          buf+="$_sc_run"
+        else
+          buf+="$ch"
+        fi
         started=1
         ;;
     esac
@@ -3091,12 +3359,10 @@ _nested_shell_payloads() {
   local i
   local -a words=()
 
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
-  i="$(_fragment_command_index "$fragment")" || return 1
+  _fragment_token_words "$fragment" words
+  _fragment_command_index "$fragment" i || return 1
   [ "$i" -lt "${#words[@]}" ] || return 1
-  command_word="$(_clean_command_word "${words[$i]}")"
+  _clean_command_word "${words[$i]}" command_word
 
   if [ "$command_word" = "eval" ]; then
     ((i++))
@@ -3110,7 +3376,7 @@ _nested_shell_payloads() {
     local found=1
     ((i++))
     while [ "$i" -lt "${#words[@]}" ]; do
-      word="$(_clean_command_word "${words[$i]}")"
+      _clean_command_word "${words[$i]}" word
       case "$word" in
         --cmd)
           ((i++))
@@ -3132,7 +3398,7 @@ _nested_shell_payloads() {
   elif _word_is_shell_executable "$command_word"; then
     ((i++))
     while [ "$i" -lt "${#words[@]}" ]; do
-      word="$(_clean_command_word "${words[$i]}")"
+      _clean_command_word "${words[$i]}" word
       case "$word" in
         --)
           return 1
@@ -3200,9 +3466,7 @@ _env_split_payloads() {
 
   # Quote-aware tokenization: a naive whitespace split breaks attached forms like
   # `-S'rm -rf /'` across words, hiding the payload from the recursive classifier.
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
+  _fragment_token_words "$fragment" words
   [ "${#words[@]}" -gt 0 ] || return 1
 
   # Resolve the env that carries the split-string, transparently stepping over
@@ -3215,7 +3479,7 @@ _env_split_payloads() {
     # Skip transparent prefixes (assignments, command prefixes, privilege and
     # execution wrappers) until the next env executable.
     while [ "$i" -lt "${#words[@]}" ]; do
-      word="$(_clean_command_word "${words[$i]}")"
+      _clean_command_word "${words[$i]}" word
       case "$word" in
         [A-Za-z_]=* | [A-Za-z_][A-Za-z0-9_]*=*)
           ((i++))
@@ -3228,11 +3492,13 @@ _env_split_payloads() {
         continue
       fi
       if _word_is_privilege_wrapper "$word"; then
-        i="$(_skip_privilege_wrapper "$i" "${words[@]}")" || return 1
+        _skip_privilege_wrapper "$i" "${words[@]}" || return 1
+        i="$_SKIP_WRAPPER_NEXT"
         continue
       fi
       if _word_is_execution_wrapper "$word"; then
-        i="$(_skip_execution_wrapper "$i" "${words[@]}")" || return 1
+        _skip_execution_wrapper "$i" "${words[@]}" || return 1
+        i="$_SKIP_WRAPPER_NEXT"
         continue
       fi
 
@@ -3247,7 +3513,7 @@ _env_split_payloads() {
     # the token after `--`) re-enters the outer loop so a nested env/wrapper
     # around the real `env -S` is still resolved rather than dismissed.
     while [ "$i" -lt "${#words[@]}" ]; do
-      word="$(_clean_command_word "${words[$i]}")"
+      _clean_command_word "${words[$i]}" word
       case "$word" in
         -S | --split-string)
           # -S takes the next token (its string); env appends any following args.
@@ -3311,7 +3577,7 @@ _env_split_payloads() {
 
 _fragment_runs_nested_shell() {
   local command_word
-  command_word="$(_fragment_command_word "$1")" || return 1
+  _fragment_command_word "$1" command_word || return 1
 
   [ "$command_word" = "eval" ] && return 0
   _word_is_shell_executable "$command_word" && return 0
@@ -3345,21 +3611,17 @@ _git_subcommand_resolve_uncached() {
   local fragment="$1" word
   local i
   local -a words=()
-  _fragment_prime_token_cache "$fragment"
-
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
+  _fragment_token_words "$fragment" words
   [ "${#words[@]}" -gt 0 ] || return 1
 
-  i="$(_fragment_command_index "$fragment")" || return 1
+  _fragment_command_index "$fragment" i || return 1
   [ "$i" -lt "${#words[@]}" ] || return 1
-  word="$(_clean_command_word "${words[$i]}")"
+  _clean_command_word "${words[$i]}" word
   _word_is_git_executable "$word" || return 1
   ((i++))
 
   while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
+    _clean_command_word "${words[$i]}" word
     case "$word" in
       -C | -c | --git-dir | --work-tree | --namespace | --exec-path)
         i=$((i + 2))
@@ -3414,11 +3676,17 @@ _git_subcommand_resolve() {
   return "$status"
 }
 
+# Print the subcommand index of git fragment $1 when its subcommand is $2 (any
+# when empty), or store it in the variable named by $3. No locals, so $3 can
+# name any caller variable.
 _git_subcommand_index() {
-  local fragment="$1" target="${2:-}"
-  _git_subcommand_resolve "$fragment" || return 1
-  [ -z "$target" ] || [ "$_GIT_SUBCOMMAND_WORD" = "$target" ] || return 1
-  printf '%s' "$_GIT_SUBCOMMAND_INDEX"
+  if _git_subcommand_resolve "$1" &&
+    { [ -z "${2:-}" ] || [ "$_GIT_SUBCOMMAND_WORD" = "$2" ]; }; then
+    _emit_result "${3:-}" "$_GIT_SUBCOMMAND_INDEX"
+    return 0
+  fi
+  _emit_result "${3:-}" ""
+  return 1
 }
 
 # Identify the actual Git subcommand after wrappers and global Git options.
@@ -3430,21 +3698,17 @@ _git_subcommand_effective_dir() {
   local fragment="$1" target="$2" word value effective_dir="$PWD"
   local i
   local -a words=()
-  _fragment_prime_token_cache "$fragment"
-
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
+  _fragment_token_words "$fragment" words
   [ "${#words[@]}" -gt 0 ] || return 1
 
-  i="$(_fragment_command_index "$fragment")" || return 1
+  _fragment_command_index "$fragment" i || return 1
   [ "$i" -lt "${#words[@]}" ] || return 1
-  word="$(_clean_command_word "${words[$i]}")"
+  _clean_command_word "${words[$i]}" word
   _word_is_git_executable "$word" || return 1
   ((i++))
 
   while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
+    _clean_command_word "${words[$i]}" word
     case "$word" in
       -C)
         value="${words[$((i + 1))]:-}"
@@ -3486,20 +3750,16 @@ _command_subcommand_effective_dir() {
   local fragment="$1" command="$2" target="$3" word value effective_dir="$PWD"
   local i
   local -a words=()
-  _fragment_prime_token_cache "$fragment"
-
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
+  _fragment_token_words "$fragment" words
   [ "${#words[@]}" -gt 0 ] || return 1
 
-  i="$(_fragment_command_index "$fragment")" || return 1
+  _fragment_command_index "$fragment" i || return 1
   [ "$i" -lt "${#words[@]}" ] || return 1
   _word_matches_command "${words[$i]}" "$command" || return 1
   ((i++))
 
   while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
+    _clean_command_word "${words[$i]}" word
     case "$word" in
       --cwd | --repository | -R)
         value="${words[$((i + 1))]:-}"
@@ -3551,16 +3811,12 @@ _command_subcommand_effective_dir() {
 _git_subcommand_has_option() {
   local fragment="$1" target="$2" option="$3" word index
   local -a words=()
-  _fragment_prime_token_cache "$fragment"
-
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
-  index="$(_git_subcommand_index "$fragment" "$target")" || return 1
+  _fragment_token_words "$fragment" words
+  _git_subcommand_index "$fragment" "$target" index || return 1
   index=$((index + 1))
 
   while [ "$index" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$index]}")"
+    _clean_command_word "${words[$index]}" word
     [ "$word" = "$option" ] && return 0
     ((index++))
   done
@@ -3577,28 +3833,28 @@ _git_absorb_command() {
 
   while IFS= read -r fragment; do
     _git_subcommand_is "$fragment" "absorb" && return 0
-    command_word="$(_fragment_command_word "$fragment")" || continue
+    _fragment_command_word "$fragment" command_word || continue
     _word_matches_command "$command_word" "git-absorb" && return 0
   done < <(_hook_executable_fragments "$text")
 
   return 1
 }
 
-_command_subcommand_index() {
+# Store the subcommand index of a `command [options] subcommand` fragment in
+# _COMMAND_SUBCOMMAND_INDEX; see _command_subcommand_index.
+_COMMAND_SUBCOMMAND_INDEX=''
+
+_command_subcommand_resolve() {
   local fragment="$1" command="$2" target="${3:-}" word i
   local -a words=()
-  _fragment_prime_token_cache "$fragment"
-
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
-  i="$(_fragment_command_index "$fragment")" || return 1
+  _fragment_token_words "$fragment" words
+  _fragment_command_index "$fragment" i || return 1
   [ "$i" -lt "${#words[@]}" ] || return 1
   _word_matches_command "${words[$i]}" "$command" || return 1
   ((i++))
 
   while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
+    _clean_command_word "${words[$i]}" word
     case "$word" in
       --config | --cwd | --repository | -R)
         i=$((i + 2))
@@ -3623,11 +3879,23 @@ _command_subcommand_index() {
         ;;
       *)
         [ -z "$target" ] || [ "$word" = "$target" ] || return 1
-        printf '%s' "$i"
+        _COMMAND_SUBCOMMAND_INDEX="$i"
         return 0
         ;;
     esac
   done
+  return 1
+}
+
+# Print the index of subcommand $3 (any when empty) of command $2 in fragment
+# $1, or store it in the variable named by $4. No locals, so $4 can name any
+# caller variable.
+_command_subcommand_index() {
+  if _command_subcommand_resolve "$1" "$2" "${3:-}"; then
+    _emit_result "${4:-}" "$_COMMAND_SUBCOMMAND_INDEX"
+    return 0
+  fi
+  _emit_result "${4:-}" ""
   return 1
 }
 
@@ -3636,7 +3904,7 @@ _command_subcommand_is() {
   shift 2
 
   for target in "$@"; do
-    _command_subcommand_index "$fragment" "$command" "$target" >/dev/null && return 0
+    _command_subcommand_resolve "$fragment" "$command" "$target" && return 0
   done
   return 1
 }
@@ -3644,16 +3912,12 @@ _command_subcommand_is() {
 _command_subcommand_has_option() {
   local fragment="$1" command="$2" subcommand="$3" option="$4" word i
   local -a words=()
-  _fragment_prime_token_cache "$fragment"
-
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
-  i="$(_command_subcommand_index "$fragment" "$command" "$subcommand")" || return 1
+  _fragment_token_words "$fragment" words
+  _command_subcommand_index "$fragment" "$command" "$subcommand" i || return 1
   i=$((i + 1))
 
   while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
+    _clean_command_word "${words[$i]}" word
     [ "$word" = "$option" ] && return 0
     # Many CLIs accept message options with attached values (`-mfoo`,
     # `--message=foo`). Treat those as the same semantic option so metadata-only
@@ -3712,7 +3976,7 @@ _strip_unbalanced_trailing_groupers() {
 _rm_target_is_dangerous() {
   local target="$1" home_var="\$HOME" home_brace="\${HOME}" tilde expanded norm home_parent
   tilde=$(printf '\176')
-  target="$(_shell_word_token "$target")"
+  _shell_word_token "$target" target
   target="$(_strip_unbalanced_trailing_groupers "$target")"
 
   # Literal catastrophic forms, including globs that wipe a whole tree (these
@@ -3759,16 +4023,14 @@ _rm_fragment_rf_state() {
   local fragment="$1" word i after_options=0 recursive=0 force=0 dangerous=0
   local -a words=()
 
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
-  i="$(_fragment_command_index "$fragment")" || return 1
+  _fragment_token_words "$fragment" words
+  _fragment_command_index "$fragment" i || return 1
   [ "$i" -lt "${#words[@]}" ] || return 1
   _word_matches_command "${words[$i]}" "rm" || return 1
   ((i++))
 
   while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
+    _clean_command_word "${words[$i]}" word
     if [ "$after_options" -eq 0 ]; then
       case "$word" in
         --)
@@ -3824,10 +4086,9 @@ _man_noninteractive() {
   local manopt="${MANOPT-}" explicit_env=0 plain_prefix=1 explicit_pager=0
   local -a words=()
 
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
-  command_index="$(_fragment_command_index_from_words "${words[@]}")" || return 1
+  _fragment_token_words "$fragment" words
+  _fragment_command_index_from_words "${words[@]}" || return 1
+  command_index="$_FRAGMENT_COMMAND_INDEX"
 
   for ((i = 0; i < command_index; i++)); do
     word="${words[$i]}"
@@ -3947,14 +4208,12 @@ _fragment_has_noninteractive_flag() {
   done < <(_tty_noninteractive_flags "${command_word##*/}")
   [ "${#flags[@]}" -gt 0 ] || return 1
 
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
-  i="$(_fragment_command_index "$fragment")" || return 1
+  _fragment_token_words "$fragment" words
+  _fragment_command_index "$fragment" i || return 1
   ((i++))
 
   while [ "$i" -lt "${#words[@]}" ]; do
-    word="$(_clean_command_word "${words[$i]}")"
+    _clean_command_word "${words[$i]}" word
     [ "$word" = "--" ] && return 1
     for flag in "${flags[@]}"; do
       [ "$word" = "$flag" ] && return 0
@@ -3967,7 +4226,7 @@ _fragment_has_noninteractive_flag() {
 
 _untracked_status_config_value_is_safe() {
   local value
-  value="$(_shell_word_token "$1")"
+  _shell_word_token "$1" value
   case "$value" in
     no | false | 0)
       return 0
@@ -3985,7 +4244,7 @@ _assignment_value() {
 
   read -r -a words <<<"$fragment"
   for word in "${words[@]}"; do
-    word="$(_shell_word_token "$word")"
+    _shell_word_token "$word" word
     if [[ "$word" == "$name="* ]]; then
       value="${word#*=}"
       _strip_outer_quotes "$value"
@@ -4042,7 +4301,7 @@ _git_config_env_untracked_status_state() {
 
   read -r -a words <<<"$fragment"
   for word in "${words[@]}"; do
-    word="$(_shell_word_token "$word")"
+    _shell_word_token "$word" word
     case "$word" in
       GIT_CONFIG_KEY_*=status.showUntrackedFiles)
         found=1
@@ -4074,12 +4333,12 @@ _git_config_env_untracked_status_state() {
 # only when a token actually says something about untracked files.
 _git_option_untracked_status_state() {
   local fragment="$1" word="$2" value short suffix config_value
-  word="$(_shell_word_token "$word")"
+  _shell_word_token "$word" word
 
   case "$word" in
     status.showUntrackedFiles=*)
       value="${word#*=}"
-      value="$(_shell_word_token "$value")"
+      _shell_word_token "$value" value
       if _untracked_status_config_value_is_safe "$value"; then
         printf 'off'
       else
@@ -4114,7 +4373,7 @@ _git_option_untracked_status_state() {
           case "$word" in
             *=*)
               value="${word#*=}"
-              value="$(_shell_word_token "$value")"
+              _shell_word_token "$value" value
               [ "$value" = "no" ] && {
                 printf 'off'
                 return 0
@@ -4145,12 +4404,12 @@ _git_option_untracked_status_state() {
 
 _git_option_ignored_status_state() {
   local word value
-  word="$(_shell_word_token "$1")"
+  _shell_word_token "$1" word
 
   case "$word" in
     --ignored=*)
       value="${word#*=}"
-      value="$(_shell_word_token "$value")"
+      _shell_word_token "$value" value
       [ "$value" = "no" ] && {
         printf 'off'
         return 0
@@ -4169,7 +4428,7 @@ _git_option_ignored_status_state() {
 
 _git_option_lists_others() {
   local word
-  word="$(_shell_word_token "$1")"
+  _shell_word_token "$1" word
 
   case "$word" in
     # Git accepts unique long-option prefixes, so these all mean `--others`.
@@ -4206,7 +4465,7 @@ _pathspec_is_specific() {
 _pathspecs_are_specific() {
   local found=0 pathspec
   while [ "$#" -gt 0 ]; do
-    pathspec="$(_shell_word_token "$1")"
+    _shell_word_token "$1" pathspec
     shift
     [ -n "$pathspec" ] || continue
     found=1
@@ -4222,7 +4481,7 @@ _git_ls_files_has_scoped_pathspecs() {
   read -r -a words <<<"$1"
 
   while [ "${#words[@]}" -gt 0 ]; do
-    word="$(_shell_word_token "${words[0]}")"
+    _shell_word_token "${words[0]}" word
     if [ "$word" = "--" ]; then
       words=("${words[@]:1}")
       _pathspecs_are_specific "${words[@]}"
@@ -4287,7 +4546,7 @@ _git_clean_lists_untracked() {
 
   read -r -a words <<<"$fragment"
   for word in "${words[@]}"; do
-    word="$(_shell_word_token "$word")"
+    _shell_word_token "$word" word
     case "$word" in
       -h | --help)
         return 1
@@ -4303,7 +4562,7 @@ _git_clean_lists_untracked() {
 # `--all` means the same thing. `-A` may also arrive bundled (`-An`).
 _git_option_stages_all() {
   local word
-  word="$(_shell_word_token "$1")"
+  _shell_word_token "$1" word
 
   case "$word" in
     --a | --al | --all | --no-ignore-removal)
@@ -4331,16 +4590,14 @@ _git_add_stages_everything() {
   local all_flag=0 specific_pathspec=0 broad_pathspec=0 saw_separator=0
   local -a words=()
   _fragment_prime_token_cache "$fragment"
-  index="$(_git_subcommand_index "$fragment" "add")" || return 1
+  _git_subcommand_index "$fragment" "add" index || return 1
 
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
+  _fragment_token_words "$fragment" words
 
   # Start after the subcommand token itself.
   index=$((index + 1))
   while [ "$index" -lt "${#words[@]}" ]; do
-    word="$(_shell_word_token "${words[$index]}")"
+    _shell_word_token "${words[$index]}" word
     index=$((index + 1))
     [ -n "$word" ] || continue
 
@@ -4479,12 +4736,10 @@ _block_selected_case_arm_protected_bare_git_assignments() {
   local fragment="$1" depth="$2" word pattern payload selected=0
   local -a words=()
 
-  while IFS= read -r word; do
-    words+=("$word")
-  done < <(_fragment_tokens "$fragment")
+  _fragment_token_words "$fragment" words
   [ "${#words[@]}" -gt 0 ] || return 0
 
-  word="$(_clean_command_word "${words[0]}")"
+  _clean_command_word "${words[0]}" word
   if [ "$word" = "esac" ]; then
     _HOOK_CASE_ACTIVE=0
     _HOOK_CASE_WORD=""
@@ -4497,9 +4752,10 @@ _block_selected_case_arm_protected_bare_git_assignments() {
     _HOOK_CASE_WORD=""
     _HOOK_CASE_MATCHED=0
     [ "${#words[@]}" -ge 4 ] || return 0
-    [ "$(_clean_command_word "${words[2]}")" = "in" ] || return 0
+    _clean_command_word "${words[2]}" word
+    [ "$word" = "in" ] || return 0
     _HOOK_CASE_ACTIVE=1
-    _HOOK_CASE_WORD="$(_shell_word_token "${words[1]}")"
+    _shell_word_token "${words[1]}" _HOOK_CASE_WORD
     word="${words[3]}"
   elif [ "$_HOOK_CASE_ACTIVE" -eq 1 ]; then
     word="${words[0]}"
@@ -4509,7 +4765,7 @@ _block_selected_case_arm_protected_bare_git_assignments() {
 
   [[ "$word" == *")" ]] || return 0
   pattern="${word%)}"
-  pattern="$(_shell_word_token "$pattern")"
+  _shell_word_token "$pattern" pattern
   if [ "$_HOOK_CASE_MATCHED" -eq 0 ] &&
     _case_pattern_matches_word "$pattern" "$_HOOK_CASE_WORD"; then
     selected=1
@@ -4528,7 +4784,7 @@ _block_selected_case_arm_protected_bare_git_assignments() {
 _block_called_function_protected_bare_git_body() {
   local fragment="$1" depth="$2" command_word payload
 
-  command_word="$(_fragment_command_word "$fragment")" || return 0
+  _fragment_command_word "$fragment" command_word || return 0
   # Command words are raw command text (`$g`, `$(cmd)`); only names that
   # `_remember_function_definition` could have recorded can match.
   _shell_name_is_valid "$command_word" || return 0
@@ -4552,12 +4808,16 @@ _block_protected_bare_git_fragment() {
   # invocation so wrappers like `git --version $(git status -uall)` cannot hide
   # an untracked walk behind an otherwise harmless parent command.
   if [ "$depth" -lt 2 ]; then
-    while IFS= read -r -d '' payload; do
-      _protected_bare_git_scan_candidate "$payload" && _block_subshell_protected_bare_git_untracked_scans "$payload" $((depth + 1))
-    done < <(_executable_expansion_payloads "$fragment")
-    while IFS= read -r payload; do
-      _protected_bare_git_scan_candidate "$payload" && _block_structural_protected_bare_git_untracked_scans "$payload" $((depth + 1))
-    done < <(_structural_shell_payloads "$fragment")
+    if _may_have_expansion_payloads "$fragment"; then
+      while IFS= read -r -d '' payload; do
+        _protected_bare_git_scan_candidate "$payload" && _block_subshell_protected_bare_git_untracked_scans "$payload" $((depth + 1))
+      done < <(_executable_expansion_payloads "$fragment")
+    fi
+    if _may_have_structural_payloads "$fragment"; then
+      while IFS= read -r payload; do
+        _protected_bare_git_scan_candidate "$payload" && _block_structural_protected_bare_git_untracked_scans "$payload" $((depth + 1))
+      done < <(_structural_shell_payloads "$fragment")
+    fi
   fi
 
   if ! _protected_bare_git_context "$fragment"; then
@@ -4568,9 +4828,11 @@ _block_protected_bare_git_fragment() {
       done < <(_nested_shell_payloads "$fragment")
     fi
     if [ "$depth" -lt 2 ]; then
-      while IFS= read -r payload; do
-        _protected_bare_git_scan_candidate "$payload" && _block_nested_protected_bare_git_untracked_scans "$payload" $((depth + 1))
-      done < <(_env_split_payloads "$fragment")
+      if _may_have_env_split_payloads "$fragment"; then
+        while IFS= read -r payload; do
+          _protected_bare_git_scan_candidate "$payload" && _block_nested_protected_bare_git_untracked_scans "$payload" $((depth + 1))
+        done < <(_env_split_payloads "$fragment")
+      fi
     fi
     _remember_protected_bare_git_path_assignments "$fragment"
     return 0
@@ -4638,9 +4900,11 @@ _block_protected_bare_git_untracked_scans() {
           # Active heredocs expand as one body just before the receiving command
           # runs. Scanning line-by-line misses `$(` opened on one line and closed
           # on a later one, which is enough to hide a protected bare-Git scan.
-          while IFS= read -r -d '' payload; do
-            _protected_bare_git_scan_candidate "$payload" && _block_subshell_protected_bare_git_untracked_scans "$payload" $((depth + 1))
-          done < <(_flush_active_heredoc_payloads "$body" "${heredoc_actives[0]}")
+          if _may_have_expansion_payloads "$body"; then
+            while IFS= read -r -d '' payload; do
+              _protected_bare_git_scan_candidate "$payload" && _block_subshell_protected_bare_git_untracked_scans "$payload" $((depth + 1))
+            done < <(_flush_active_heredoc_payloads "$body" "${heredoc_actives[0]}")
+          fi
         fi
         body=""
         heredoc_delims=("${heredoc_delims[@]:1}")
@@ -4674,9 +4938,11 @@ _block_protected_bare_git_untracked_scans() {
   done <<<"$text"
 
   if [ "${#heredoc_delims[@]}" -gt 0 ] && [ "$depth" -lt 2 ]; then
-    while IFS= read -r -d '' payload; do
-      _protected_bare_git_scan_candidate "$payload" && _block_subshell_protected_bare_git_untracked_scans "$payload" $((depth + 1))
-    done < <(_flush_active_heredoc_payloads "$body" "${heredoc_actives[0]}")
+    if _may_have_expansion_payloads "$body"; then
+      while IFS= read -r -d '' payload; do
+        _protected_bare_git_scan_candidate "$payload" && _block_subshell_protected_bare_git_untracked_scans "$payload" $((depth + 1))
+      done < <(_flush_active_heredoc_payloads "$body" "${heredoc_actives[0]}")
+    fi
   fi
   if [ -n "$pending" ] || [ "$_pending_bs" -eq 1 ]; then
     _pending_text line
