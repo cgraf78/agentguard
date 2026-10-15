@@ -345,13 +345,13 @@ _assert_contains "invalid UTF-8 under a UTF-8 locale: warns" "sk- prefix" "$HOOK
 # post-bash resolves the runtime once, in its own shell, before the
 # `$(...)` adapters read it; a lookup inside the subshell would fork again
 # and lose its cached answer. xtrace (inherited through SHELLOPTS) marks each
-# call of the uncached resolver.
-# shellcheck disable=SC2016 # PS4 is expanded by the traced hook.
+# call of the uncached resolver. The default PS4 is used because Bash running
+# as root (CI containers) ignores an inherited PS4.
 _runtime_lookups=$(
   printf '%s' "$(_string_payload 'a b')" |
-    env SHELLOPTS=xtrace PS4='+${BASH_SUBSHELL}: ' AGENTGUARD_NAME=codex CODEX_THREAD_ID= \
+    env -u PS4 SHELLOPTS=xtrace AGENTGUARD_NAME=codex CODEX_THREAD_ID= \
       AGENTGUARD_SESSION_ID="$TEST_SID-lookups" TMPDIR="$TEST_TMPDIR" \
-      "$POST_BASH" 2>&1 >/dev/null | grep -c '^+*[0-9]*: _agent_name$'
+      "$POST_BASH" 2>&1 >/dev/null | grep -cE '^[+]+ _agent_name$'
 )
 _assert_eq "post-bash resolves the runtime exactly once" "1" "$_runtime_lookups"
 
