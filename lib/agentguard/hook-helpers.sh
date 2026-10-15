@@ -1521,15 +1521,24 @@ _hook_parse_mcp() {
   _hook_read_input || exit 0
   local tool_name remainder context_server='' context_tool=''
   # One jq for the name and Gemini's structured MCP identity, keeping the
-  # hook's parse budget.
+  # hook's parse budget. NUL-delimited: a tool name may contain a newline,
+  # which would shift newline-delimited fields (tool_name truncated, the
+  # context fields misassigned). NULs are stripped per field first: JSON
+  # allows \u0000 escapes and jq would emit the raw byte, which would shift
+  # NUL-delimited fields the same way (bash cannot hold NUL in a variable
+  # anyway). split/join rather than gsub, matching the input-read path:
+  # jq 1.6 regex costs ~1 ms on this hot path. Each slot always emits its
+  # terminator, so a non-string value dropped by `strings` leaves an empty
+  # field rather than shifting the rest.
   {
-    IFS= read -r tool_name || true
-    IFS= read -r context_server || true
-    IFS= read -r context_tool || true
-  } < <(printf '%s' "$_HOOK_INPUT" | jq -r '
-    (.tool_name // .toolName // ""),
-    (.mcp_context.server_name // "" | strings),
-    (.mcp_context.tool_name // "" | strings)
+    IFS= read -r -d '' tool_name || true
+    IFS= read -r -d '' context_server || true
+    IFS= read -r -d '' context_tool || true
+  } < <(printf '%s' "$_HOOK_INPUT" | jq -j '
+    def nulstrip: split("\u0000") | join("");
+    ((.tool_name // .toolName // "") | tostring | nulstrip), "\u0000",
+    ((.mcp_context.server_name // "" | strings) | tostring | nulstrip), "\u0000",
+    ((.mcp_context.tool_name // "" | strings) | tostring | nulstrip), "\u0000"
   ' 2>/dev/null)
   [ -z "$tool_name" ] && exit 0
   if [ -n "$context_server" ] && [ -n "$context_tool" ]; then
