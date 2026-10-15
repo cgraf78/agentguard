@@ -988,15 +988,19 @@ for _shell in "${_shells[@]}"; do
   rm -rf "$HOME/.local/state/example"
   (umask 077 && mkdir -p "$HOME/.local/state/example/tracker/watchers")
   _engine "$_shell" "_hook_watch_record example/tracker EXAMPLE-3 - example-watch l h" >/dev/null
-  printf '%s\n' "$DEAD_PID" >"$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$DEAD_PID"
-  _assert_eq "$_shell: no /proc, ps says the watcher is dead" 1 \
-    "$(_engine "$_shell" '_HOOK_WATCH_PROC=/nonexistent; _hook_watch_collect; echo ${#_HOOK_WATCH_UNMET[@]}')"
-  _start_watcher example-watch
-  printf '%s\n' "$WATCHER_PID" >"$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$WATCHER_PID"
-  rm -f "$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$DEAD_PID"
-  _assert_eq "$_shell: no /proc, ps finds the live watcher" 0 \
-    "$(_engine "$_shell" '_HOOK_WATCH_PROC=/nonexistent; _hook_watch_collect; echo ${#_HOOK_WATCH_UNMET[@]}')"
-  _stop_watcher
+  # Minimal containers ship no ps; those cases need one.
+  if command -v ps >/dev/null 2>&1; then
+    printf '%s\n' "$DEAD_PID" >"$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$DEAD_PID"
+    _assert_eq "$_shell: no /proc, ps says the watcher is dead" 1 \
+      "$(_engine "$_shell" '_HOOK_WATCH_PROC=/nonexistent; _hook_watch_collect; echo ${#_HOOK_WATCH_UNMET[@]}')"
+    _start_watcher example-watch
+    printf '%s\n' "$WATCHER_PID" >"$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$WATCHER_PID"
+    rm -f "$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$DEAD_PID"
+    _assert_eq "$_shell: no /proc, ps finds the live watcher" 0 \
+      "$(_engine "$_shell" '_HOOK_WATCH_PROC=/nonexistent; _hook_watch_collect; echo ${#_HOOK_WATCH_UNMET[@]}')"
+    _stop_watcher
+    rm -f "$HOME/.local/state/example/tracker/watchers/EXAMPLE-3".*
+  fi
   printf '%s\n' "$DEAD_PID" >"$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$DEAD_PID"
   _assert_eq "$_shell: no /proc and no ps: a watcher file counts (fail open)" 0 \
     "$(_engine "$_shell" '_HOOK_WATCH_PROC=/nonexistent; PATH=/nonexistent; _hook_watch_collect; echo ${#_HOOK_WATCH_UNMET[@]}')"
