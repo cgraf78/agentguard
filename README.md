@@ -497,9 +497,10 @@ To add a new managed agent runtime:
   does not decide what should be written.
 - `agent-hook-stop` asks Hive Memory for any pending-memory reminder, runs its
   extensions, checks the session's watch obligations (once per prompt, a
-  stderr reminder naming recorded pull requests that no live watcher covers
-  and no newer finished record satisfies; with `AGENTGUARD_WATCH_BLOCK=1` on
-  Claude Code, one block per push or watcher exit instead; a session that
+  stderr reminder naming recorded pull requests that no watcher has covered
+  since their last push: no live watcher, and no finished or exit record from
+  a later check; with `AGENTGUARD_WATCH_BLOCK=1` on Claude Code, one block per
+  push or submit instead; a session that
   recorded nothing pays only a directory test), and plays a terminal
   notification for the first Stop after a
   valid prompt that ends the foreground turn. A Stop an extension blocks to

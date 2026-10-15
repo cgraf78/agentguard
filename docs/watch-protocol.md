@@ -37,7 +37,7 @@ because the hook's environment may differ from the agent shell's.
   watchers/<key>.<pid>             a watcher is following <key>
   watchers/pending.<pid>           a watcher still resolving its targets: every key
   watchers/pending.<scope>.<pid>   the same, for every key recorded with <scope>
-  exited/<key>                     a watcher run for <key> ended
+  exited/<key>                     "<status> <state> <reason> <epoch>": a watcher run for <key> ended
   done/<key>                       "<commit> <word> <epoch>": <key> finished
 ```
 
@@ -58,9 +58,14 @@ because the hook's environment may differ from the agent shell's.
   time it recorded the work: a check that started before a push cannot have
   seen it, and one that started in the same second may not have, so equal
   epochs do not count.
-- `exited/<key>` exists after every watcher run that resolved the key, except
-  one that ended in a named stall (`git pr-watch`'s `action:` lines). Its mtime
-  is when the run ended; the engine reads nothing else from it.
+- `exited/<key>` is written when a waiting run ends, for every pull request
+  it had resolved, whatever its state (stalls included). Its fourth field is
+  the epoch of the check behind the result the run delivered (status 0, 1,
+  or 8 with the pull request read); a run cut short (a signal, an internal
+  error, GitHub unreadable) writes `-`, which counts as before any event. The
+  engine reads only that epoch, never the file's mtime: an epoch strictly
+  newer than the key's means the pull request was watched after the work and
+  its result delivered, whatever the state.
 
 ### Liveness
 
@@ -69,13 +74,13 @@ process's argv[0] or argv[1] has the recorded basename (a script may run as
 `bash /path/git-pr-watch ...`). On Linux, argv comes from
 `/proc/<pid>/cmdline` with shell builtins; elsewhere from
 `ps -o command= -p <pid>`, matched so a path containing spaces still works.
-On Termux, which execs programs through Android's dynamic linker and so
-repeats the program's path after argv[0] (`bash /data/.../bash <script>`), a
-leading word whose basename the next word repeats is skipped first. A pid reused after a crash
-therefore does not count.
+Where a launcher repeats the interpreter, as Termux does
+(`bash /path/to/bash git-pr-watch`), a first argument whose basename the
+second repeats is skipped and the same rule applied to the rest (twice at
+most). A pid reused after a crash therefore does not count.
 
 Per the producer contract, the engine lists `watchers/` before reading
-`done/`, and lists it once more when neither showed anything, because a
+`done/` and `exited/`, and lists it once more when nothing showed, because a
 single listing can miss both files while one replaces the other.
 
 ### Trust
@@ -98,7 +103,8 @@ A producer that wants AgentGuard to see it must:
 - write `done/<key>` only once the item is really finished, with the epoch of
   the check that judged it;
 - write `exited/<key>` when a watching run ends (before removing its watcher
-  files), so an opted-in Stop block re-arms;
+  files), with the epoch of the check behind the result it delivered, or `-`
+  when it delivered none;
 - replace files atomically through names containing `~`, create directories
   private to the user, and never put `~`, `/`, or whitespace in keys or scopes;
 - keep its argv[0] or argv[1] basename stable.
@@ -108,11 +114,13 @@ A producer that wants AgentGuard to see it must:
 Under the hook state dir of the session (`$_HOOK_STATE_DIR`, see the README):
 
 ```text
-watch/<tool-id>/          tool-id = tool dir with "/" replaced by "_"
+watch/<tool-id>/          tool-id = tool dir with "/" replaced by "+"
   tool                    tool dir, watcher argv basename, hint (one line each)
   keys/<key>              "<epoch> <scope>" then the label
   blocked/<key>           the last Stop block for <key> (its mtime)
 ```
+
+Names never contain `+`, so two tool dirs never share an id.
 
 The session directory is the scope of an obligation: work recorded by one
 session is enforced only at that session's Stop. Claude Code subagents share
@@ -129,25 +137,43 @@ turn ends; a subagent's own Stop enforces nothing.
   (`_hook_watch_rearm_key`) revives them (a reopened pull request).
 - **Satisfied**: a live watcher, a matching live pending file (an unscoped
   one matches every key; a scoped one matches keys recorded with exactly that
-  scope, so never a key recorded with scope `-`), or a `done/` record whose
-  epoch is newer than the key's.
+  scope, so never a key recorded with scope `-`), a `done/` record whose
+  epoch is newer than the key's, or an `exited/` record whose result epoch is
+  newer than the key's. All epoch comparisons are strict: a check that
+  started in the key's own second may not have seen the work.
 - **Stop** (foreground only, after extensions): an unsatisfied key gets one
   reminder on stderr per prompt per key and submit. With
-  `AGENTGUARD_WATCH_BLOCK=1` on Claude Code, the first Stop after a record,
-  re-arm, or watcher exit blocks instead (once), naming the keys; any later
-  Stop ends the turn. An unwritable state dir degrades a block to a reminder.
-  Blocks are independent of extension blocks.
+  `AGENTGUARD_WATCH_BLOCK=1` on Claude Code, the first Stop after a record or
+  re-arm blocks instead (once), naming the keys; any later Stop ends the
+  turn. An unwritable state dir degrades a block to a reminder. Blocks are
+  independent of extension blocks. A `<labels>` token in a tool's hint is
+  replaced by the labels the message names.
 - **Producer state off**: when the hook environment sets
   `GIT_PR_WATCH_STATE=0` (the variable that turns `git pr-watch`'s state
   files off), the Stop hook says so once per prompt instead of reminding or
   blocking for pull requests.
-- **pre-bash**: a `git pr-watch --wait` (or `git-pr-watch --wait`, not
-  `--help`) launched detached (`&`, nohup, setsid, disown) gets a warning on
+- **pre-bash**: a `git pr-watch --wait` or `-w` (also `git-pr-watch`, an
+  interpreter running its script, or behind setsid, stdbuf, or caffeinate;
+  not with `--help`) launched detached (`&`, nohup, setsid, disown) gets a warning on
   every runtime; one launched in the foreground on Claude Code without
   `run_in_background` gets a warning too. Both become blocks under
   `AGENTGUARD_WATCH_BLOCK=1`.
 - Everything fails open: unreadable or untrusted state, or an unwritable
   session dir, means less enforcement, never a stuck turn.
+
+### Why an exited watcher satisfies
+
+The original design counted only a live watcher or a newer `done/` record,
+and re-armed an opted-in block on every watcher exit. That looped: a pull
+request with a conflict or a persistent failure makes the watcher exit at
+once, the next Stop blocked again with "not watched", the agent re-ran the
+watcher, and so on, although the agent already had the result. In a
+multi-pull-request run, a pull request that went green early kept its old
+`done/` epoch after a later push, so it read as unwatched although the same
+run went on judging it. An obligation exists to stop an agent walking away
+without watching at all, so a watcher that delivered a result after the
+work (its `exited/` epoch) now satisfies it, whatever the result, and a
+block happens once per record or re-arm.
 
 ### Settings
 
@@ -156,7 +182,7 @@ Read from the hook environment, which an agent's tool shell cannot change:
 | Variable | Effect |
 | --- | --- |
 | `AGENTGUARD_WATCH=0` | turns recording, re-arming, Stop checks, and launch advice off |
-| `AGENTGUARD_WATCH_BLOCK=1` | Stop blocks once per submit or watcher exit (Claude Code), and launch advice blocks |
+| `AGENTGUARD_WATCH_BLOCK=1` | Stop blocks once per record or re-arm (Claude Code), and launch advice blocks |
 | `AGENTGUARD_PR_WATCH_HINT` | replaces the pull-request watching advice in the post-bash reminder and the Stop message |
 
 ## Pull-request recognition (post-bash)
@@ -167,7 +193,7 @@ did not run in the background (a Claude Code `run_in_background` call, or a
 shell Muse reports as `background_running`, reports before the command has
 done anything):
 
-- **Record**: `gh pr create` (not `--dry-run`), `git pr-open`, or
+- **Record**: `gh pr create` or its alias `gh pr new` (not `--dry-run`), `git pr-open`, or
   `git pr-submit` (also the dashed `git-pr-*` forms; not `-n`, `--dry-run`, or
   `--help`), when the command printed a bare `https://<host>/<owner>/<repo>/pull/<n>`
   line (any host) and `git-pr-watch` is on `PATH`. The label is the URL.
@@ -210,15 +236,15 @@ instead of exiting, run under Bash 3.2, and are `set -u` clean.
 
 | Function | Purpose |
 | --- | --- |
-| `_hook_watch_record <tool-dir> <key> <scope\|-> <argv-basename> <label> <hint>` | record new work; `<hint>` is free text telling the agent how to start a watcher |
+| `_hook_watch_record <tool-dir> <key> <scope\|-> <argv-basename> <label> <hint>` | record new work; `<hint>` is free text telling the agent how to start a watcher, with an optional `<labels>` token |
 | `_hook_watch_rearm <tool-dir> <scope>... \| ALL` | re-arm by scope; prints the labels it re-armed |
 | `_hook_watch_rearm_key <tool-dir> <key>` | re-arm one key, reviving a terminal one; prints its label |
 | `_hook_watch_list <tool-dir>` | prints `<key> <scope> <terminal\|open>` per recorded key |
 | `_hook_watch_collect` | fills `_HOOK_WATCH_UNMET` with `<tool-id> <key>` entries |
-| `_hook_watch_claim_block <tool-dir> <key>` | claims the one Stop block per submit or watcher exit |
-| `_hook_watch_launch <option> <command> [<subcommand>]` | pre-bash only (needs the command classifier): whether the command runs a watcher with `<option>`; sets `_HOOK_WATCH_DETACHED` |
+| `_hook_watch_claim_block <tool-dir> <key>` | claims the one Stop block per record or re-arm |
+| `_hook_watch_launch <option>[\|<option>...] <command> [<subcommand>]` | pre-bash only (needs the command classifier): whether the command runs a watcher with one of the options; sets `_HOOK_WATCH_DETACHED` |
 | `_hook_gh_pr_key_scope <url>` | prints `<key> <scope>` for a pull-request URL and sets `_HOOK_GH_PR_KEY`, `_HOOK_GH_PR_SCOPE`, `_HOOK_GH_PR_NUMBER` |
-| `_hook_gh_push_scopes <output> <command>` | prints the recorded scopes a successful push re-arms, `ALL`, or nothing. `<command>` decides two things: a dry-run, delete, `--no-push`, or help word means nothing re-arms, and only a command with a `push` word re-arms `ALL` when it printed output but no `To` block (blank output re-arms `ALL` for any command) |
+| `_hook_gh_push_scopes <output> <command>` | prints the recorded scopes a successful push re-arms, `ALL`, or nothing. `<command>` decides two things: a dry-run, delete, `--no-push`, or help word means nothing re-arms, and only a command with a `push` word re-arms `ALL` when it printed output but no `To` block (blank output re-arms `ALL` for any command). Its words are split on whitespace without honoring quotes, so `-o 'x -n'` reads as `-n` |
 
 An extension that wraps pull-request creation records with
 `_hook_gh_pr_key_scope` plus
@@ -258,9 +284,37 @@ watcher basename.
   scope and `ALL` re-arms skip it until a per-key re-arm (such as
   `gh pr reopen <url>`) revives it.
 - Same owner, repository, and number on two GitHub hosts share a key.
-- The Stop reminder goes to stderr, which hosts show to the user but not the
-  model; the post-bash reminder is the model-visible one. Opt into
+- The Stop reminder goes to stderr. Claude Code shows a successful Stop's
+  stderr only in its transcript view, and the model never sees it; the
+  post-bash reminder is the model-visible one. Opt into
   `AGENTGUARD_WATCH_BLOCK=1` for a model-visible Stop.
+- A Stop during a watcher's startup, before it has written its pending file,
+  sees no watcher.
+- Sessions keyed by a process id (runtimes without a session id) can inherit
+  an earlier session's records when the id is reused.
+- The producer prunes `done/` and `exited/` records after 30 days, so a key
+  recorded in a session active longer than that can read as unwatched.
+- A symlinked state root, or any symlinked component under it, turns
+  enforcement off for the tool (fail open).
+- When the producer writes nothing (a sandbox that denies its state dir, or
+  `GIT_PR_WATCH_STATE=0` set only in the agent shell, not the hook
+  environment), the engine reminds about pull requests it cannot see being
+  watched.
+- Another session's watcher run satisfies this session's key: the pull
+  request was watched, whoever watched it.
+- Codex payloads carry no exit status, and a cancelled Muse call with empty
+  output reads as status 0, so either can re-arm everything on a quiet push
+  or revive a terminal key after a failed `gh pr reopen` (nuisance re-arms,
+  never missed ones).
+- Localized git translates `[new tag]`, so a localized tag-only push counts as
+  a branch update and re-arms (a nuisance re-arm).
+- Truncated output (`| head -1`, `| tail -n 3`) can lose the `To` block and
+  with it a re-arm.
+- A heredoc mentioning a detached launch can make a real foreground launch
+  on the same command read as detached (it matters only under
+  `AGENTGUARD_WATCH_BLOCK=1`).
+- The reminder groups labels by scope, not host, so pull requests of
+  same-named repositories on two hosts share one suggested command.
 - Launch advice is a heuristic: it does not see a detached watcher inside
   `bash -c '...'` or `{ ...; } &`, and an `&` inside `$(...)` or ANSI-C
   quoting on the launch line can read as backgrounding. A launch line over

@@ -24,7 +24,8 @@
 # Linux; macOS liveness checks pay one `ps` per candidate watcher.
 #
 # Session layout, under $_HOOK_STATE_DIR/watch/<tool-id>/ (tool-id is the
-# tool dir with `/` replaced by `_`):
+# tool dir with `/` replaced by `+`, which no name contains, so two tool dirs
+# never share an id):
 #   tool            three lines: tool dir, watcher argv basename, hint
 #   keys/<key>      "<epoch> <scope>" then the label, one file per key
 #   blocked/<key>   written when a Stop blocked for that key
@@ -45,6 +46,7 @@ _HOOK_WATCH_KEY_SCOPE=''
 _HOOK_WATCH_KEY_LABEL=''
 _HOOK_WATCH_DONE_EPOCH=0
 _HOOK_WATCH_DONE_WORD=''
+_HOOK_WATCH_EXITED_EPOCH=0
 _HOOK_WATCH_DETACHED=0
 
 # Whether $1 is safe as a single path component: keys, scopes, and tool-dir
@@ -59,7 +61,9 @@ _hook_watch_name_ok() {
 }
 
 # Store the session id of tool dir $1 in the variable named by $2: the tool
-# dir with `/` replaced by `_`. Fails for an absolute, empty, or unsafe dir.
+# dir with `/` replaced by `+`. Names never contain `+`, so the mapping is
+# one-to-one (with `_` instead, `a/b_c` and `a_b/c` would collide). Fails for
+# an absolute, empty, or unsafe dir.
 _hook_watch_tool_id() {
   # Prefixed locals: $2 names a variable in the caller's scope.
   local _ti_dir="${1:-}" _ti_rest _ti_component
@@ -75,7 +79,7 @@ _hook_watch_tool_id() {
       *) _ti_rest='' ;;
     esac
   done
-  printf -v "$2" '%s' "${_ti_dir//\//_}"
+  printf -v "$2" '%s' "${_ti_dir//\//+}"
 }
 
 # Store the current epoch in the variable named by $1. Bash 4.2+ formats it
@@ -251,10 +255,23 @@ _hook_watch_watched() {
   return 1
 }
 
+# Store in the variable named by $1 the epoch field $2 of a state record:
+# 0 for `-`, a missing field, or anything not a plain number (all of which
+# count as before any event), without leading zeros (octal in arithmetic).
+_hook_watch_epoch() {
+  local _ep_value="$2"
+  case "$_ep_value" in
+    '' | *[!0-9]*) _ep_value=0 ;;
+  esac
+  _ep_value="${_ep_value#"${_ep_value%%[!0]*}"}"
+  _ep_value="${_ep_value:-0}"
+  [ "${#_ep_value}" -le 15 ] || _ep_value=0
+  printf -v "$1" '%s' "$_ep_value"
+}
+
 # Read the newest done/<key> record across the accepted producer dirs into
-# _HOOK_WATCH_DONE_EPOCH (0 for `-`, which counts as before any event) and
-# _HOOK_WATCH_DONE_WORD. The content is "<commit> <word> <epoch>"; fails when
-# no readable record exists.
+# _HOOK_WATCH_DONE_EPOCH and _HOOK_WATCH_DONE_WORD. The content is
+# "<commit> <word> <epoch>"; fails when no readable record exists.
 _hook_watch_done() {
   local key="$1" dir file word epoch found=1
   _HOOK_WATCH_DONE_EPOCH=0
@@ -264,13 +281,7 @@ _hook_watch_done() {
     _hook_watch_file_ok "$file" || continue
     word='' epoch=''
     read -r _ word epoch 2>/dev/null <"$file" || [ -n "$word" ] || continue
-    case "$epoch" in
-      '' | *[!0-9]*) epoch=0 ;;
-    esac
-    # Leading zeros would read as octal below; a producer never writes them.
-    epoch="${epoch#"${epoch%%[!0]*}"}"
-    epoch="${epoch:-0}"
-    [ "${#epoch}" -le 15 ] || continue
+    _hook_watch_epoch epoch "$epoch"
     if [ "$found" = 1 ] || [ "$epoch" -gt "$_HOOK_WATCH_DONE_EPOCH" ]; then
       _HOOK_WATCH_DONE_EPOCH="$epoch"
       _HOOK_WATCH_DONE_WORD="$word"
@@ -278,6 +289,24 @@ _hook_watch_done() {
     fi
   done
   return "$found"
+}
+
+# Read the newest result epoch of exited/<key> across the accepted producer
+# dirs into _HOOK_WATCH_EXITED_EPOCH. The content is "<status> <state>
+# <reason> <epoch>", the epoch being when the check behind the result the run
+# delivered started; a run cut short (a signal, an error, GitHub unreadable)
+# writes `-`. The file's mtime plays no part.
+_hook_watch_exited() {
+  local key="$1" dir file epoch
+  _HOOK_WATCH_EXITED_EPOCH=0
+  for dir in ${_HOOK_WATCH_DIRS[@]+"${_HOOK_WATCH_DIRS[@]}"}; do
+    file="$dir/exited/$key"
+    _hook_watch_file_ok "$file" || continue
+    epoch=''
+    read -r _ _ _ epoch _ 2>/dev/null <"$file" || [ -n "$epoch" ] || continue
+    _hook_watch_epoch epoch "$epoch"
+    [ "$epoch" -le "$_HOOK_WATCH_EXITED_EPOCH" ] || _HOOK_WATCH_EXITED_EPOCH="$epoch"
+  done
 }
 
 # Whether key $1's newest done record says the item can no longer change
@@ -448,25 +477,33 @@ _hook_watch_list() {
   return 0
 }
 
-# Whether recorded key $1 (scope $2, submitted at epoch $3) is satisfied: a
-# live watcher or matching pending file, or a done record whose check started
-# after the submit (a check that started in the same second may not have seen
-# it, so equal epochs do not count). Per the producer contract, watchers/ is
-# listed before done/ and once more when neither shows anything, because one
-# listing can miss a watcher file while another replaces it.
+# Whether recorded key $1 (scope $2, submitted or re-armed at epoch $3) is
+# satisfied: a live watcher or matching pending file; a done record whose
+# check started after the submit; or an exited record whose result came from
+# a check that started after it. A watcher that delivered a result after the
+# submit means the agent got that result, whatever it was (red, stalled), and
+# the obligation only exists to stop an agent walking away without watching
+# at all; requiring a live watcher instead re-blocked on every exit of a
+# persistently red pull request. A check that started in the same second may
+# not have seen the submit, so only strictly newer epochs count. Per the
+# producer contract, watchers/ is listed before the records and once more
+# when nothing showed, because one listing can miss a watcher file while
+# another replaces it.
 _hook_watch_satisfied() {
   local key="$1" scope="$2" epoch="$3" argv="$4"
   _hook_watch_watched "$key" "$scope" "$argv" && return 0
   if _hook_watch_done "$key" && [ "$_HOOK_WATCH_DONE_EPOCH" -gt "$epoch" ]; then
     return 0
   fi
+  _hook_watch_exited "$key"
+  [ "$_HOOK_WATCH_EXITED_EPOCH" -le "$epoch" ] || return 0
   _hook_watch_watched "$key" "$scope" "$argv"
 }
 
 # _hook_watch_collect
 #
 # Fill _HOOK_WATCH_UNMET with "<tool-id> <key>" for every key this session
-# recorded that no watcher covers and no newer done record satisfies. A tool
+# recorded that is not satisfied (see _hook_watch_satisfied). A tool
 # whose producer state cannot be trusted (or whose session metadata is
 # unreadable) contributes nothing. File tests and reads only: no network.
 _hook_watch_collect() {
@@ -492,48 +529,55 @@ _hook_watch_collect() {
 
 # _hook_watch_claim_block <tool-dir> <key>
 #
-# Claim the one Stop block a key gets per submit or watcher exit, writing
+# Claim the one Stop block a key gets per submit or re-arm, writing
 # blocked/<key> (its mtime is the block's time). A block is armed when none
-# was recorded yet, or when the key was recorded or re-armed (keys/<key>) or
-# a watcher run for it ended (the producer's exited/<key>) since the last
-# block. Every re-arm needs new work or a new watcher run in between, so
-# blocks stay bounded and a Stop can always end the turn. The claim holds
-# only once the marker is written: an unwritable state dir degrades to a
-# reminder, never to a block on every Stop.
+# was recorded yet or the key was recorded or re-armed (keys/<key>) since the
+# last one, so every block needs new work in between and a Stop can always
+# end the turn. A watcher exit does not re-arm it: an exit that delivered a
+# result satisfies the key instead. Bash 3.2 compares whole-second mtimes, so
+# a re-arm in the block's own second does not arm another (fails toward no
+# block). The claim holds only once the marker is written: an unwritable
+# state dir degrades to a reminder, never to a block on every Stop.
 _hook_watch_claim_block() {
-  local tool_dir="$1" key="$2" id base marker dir armed=0
+  local tool_dir="$1" key="$2" id base marker
   _hook_watch_tool_id "$tool_dir" id || return 1
   _hook_watch_name_ok "$key" || return 1
   _hook_watch_session_dir base || return 1
   base="$base/$id"
   marker="$base/blocked/$key"
-  if [ ! -e "$marker" ] || [ "$base/keys/$key" -nt "$marker" ]; then
-    armed=1
-  elif _hook_watch_roots "$tool_dir"; then
-    for dir in ${_HOOK_WATCH_DIRS[@]+"${_HOOK_WATCH_DIRS[@]}"}; do
-      if _hook_watch_file_ok "$dir/exited/$key" && [ "$dir/exited/$key" -nt "$marker" ]; then
-        armed=1
-      fi
-    done
+  if [ -e "$marker" ] && ! [ "$base/keys/$key" -nt "$marker" ]; then
+    return 1
   fi
-  [ "$armed" = 1 ] || return 1
   [ -d "$base/blocked" ] || _hook_mkstate "$base/blocked" || return 1
   # Write content, not just truncate: O_TRUNC on an empty file need not bump
   # its mtime, which is what the arming comparison reads.
   printf '%s\n' "$$" 2>/dev/null >"$marker"
 }
 
+# Store in the variable named by $1 the current tool's hint with its first
+# `<labels>` token replaced by labels $2 (space-led). Plain prefix and suffix
+# expansion: a pattern replacement would treat `&` in a label specially in
+# newer Bash.
+_hook_watch_hint() {
+  local _hi_hint="$_HOOK_WATCH_TOOL_HINT"
+  case "$_hi_hint" in
+    *'<labels>'*) _hi_hint="${_hi_hint%%<labels>*}${2# }${_hi_hint#*<labels>}" ;;
+  esac
+  printf -v "$1" '%s' "$_hi_hint"
+}
+
 # _hook_watch_stop [<tool-dir>=<VARIABLE>]...
 #
 # The Stop hook's watch pass. Call it only for a foreground Stop. Reminds on
 # stderr once per prompt per key and submit; with AGENTGUARD_WATCH_BLOCK=1 on
-# Claude, also blocks once per submit or watcher exit (see
-# _hook_watch_claim_block). Each argument names the hook-environment variable
+# Claude, blocks instead, once per submit or re-arm (see
+# _hook_watch_claim_block). A `<labels>` token in a tool's hint is replaced
+# by the labels the message names. Each argument names the hook-environment variable
 # that turns a tool's producer state off when set to the literal `0`; such a
 # tool gets one note saying so instead of reminders it could never satisfy.
 _hook_watch_stop() {
   local entry id key tool_base pair var block=0 agent message remind='' blocks=''
-  local current='' remind_labels='' block_labels='' off='' skip=0
+  local current='' remind_labels='' block_labels='' off='' skip=0 hint=''
   _hook_watch_collect
   [ "${#_HOOK_WATCH_UNMET[@]}" -gt 0 ] || return 0
   if _hook_flag_enabled "${AGENTGUARD_WATCH_BLOCK:-}"; then
@@ -541,7 +585,8 @@ _hook_watch_stop() {
     [ "$agent" != claude ] || block=1
   fi
   # Entries arrive grouped by tool; flush one message per tool.
-  for entry in ${_HOOK_WATCH_UNMET[@]+"${_HOOK_WATCH_UNMET[@]}"} '- -'; do
+  # The sentinel's id `/` can never be a tool id (ids hold no `/`).
+  for entry in ${_HOOK_WATCH_UNMET[@]+"${_HOOK_WATCH_UNMET[@]}"} '/ /'; do
     id="${entry%% *}"
     key="${entry#* }"
     if [ "$id" != "$current" ] && [ -n "$current" ]; then
@@ -550,14 +595,18 @@ _hook_watch_stop() {
           remind="$remind${remind:+ }$off=0 in the hook environment turns $_HOOK_WATCH_TOOL_ARGV state files off, so AgentGuard cannot tell whether$remind_labels is watched. Unset it to restore this check."
         fi
       else
-        [ -z "$remind_labels" ] ||
-          remind="$remind${remind:+ }Not watched since the last push or submit:$remind_labels. $_HOOK_WATCH_TOOL_HINT"
-        [ -z "$block_labels" ] ||
-          blocks="$blocks${blocks:+ }Not watched since the last push or submit:$block_labels. $_HOOK_WATCH_TOOL_HINT"
+        if [ -n "$remind_labels" ]; then
+          _hook_watch_hint hint "$remind_labels"
+          remind="$remind${remind:+ }Not watched since the last push or submit:$remind_labels. $hint"
+        fi
+        if [ -n "$block_labels" ]; then
+          _hook_watch_hint hint "$block_labels"
+          blocks="$blocks${blocks:+ }Not watched since the last push or submit:$block_labels. $hint"
+        fi
       fi
       remind_labels='' block_labels=''
     fi
-    [ "$id" != - ] || break
+    [ "$id" != / ] || break
     tool_base="$_HOOK_STATE_DIR/watch/$id"
     if [ "$id" != "$current" ]; then
       current="$id"
@@ -594,7 +643,7 @@ _hook_watch_stop() {
     fi
   done
   if [ -n "$blocks" ]; then
-    _hook_block "$blocks (AGENTGUARD_WATCH_BLOCK=1 blocks one Stop per push, submit, or watcher exit.)"
+    _hook_block "$blocks (AGENTGUARD_WATCH_BLOCK=1 blocks one Stop per push or submit.)"
   fi
   if [ -n "$remind" ]; then
     # stderr only: a Stop response's context is not delivered to the model
@@ -817,10 +866,10 @@ _hook_watch_command_start() {
   _HOOK_WATCH_START="$k"
 }
 
-# _hook_watch_launch <option> <command> [<subcommand>]
+# _hook_watch_launch <option>[|<option>...] <command> [<subcommand>]
 #
 # Succeed when an executable fragment of the hook's command runs <command>
-# (<subcommand>) with <option> and without -h/--help (which only prints
+# (<subcommand>) with one of the `|`-separated options and without -h/--help (which only prints
 # usage). Sets _HOOK_WATCH_DETACHED=1 when such a run is detached: behind
 # nohup or setsid, followed by a `disown`, or backgrounded with `&`. A text
 # prefilter keeps every other command free of the scan, and only fragments
@@ -859,8 +908,8 @@ _hook_watch_launch() {
       _clean_command_word "${_HOOK_WATCH_WORDS[i]}" word
       case "$word" in
         --) break ;;
-        "$option") option_seen=1 ;;
         -h | --help) help=1 ;;
+        *) case "|$option|" in *"|$word|"*) option_seen=1 ;; esac ;;
       esac
     done
     [ "$option_seen" = 1 ] && [ "$help" = 0 ] || continue

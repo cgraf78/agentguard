@@ -1404,7 +1404,7 @@ case "$-" in
       local agent message=''
       _hook_flag_disabled "${AGENTGUARD_WATCH:-}" && return 0
       _hook_load_watch || return 0
-      _hook_watch_launch --wait git pr-watch || return 0
+      _hook_watch_launch '--wait|-w' git pr-watch || return 0
       if [ "$_HOOK_WATCH_DETACHED" = 1 ]; then
         # shellcheck disable=SC2016 # Backticks are literal Markdown for the agent.
         message='run `git pr-watch --wait` attached, without `&`, nohup, setsid, or disown (on Claude Code, as its own Bash call with run_in_background: true). A detached watcher keeps running with nobody receiving its result, yet the Stop hook counts it as watching.'

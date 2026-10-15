@@ -156,9 +156,9 @@ _pr_checks_git_push_updates() {
 }
 
 # Whether a gh fragment runs a pull-request subcommand that pushes or opens a
-# pull request for review: create, ready, reopen, or update-branch, judged by
-# the word in subcommand position rather than anywhere in the text. Stores
-# that subcommand in _PR_CHECKS_GH_SUB.
+# pull request for review: create (or its alias new), ready, reopen, or
+# update-branch, judged by the word in subcommand position rather than
+# anywhere in the text. Stores that subcommand in _PR_CHECKS_GH_SUB.
 _pr_checks_gh_pr_starts_checks() {
   local fragment="$1" word index
   local -a words=()
@@ -170,7 +170,7 @@ _pr_checks_gh_pr_starts_checks() {
     case "$word" in
       -R | --repo) ((index++)) ;;
       -*) ;;
-      create)
+      create | new)
         _command_subcommand_has_option "$fragment" gh pr --dry-run && return 1
         _PR_CHECKS_GH_SUB=create
         return 0
@@ -465,7 +465,8 @@ if [ -n "$_pr_checks_key" ] && [ "$(_hook_hm_tool_status)" = "0" ]; then
     ! _hook_tool_runs_in_background && _hook_load_watch_github; then
     # The hint is free text the Stop hook repeats: how to start a watcher.
     # shellcheck disable=SC2016 # Backticks are literal Markdown for the agent.
-    _pr_checks_hint="${AGENTGUARD_PR_WATCH_HINT:-Run \`git pr-watch --wait\` with these pull requests in the background and act on its result when it exits.}"
+    # A `<labels>` token in it is replaced by the pull requests a message names.
+    _pr_checks_hint="${AGENTGUARD_PR_WATCH_HINT:-Run \`git pr-watch --wait <labels>\` in the background (one run per repository, from its checkout) and act on its result when it exits.}"
     [ -z "$_pr_checks_creates" ] || _pr_checks_record
     [ -d "$_HOOK_STATE_DIR/watch" ] || _pr_checks_gh_targets=()
     _pr_checks_rearm_gh

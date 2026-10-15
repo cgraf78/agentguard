@@ -18,7 +18,7 @@ WATCH_LIB="$AGENTGUARD_ROOT/lib/agentguard/watch.sh"
 WATCH_GH_LIB="$AGENTGUARD_ROOT/lib/agentguard/watch-github.sh"
 STATE_ROOT="$TEST_TMPDIR/agentguard/hook-state"
 PRODUCER="$HOME/.local/state/git-tools/pr-watch"
-TOOL_ID=git-tools_pr-watch
+TOOL_ID=git-tools+pr-watch
 GATE="PR checks gate"
 
 # A PATH with a git-pr-watch stub first, and one with no git-pr-watch at all
@@ -147,12 +147,13 @@ _assert_file_content "gh pr create: records the key with its scope and label" \
   "$(printf '%s owner_repo\n%s' "$(_key_epoch owner_repo_12)" "$URL")" "$(_session_tool)/keys/owner_repo_12"
 _assert_eq "gh pr create: epoch is a number" 1 "$([[ "$(_key_epoch owner_repo_12)" =~ ^[1-9][0-9]+$ ]] && echo 1)"
 _assert_file_content "gh pr create: tool metadata" \
-  "$(printf 'git-tools/pr-watch\ngit-pr-watch\n%s' 'Run `git pr-watch --wait` with these pull requests in the background and act on its result when it exits.')" \
+  "$(printf 'git-tools/pr-watch\ngit-pr-watch\n%s' 'Run `git pr-watch --wait <labels>` in the background (one run per repository, from its checkout) and act on its result when it exits.')" \
   "$(_session_tool)/tool"
 _assert_contains "gh pr create: reminder recommends git pr-watch --wait with the label" \
   "git pr-watch --wait $URL" "$(_context)"
 
 for _case in \
+  "gh pr new --fill" \
   "git pr-open --fill" \
   "git pr-submit" \
   "git-pr-submit" \
@@ -514,6 +515,33 @@ rm -f "$PRODUCER/done/o_r_12"
 _assert_eq "done for the unscoped key satisfies it" "a" "$(_unmet_after)"
 _producer_reset
 
+# An exited record satisfies when its result epoch (fourth field) is newer
+# than the submit: the watcher ran after it and delivered its result,
+# whatever the state. A run cut short writes `-`.
+printf '1 action failed 1001\n' >"$PRODUCER/exited/o_r_12"
+_assert_eq "exited after the submit satisfies" "b" "$(_unmet_after)"
+printf '8 stall blocked 1001\n' >"$PRODUCER/exited/o_r_12"
+_assert_eq "stall exit after the submit satisfies" "b" "$(_unmet_after)"
+printf '1 action failed 999\n' >"$PRODUCER/exited/o_r_12"
+_assert_eq "exited before the submit does not" "ab" "$(_unmet_after)"
+printf '1 action failed 1000\n' >"$PRODUCER/exited/o_r_12"
+_assert_eq "exited in the submit's second does not" "ab" "$(_unmet_after)"
+printf '143 pending checks-running -\n' >"$PRODUCER/exited/o_r_12"
+_assert_eq "killed watcher (epoch -) does not" "ab" "$(_unmet_after)"
+printf '1 action failed\n' >"$PRODUCER/exited/o_r_12"
+_assert_eq "exited without an epoch does not" "ab" "$(_unmet_after)"
+# Multi-PR run: green early (older done record), re-armed by a push, and
+# still re-judged by the same run, which exits with a newer result epoch.
+printf '%s green 900\n' "$(printf 'c%.0s' {1..40})" >"$PRODUCER/done/o_r_12"
+printf '0 done green 1100\n' >"$PRODUCER/exited/o_r_12"
+_assert_eq "multi-PR run: stale done but newer exit satisfies" "b" "$(_unmet_after)"
+_producer_reset
+_new_sid
+_seed_key o_r_12 1000 o_r https://github.com/o/r/pull/12
+printf '%s\n' 'git-tools/pr-watch' git-pr-watch 'Run `git pr-watch --wait <labels>` now.' >"$(_session_tool)/tool"
+_stop
+_assert_contains "Stop hint: labels replace the token" "Run \`git pr-watch --wait https://github.com/o/r/pull/12\` now." "$HOOK_STDERR"
+
 # The engine reads both candidate roots: an absolute XDG_STATE_HOME the hook
 # sees, and ~/.local/state.
 mkdir -p "$TEST_TMPDIR/xdg-state/git-tools/pr-watch/done"
@@ -593,12 +621,20 @@ _stop
 _assert_eq "block: a new submit re-arms" 2 "$HOOK_EXIT"
 _stop
 _assert_eq "block: then ends again" 0 "$HOOK_EXIT"
-sleep 1
+# A watcher that exits red at once (a conflict, a failure) delivered its
+# result: replaying the watch-and-exit loop blocks only the first Stop.
 _producer_reset
-printf '1 action failed\n' >"$PRODUCER/exited/o_r_12"
-_new_prompt
+_new_sid
+_seed_key o_r_12 1000 o_r KEY_A
 _stop
-_assert_eq "block: a watcher exit re-arms" 2 "$HOOK_EXIT"
+_assert_eq "red-exit loop: the unwatched Stop blocks" 2 "$HOOK_EXIT"
+for _round in 1 2 3 4; do
+  printf '1 action conflict %s\n' "$((1000 + _round))" >"$PRODUCER/exited/o_r_12"
+  _new_prompt
+  _stop
+  _assert_eq "red-exit loop round $_round: ends the turn" 0 "$HOOK_EXIT"
+  _assert_not_contains "red-exit loop round $_round: no reminder" "KEY_A" "$HOOK_STDERR"
+done
 _producer_reset
 for _agent in codex muse gemini agent; do
   _new_sid
@@ -695,7 +731,10 @@ for _case in \
   "claude^bash -c 'git pr-watch --wait 12'^false^0 foreground" \
   "claude^bash -n /opt/other-script --wait^false^0 none" \
   "claude^caffeinate -i -t 600 git pr-watch --wait 12^false^0 foreground" \
-  "claude^echo pr-watch & git pr-watch --wait 1^true^0 none"; do
+  "claude^echo pr-watch & git pr-watch --wait 1^true^0 none" \
+  "claude^git pr-watch -w 12^false^0 foreground" \
+  "codex^git pr-watch -w 12 &^false^0 detached" \
+  "claude^git pr-watch -w -h^false^0 none"; do
   IFS='^' read -r _agent _cmd _bg _want <<<"$_case"
   _assert_eq "$_agent '$_cmd' bg=$_bg" "$_want" "$(_launch "$_agent" "$_cmd" "$_bg")"
 done
@@ -752,7 +791,7 @@ _engine_cases() {
   _new_sid
   _assert_eq "$tag: record" 0 "$(_engine "$shell" "_hook_watch_record '$tool' '$key' '$scope' '$argv' '$label' 'Run the watcher.'; echo \$?")"
   _assert_eq "$tag: list" "$key $scope open" "$(_engine "$shell" "_hook_watch_list '$tool'")"
-  _assert_eq "$tag: collect without a watcher" "${tool//\//_} $key" \
+  _assert_eq "$tag: collect without a watcher" "${tool//\//+} $key" \
     "$(_engine "$shell" '_hook_watch_collect; printf "%s\n" "${_HOOK_WATCH_UNMET[@]}"')"
   _start_watcher "$argv"
   printf '%s\n' "$WATCHER_PID" >"$producer/watchers/$key.$WATCHER_PID"
@@ -784,6 +823,8 @@ _engine_cases() {
   _assert_eq "$tag: unsafe key refused" 1 "$(_engine "$shell" "_hook_watch_record '$tool' '../x' - '$argv' l h; echo \$?")"
   _assert_eq "$tag: unsafe tool dir refused" 1 "$(_engine "$shell" "_hook_watch_record '/abs' k - '$argv' l h; echo \$?")"
   _assert_eq "$tag: dot-dot tool dir refused" 1 "$(_engine "$shell" "_hook_watch_record 'a/../b' k - '$argv' l h; echo \$?")"
+  _assert_eq "$tag: tool dirs differing only in / and _ stay apart" "a+b_c a_b+c" \
+    "$(_engine "$shell" "_hook_watch_record a/b_c k - '$argv' l h; _hook_watch_record a_b/c k - '$argv' l h; ls \"\$_HOOK_STATE_DIR/watch\" | grep '^a' | tr '\n' ' ' | sed 's/ \$//'")"
   _assert_eq "$tag: unsafe scope refused" 1 "$(_engine "$shell" "_hook_watch_record '$tool' k 'a/b' '$argv' l h; echo \$?")"
   rm -rf "$producer"
 }
