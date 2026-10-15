@@ -313,6 +313,234 @@ done
 _newline_frag=$(printf 'echo "a\nb" c')
 _assert_eq "tokens: replay fidelity for embedded newline" "IDENTICAL" "$(_fidelity_pair "$_newline_frag")"
 
+echo "=== perf-regression: classifier helpers run without subshells ==="
+
+# Each helper below used to be called through `$(...)`, and the word helpers
+# nested two more captures inside: about a thousand forks for an ordinary
+# piped command. Trace the calls with the shell pid in PS4: a subshell would
+# trace its own commands under a new BASHPID, so exactly one pid proves the
+# helper and everything it calls ran in the caller's shell.
+_subshell_pids_for() {
+  # $1: snippet run after sourcing the helpers and classifier.
+  AGENTGUARD_PROCESS_DETECT=0 bash -c '
+    source "$1"
+    source "$2"
+    trace=$(mktemp)
+    exec 9>"$trace"
+    BASH_XTRACEFD=9
+    PS4="+\$BASHPID "
+    set -x
+    eval "$3"
+    set +x
+    exec 9>&-
+    sed -n "s/^+* *\([0-9][0-9]*\) .*/\1/p" "$trace" | sort -u | wc -l | tr -d " "
+    rm -f "$trace"
+  ' _ "$HELPERS" "$CLASSIFIER" "$1"
+}
+
+_nofork_cases=(
+  '_clean_command_word "\"(sudo)\"" w'
+  '_shell_word_token "a\"b'"'"'c" w'
+  '_fragment_token_words "sudo -u bob env -i A=1 nice -n 5 timeout 3 git status" ws'
+  '_fragment_command_index "sudo -u bob env -i A=1 nice -n 5 timeout 3 git status" i'
+  '_fragment_command_word "nohup xargs -I{} rm {}" w'
+  '_git_subcommand_index "git -C /tmp -c a=b push origin" push i'
+  '_command_subcommand_index "gh -R o/r pr create" gh pr i'
+  '_case_arm_payload "foo) git status" >/dev/null'
+)
+for _nofork_case in "${_nofork_cases[@]}"; do
+  _assert_eq "no subshell: $_nofork_case" "1" "$(_subshell_pids_for "$_nofork_case")"
+done
+
+echo "=== perf-regression: output variables match captured output ==="
+
+# The output-variable forms must store exactly what `v=$(helper ...)` held,
+# including its trailing-newline strip, and return the same status.
+_capture_vs_store() {
+  # $1: helper, $2: output-variable position (args before it), $3...: args.
+  AGENTGUARD_PROCESS_DETECT=0 bash -c '
+    source "$1"
+    source "$2"
+    fn=$3 nargs=$4
+    shift 4
+    captured=$("$fn" "$@")
+    captured_rc=$?
+    stored=unset
+    "$fn" "${@:1:$nargs}" stored
+    stored_rc=$?
+    if [ "$captured" = "$stored" ] && [ "$captured_rc" = "$stored_rc" ]; then
+      echo SAME
+    else
+      printf "DIFF captured=<%q>/%s stored=<%q>/%s\n" "$captured" "$captured_rc" "$stored" "$stored_rc"
+    fi
+  ' _ "$HELPERS" "$CLASSIFIER" "$@"
+}
+
+for _word in '"(a)"' $'a\n)' $'a\n\\' $'x\n\n' '{b}' "'q'" "\\" '' $'\n' '"$HOME"' '((x))'; do
+  for _fn in _strip_outer_quotes _shell_word_token _clean_command_word; do
+    _assert_eq "store matches capture: $_fn [$_word]" "SAME" "$(_capture_vs_store "$_fn" 1 "$_word")"
+  done
+done
+
+for _frag in 'sudo -u bob env -i A=1 nice -n 5 timeout 3 git status' 'echo hi' '' 'FOO=1' \
+  'xargs -I{} rm {}' 'command builtin exec sl amend' "$(printf 'echo "a\nb" c')"; do
+  _assert_eq "store matches capture: _fragment_command_index [$_frag]" "SAME" \
+    "$(_capture_vs_store _fragment_command_index 1 "$_frag")"
+  _assert_eq "store matches capture: _fragment_command_word [$_frag]" "SAME" \
+    "$(_capture_vs_store _fragment_command_word 1 "$_frag")"
+done
+
+for _target in push pull ''; do
+  _assert_eq "store matches capture: _git_subcommand_index [$_target]" "SAME" \
+    "$(_capture_vs_store _git_subcommand_index 2 'git -C /tmp --no-pager push -f' "$_target")"
+done
+_assert_eq "store matches capture: _git_subcommand_index non-git" "SAME" \
+  "$(_capture_vs_store _git_subcommand_index 2 'echo push' push)"
+for _target in pr issue ''; do
+  _assert_eq "store matches capture: _command_subcommand_index [$_target]" "SAME" \
+    "$(_capture_vs_store _command_subcommand_index 3 'gh -R o/r pr create' gh "$_target")"
+done
+
+echo "=== perf-regression: token arrays match the read loop ==="
+
+# _fragment_token_words replaces `while read; do words+=; done < <(...)`,
+# which splits the token stream on newlines (so a quoted newline yields two
+# elements) and yields nothing for an empty stream. The memo must also
+# replay earlier fragments exactly after the single-entry cache moved on.
+_token_words_vs_loop() {
+  AGENTGUARD_PROCESS_DETECT=0 bash -c '
+    source "$1"
+    source "$2"
+    shift 2
+    status=SAME
+    for frag in "$@" "$@"; do
+      loop=()
+      while IFS= read -r w; do loop+=("$w"); done < <(_FRAGMENT_TOKENS_CACHE_SET="" _fragment_tokens_scan "$frag" t; printf "%s" "$t")
+      arr=(stale)
+      arr=()
+      _fragment_token_words "$frag" arr
+      [ "$(declare -p loop | sed "s/^declare -a loop=//")" = "$(declare -p arr | sed "s/^declare -a arr=//")" ] || status="DIFF <$frag>"
+    done
+    echo "$status"
+  ' _ "$HELPERS" "$CLASSIFIER" "$@"
+}
+
+_assert_eq "token words: tricky fragments replay identically" "SAME" \
+  "$(_token_words_vs_loop 'git commit -m "hello world"' "$(printf 'echo "a\nb" c')" '""' '' 'echo ""' \
+    "printf '%s\\n' x" 'echo a\\b "c  d"' "x indispensable-ok" '@' '*')"
+
+# More distinct fragments than the memo holds: later ones are scanned fresh.
+_many_frags=()
+for ((_i = 0; _i < 70; _i++)); do _many_frags+=("git -C /tmp/r$_i status \"x $_i\""); done
+_assert_eq "token words: past the memo cap replay identically" "SAME" \
+  "$(_token_words_vs_loop "${_many_frags[@]}")"
+
+# _hook_load_command_classifier sources the classifier inside a function; the
+# memo arrays must still be global there.
+_assert_eq "token words: classifier sourced inside a function" "a|b c|;a|b c|;memo=2" \
+  "$(AGENTGUARD_PROCESS_DETECT=0 bash -c '
+    source "$1"
+    load() { source "$2"; }
+    load "$@"
+    for _ in 1 2; do
+      _fragment_token_words "a \"b c\"" ws
+      _fragment_token_words "other" ignored
+      printf "%s|" "${ws[@]}"
+      printf ";"
+    done
+    printf "memo=%s" "${#_FRAGMENT_TOKENS_MEMO_KEYS[@]}"
+  ' _ "$HELPERS" "$CLASSIFIER")"
+
+echo "=== perf-regression: scanners skip inert runs across chunk boundaries ==="
+
+# The scanners consume runs of characters their state ignores in one regex
+# per 256-character chunk. Runs that straddle a chunk, sit inside quotes, or
+# hold multibyte characters must give the same results as scanning one
+# character at a time; these cases put significant characters right past the
+# boundaries. $1 is the snippet; the remaining arguments become its "$@".
+_scan_case() {
+  local snippet="$1"
+  shift
+  AGENTGUARD_PROCESS_DETECT=0 bash -c '
+    source "$1"
+    source "$2"
+    AGENTGUARD_CMD_TRIMMED=""
+    snippet=$3
+    shift 3
+    eval "$snippet"
+  ' _ "$HELPERS" "$CLASSIFIER" "$snippet" "$@"
+}
+
+_long_a=$(printf 'a%.0s' {1..300})
+_long_x=$(printf 'x%.0s' {1..600})
+_long_mb=$(printf 'é中😀%.0s' {1..120})
+
+_assert_eq "skip: tokens keep long quoted words whole" \
+  "echo|$_long_x|$_long_a|z|" \
+  "$(_scan_case '_fragment_tokens_scan "$1" t; printf "%s" "${t//$'"'\n'"'/|}"' "echo \"$_long_x\" '$_long_a' z")"
+
+_assert_eq "skip: tokens keep multibyte runs whole" \
+  "printf|%s|$_long_mb|" \
+  "$(_scan_case '_fragment_tokens_scan "$1" t; printf "%s" "${t//$'"'\n'"'/|}"' "printf '%s' \"$_long_mb\"")"
+
+_assert_eq "skip: splitter finds separators after long runs only outside quotes" \
+  "$_long_a|b \"c;d$_long_a\"|e|" \
+  "$(_scan_case '_split_command_fragments "$1" | tr "\n" "|"' "$_long_a; b \"c;d$_long_a\" | e")"
+
+_assert_eq "skip: expansions found past long runs, not inside single quotes" \
+  "rm -rf /x|git status|" \
+  "$(_scan_case '_executable_expansion_payloads "$1" | tr "\0" "|"' "echo $_long_a \$(rm -rf /x) \"$_long_a \$(git status)\" '$_long_a \$(id)'")"
+
+# `'`, 300 a, `)`, `'`, space, 300 a: the unquoted `)` is at 2 + 300 + 2 + 300.
+_assert_eq "skip: unquoted index ignores quoted needles past a chunk" "604" \
+  "$(_scan_case '_unquoted_char_index "$1" ")"; printf "%s" "$_UNQUOTED_CHAR_INDEX"' "'$_long_a)' $_long_a) tail")"
+
+_assert_eq "skip: first word spans a long quoted run" "$_long_a b" \
+  "$(_scan_case '_first_shell_word "$1"; printf "%s" "$_FIRST_SHELL_WORD"' "\"$_long_a b\" c")"
+
+_assert_eq "skip: heredoc found past long runs, not in quotes or arithmetic" "EOF	0	0" \
+  "$(_scan_case '_heredoc_specs "$1"' "echo $_long_a \$((1 << 2)) \"<<X\" && cat <<'EOF'")"
+
+_assert_eq "skip: simple-word scan accepts quoted control syntax" "0:printf" \
+  "$(_scan_case '_agentguard_direct_simple_fragment_command_word "$1" w; printf "%s:%s" $? "$w"' "printf '$_long_a;' $_long_a")"
+_assert_eq "skip: simple-word scan still sees control syntax past a chunk" "1" \
+  "$(_scan_case '_agentguard_direct_simple_fragment_command_word "$1" w; printf "%s" $?' "printf $_long_a;x")"
+
+_assert_eq "skip: an unterminated quote after a long run stays open" "0" \
+  "$(_scan_case '_logical_command_incomplete "$1"; printf "%s" $?' "echo $_long_a \"$_long_a")"
+_assert_eq "skip: a closed quote after a long run is complete" "1" \
+  "$(_scan_case '_logical_command_incomplete "$1"; printf "%s" $?' "echo $_long_a \"$_long_a\"")"
+
+echo "=== perf-regression: generator prefilters never hide a payload ==="
+
+# Callers skip a payload generator's process substitution when a cheap text
+# test says it cannot print anything. Each case pairs a text the generator
+# does decompose with the test that must let it through, including spellings
+# that hide `env` behind quotes and escapes.
+_prefilter_case() {
+  # $1: predicate, $2: generator, $3: text. Prints pass/skip:output.
+  _scan_case '
+    out=$("$2" "$3" | tr "\0\n" "||")
+    if "$1" "$3"; then printf "pass:%s" "$out"; else printf "skip:%s" "$out"; fi
+  ' "$@"
+}
+_assert_eq "prefilter: command substitution passes" "pass:rm -rf /x|" \
+  "$(_prefilter_case _may_have_expansion_payloads _executable_expansion_payloads 'echo $(rm -rf /x)')"
+_assert_eq "prefilter: process substitution passes" "pass:git status|" \
+  "$(_prefilter_case _may_have_expansion_payloads _executable_expansion_payloads 'cat <(git status)')"
+_assert_eq "prefilter: plain text skips with no payload" "skip:" \
+  "$(_prefilter_case _may_have_expansion_payloads _executable_expansion_payloads 'echo "(x)" $HOME')"
+_assert_eq "prefilter: case arm passes" "pass:git status -uall|" \
+  "$(_prefilter_case _may_have_structural_payloads _structural_shell_payloads 'a) git status -uall')"
+_assert_eq "prefilter: function body passes" "pass:git status -uall|" \
+  "$(_prefilter_case _may_have_structural_payloads _structural_shell_payloads 'function f { git status -uall')"
+for _env_word in env 'e"n"v' "e'n'v" 'e\nv' "\$'env'" /usr/bin/env '\env'; do
+  _assert_eq "prefilter: env split passes for [$_env_word]" "pass:rm -rf /|" \
+    "$(_prefilter_case _may_have_env_split_payloads _env_split_payloads "$_env_word -S 'rm -rf /'")"
+done
+_assert_eq "prefilter: env split skips text without env" "skip:" \
+  "$(_prefilter_case _may_have_env_split_payloads _env_split_payloads "nohup -S 'rm -rf /'")"
+
 echo "=== perf-regression: generous end-to-end ceilings ==="
 
 _assert_hook_median_under() {

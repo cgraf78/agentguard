@@ -804,7 +804,7 @@ case "$-" in
     _vcs_authoring_fragment() {
       local fragment="$1" cw
 
-      cw=$(_fragment_command_word "$fragment") || return 1
+      _fragment_command_word "$fragment" cw || return 1
       case "$cw" in
         git | */git)
           _git_subcommand_is "$fragment" "commit"
@@ -836,32 +836,40 @@ case "$-" in
 
       while IFS= read -r -d '' command; do
         _agentguard_deadline_ok || return 1
-        while IFS= read -r -d '' payload; do
-          _vcs_authoring_in_executable_text "$payload" $((depth + 1)) &&
-            return 0
-        done < <(_executable_expansion_payloads "$command")
+        if _may_have_expansion_payloads "$command"; then
+          while IFS= read -r -d '' payload; do
+            _vcs_authoring_in_executable_text "$payload" $((depth + 1)) &&
+              return 0
+          done < <(_executable_expansion_payloads "$command")
+        fi
 
         while IFS= read -r fragment; do
           _agentguard_deadline_ok || return 1
-          while IFS= read -r payload; do
-            _vcs_authoring_in_shell_expansions "$payload" $((depth + 1)) &&
-              return 0
-          done < <(_structural_shell_payloads "$fragment")
+          if _may_have_structural_payloads "$fragment"; then
+            while IFS= read -r payload; do
+              _vcs_authoring_in_shell_expansions "$payload" $((depth + 1)) &&
+                return 0
+            done < <(_structural_shell_payloads "$fragment")
+          fi
           while IFS= read -r payload; do
             _vcs_authoring_in_shell_expansions "$payload" $((depth + 1)) &&
               return 0
           done < <(_nested_shell_payloads "$fragment")
-          while IFS= read -r payload; do
-            _vcs_authoring_in_shell_expansions "$payload" $((depth + 1)) &&
-              return 0
-          done < <(_env_split_payloads "$fragment")
+          if _may_have_env_split_payloads "$fragment"; then
+            while IFS= read -r payload; do
+              _vcs_authoring_in_shell_expansions "$payload" $((depth + 1)) &&
+                return 0
+            done < <(_env_split_payloads "$fragment")
+          fi
         done < <(_split_command_fragments "${command//$'\n'/ }")
       done < <(_hook_command_lines "$text")
 
-      while IFS= read -r -d '' payload; do
-        _vcs_authoring_in_executable_text "$payload" $((depth + 1)) &&
-          return 0
-      done < <(_active_heredoc_payloads "$text")
+      if [[ "$text" == *"<<"* ]]; then
+        while IFS= read -r -d '' payload; do
+          _vcs_authoring_in_executable_text "$payload" $((depth + 1)) &&
+            return 0
+        done < <(_active_heredoc_payloads "$text")
+      fi
 
       return 1
     }
@@ -941,7 +949,7 @@ case "$-" in
             _agentguard_plain_fragment_command_word "$frag" cw; }; then
           :
         else
-          cw=$(_fragment_command_word "$frag") || continue
+          _fragment_command_word "$frag" cw || continue
         fi
 
         # Sudo/doas: agents have no legitimate need for root privilege escalation.
@@ -953,9 +961,9 @@ case "$-" in
           case "$frag" in
             *sudo* | *doas*)
               words=()
-              while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$frag")
+              _fragment_token_words "$frag" words
               local ci
-              ci=$(_fragment_command_index "$frag") || ci=${#words[@]}
+              _fragment_command_index "$frag" ci || ci=${#words[@]}
               for ((i = 0; i < ci; i++)); do
                 _word_is_privilege_wrapper "${words[$i]:-}" && {
                   _GUARD_SUDO=1
@@ -978,7 +986,7 @@ case "$-" in
               # bare `grep "-r"` still matches (the shell strips those quotes
               # too, and grep really receives `-r`).
               words=()
-              while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$frag")
+              _fragment_token_words "$frag" words
               for word in "${words[@]}"; do
                 [ "$word" = "--" ] && break
                 [[ "$word" == -* ]] || continue
@@ -1032,11 +1040,11 @@ case "$-" in
             # untracked files. Dry-run (-n/--dry-run) is never matched.
             if [ "$_GUARD_GIT_CLEAN_FORCE" -eq 0 ] && _git_subcommand_is "$frag" "clean"; then
               words=()
-              while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$frag")
-              i=$(_git_subcommand_index "$frag" "clean") || i=${#words[@]}
+              _fragment_token_words "$frag" words
+              _git_subcommand_index "$frag" "clean" i || i=${#words[@]}
               i=$((i + 1))
               while [ "$i" -lt "${#words[@]}" ]; do
-                word=$(_clean_command_word "${words[$i]}")
+                _clean_command_word "${words[$i]}" word
                 case "$word" in
                   --) break ;;
                   --force)
@@ -1054,11 +1062,11 @@ case "$-" in
             # `git push --force` / `-f` rewrites remote history without a lease.
             if [ "$_GUARD_GIT_PUSH_FORCE" -eq 0 ] && _git_subcommand_is "$frag" "push"; then
               words=()
-              while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$frag")
-              i=$(_git_subcommand_index "$frag" "push") || i=${#words[@]}
+              _fragment_token_words "$frag" words
+              _git_subcommand_index "$frag" "push" i || i=${#words[@]}
               i=$((i + 1))
               while [ "$i" -lt "${#words[@]}" ]; do
-                word=$(_clean_command_word "${words[$i]}")
+                _clean_command_word "${words[$i]}" word
                 case "$word" in
                   --) break ;;
                   --force)
@@ -1134,12 +1142,12 @@ case "$-" in
           kill | */kill)
             if [ "$_GUARD_KILL" != "block" ]; then
               words=()
-              while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$frag")
-              i=$(_fragment_command_index "$frag") || continue
+              _fragment_token_words "$frag" words
+              _fragment_command_index "$frag" i || continue
               i=$((i + 1))
-              local has_sigkill=0 first_token=1
+              local has_sigkill=0 first_token=1 operand
               while [ "$i" -lt "${#words[@]}" ]; do
-                word=$(_clean_command_word "${words[$i]}")
+                _clean_command_word "${words[$i]}" word
                 case "$word" in
                   --)
                     # End of options: the rest are PID/target operands. Keep scanning
@@ -1148,7 +1156,8 @@ case "$-" in
                     # `kill -- 0` (the caller's whole process group) must all block.
                     ((i++))
                     while [ "$i" -lt "${#words[@]}" ]; do
-                      case "$(_clean_command_word "${words[$i]}")" in
+                      _clean_command_word "${words[$i]}" operand
+                      case "$operand" in
                         0 | 1 | -1) _GUARD_KILL="block" ;;
                       esac
                       ((i++))
@@ -1162,7 +1171,7 @@ case "$-" in
                     # as a catastrophic target operand (`kill -n 0 1234`).
                     ((i++))
                     [ "$i" -lt "${#words[@]}" ] || break
-                    word=$(_clean_command_word "${words[$i]}")
+                    _clean_command_word "${words[$i]}" word
                     case "$word" in KILL | SIGKILL | 9) has_sigkill=1 ;; esac
                     ;;
                   --signal=KILL | --signal=SIGKILL | --signal=9) has_sigkill=1 ;;
@@ -1201,12 +1210,12 @@ case "$-" in
           chmod | */chmod)
             if [ "$_GUARD_CHMOD" != "block" ]; then
               words=()
-              while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$frag")
-              i=$(_fragment_command_index "$frag") || continue
+              _fragment_token_words "$frag" words
+              _fragment_command_index "$frag" i || continue
               i=$((i + 1))
               local found_mode=0
               while [ "$i" -lt "${#words[@]}" ]; do
-                word=$(_clean_command_word "${words[$i]}")
+                _clean_command_word "${words[$i]}" word
                 case "$word" in
                   --) break ;;
                   -*) ;;
@@ -1252,8 +1261,8 @@ case "$-" in
             read -r -a words <<<"$frag"
             _pre_bash_sleep_is_long "${words[@]:1}" || continue
             words=()
-            while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$frag")
-            i=$(_fragment_command_index "$frag") || continue
+            _fragment_token_words "$frag" words
+            _fragment_command_index "$frag" i || continue
             _pre_bash_sleep_is_long "${words[@]:$((i + 1))}" &&
               ! _pre_bash_fragment_backgrounded "$frag" &&
               _GUARD_LONG_SLEEP=1

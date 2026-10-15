@@ -117,10 +117,10 @@ fi
 _pr_checks_git_push_updates() {
   local fragment="$1" word index
   local -a words=()
-  while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$fragment")
-  index=$(_git_subcommand_index "$fragment" push) || return 1
+  _fragment_token_words "$fragment" words
+  _git_subcommand_index "$fragment" push index || return 1
   for ((index++; index < ${#words[@]}; index++)); do
-    word=$(_clean_command_word "${words[$index]}")
+    _clean_command_word "${words[$index]}" word
     case "$word" in
       --) break ;;
       --dry-run | --delete | :?*) return 1 ;;
@@ -137,10 +137,10 @@ _pr_checks_git_push_updates() {
 _pr_checks_gh_pr_starts_checks() {
   local fragment="$1" word index
   local -a words=()
-  while IFS= read -r word; do words+=("$word"); done < <(_fragment_tokens "$fragment")
-  index=$(_command_subcommand_index "$fragment" gh pr) || return 1
+  _fragment_token_words "$fragment" words
+  _command_subcommand_index "$fragment" gh pr index || return 1
   for ((index++; index < ${#words[@]}; index++)); do
-    word=$(_clean_command_word "${words[$index]}")
+    _clean_command_word "${words[$index]}" word
     case "$word" in
       -R | --repo) ((index++)) ;;
       -*) ;;
