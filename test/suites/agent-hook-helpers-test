@@ -2822,6 +2822,61 @@ _assert_eq "hook_finish: exits 0 when not blocked" "0" "$?"
 # ---------------------------------------------------------------------------
 
 echo ""
+echo "=== hook-helpers: per-hook answers without forking ==="
+
+# Hooks asked for their agent name, response event name, and telemetry root
+# through `$(...)`, several times per hook. The output-variable forms must
+# store exactly what the printed forms print, and a cached agent-name ask must
+# not fork. $1 is the snippet; $2 sets AGENTGUARD_NAME (claude by default).
+_fixed_case() {
+  AGENTGUARD_PROCESS_DETECT=0 AGENTGUARD_NAME="${2-claude}" bash -c '
+    source "$1"
+    eval "$2"
+  ' _ "$HELPERS" "$1"
+}
+
+_assert_eq "agent name: stored equals printed" "claude=claude" \
+  "$(_fixed_case '_hook_agent_name a; printf "%s=%s" "$a" "$(_hook_agent_name)"')"
+_assert_eq "agent name: unknown maps to agent" "agent=agent" \
+  "$(_fixed_case '
+    unset AGENTGUARD_NAME AGENT AGENTGUARD_SESSION_ID CODEX_THREAD_ID \
+      CODEX_INTERNAL_ORIGINATOR_OVERRIDE GROK_SESSION_ID GEMINI_PROJECT_DIR \
+      CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID
+    _hook_agent_name a; printf "%s=%s" "$a" "$(_hook_agent_name)"' '')"
+_assert_eq "agent name: values that would join to the same key stay distinct" "a| a" \
+  "$(_fixed_case '
+    AGENTGUARD_NAME="a|"; CODEX_THREAD_ID=""; _hook_agent_name x
+    AGENTGUARD_NAME="a"; CODEX_THREAD_ID="|"; _hook_agent_name y; printf "%s %s" "$x" "$y"')"
+_assert_eq "agent name: the cache follows the environment" "claude codex claude" \
+  "$(_fixed_case '
+    _hook_agent_name a; AGENTGUARD_NAME=codex; _hook_agent_name b
+    AGENTGUARD_NAME=claude; _hook_agent_name c; printf "%s %s %s" "$a" "$b" "$c"')"
+_assert_eq "agent name: a cached ask runs no subshell" "1" \
+  "$(_fixed_case '
+    _hook_agent_name warm
+    trace=$(mktemp); exec 9>"$trace"; BASH_XTRACEFD=9; PS4="+\$BASHPID "; set -x
+    _hook_agent_name a
+    set +x; exec 9>&-
+    sed -n "s/^+* *\([0-9][0-9]*\) .*/\1/p" "$trace" | sort -u | wc -l | tr -d " "
+    rm -f "$trace"')"
+
+for _self in agent-hook-pre-bash agent-hook-post-bash agent-hook-stop agent-hook-session-start \
+  agent-hook-compact agent-hook-notification agent-hook-other; do
+  _assert_eq "event name: stored equals printed for $_self" "SAME" \
+    "$(_fixed_case "_HOOK_SELF=/x/$_self; _hook_event_name e; [ \"\$e\" = \"\$(_hook_event_name)\" ] && echo SAME")"
+done
+_assert_eq "event name: a failed post call names PostToolUseFailure" "PostToolUseFailure" \
+  "$(_fixed_case '_HOOK_SELF=/x/agent-hook-post-bash; _HOOK_INPUT_EVENT=PostToolUseFailure; _hook_event_name e; printf "%s" "$e"')"
+
+for _root_env in AGENTGUARD_TELEMETRY_DIR=/t/dir/ AGENTGUARD_TELEMETRY_DIR=rel XDG_STATE_HOME=/s/ HOME=/h HOME=rel; do
+  _assert_eq "telemetry root: stored equals printed for $_root_env" "SAME" \
+    "$(_fixed_case "
+      unset AGENTGUARD_TELEMETRY_DIR XDG_STATE_HOME
+      export $_root_env
+      printed=\$(_agentguard_telemetry_root); printed_rc=\$?
+      stored=sentinel; _agentguard_telemetry_root stored; stored_rc=\$?
+      [ \"\$printed:\$printed_rc\" = \"\$stored:\$stored_rc\" ] && echo SAME")"
+done
 echo "=== hook-helpers: _hook_parse_command ==="
 
 # Set _HOOK_INPUT directly to avoid running _hook_parse_command in a pipe
