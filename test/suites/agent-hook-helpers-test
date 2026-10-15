@@ -2245,6 +2245,52 @@ _assert_eq "agent_name: incomplete snapshot uses process fallback" "0" "$?"
 ) | _stdin_contains PASS
 _assert_eq "agent_name: partial snapshot ancestry uses process fallback" "0" "$?"
 
+# TEMPORARY DEBUG (ci-fix-20261015): dump internals of the partial-chain path.
+# Revert before merging.
+{
+  unset AGENTGUARD_NAME CODEX_INTERNAL_ORIGINATOR_OVERRIDE CODEX_THREAD_ID \
+    CLAUDE_CODE_CURRENT_SESSION_ID CLAUDE_CODE_SESSION_ID GEMINI_PROJECT_DIR \
+    AGENTGUARD_SESSION_ID 2>/dev/null
+  AGENTGUARD_PROCESS_DETECT=1
+  MOCK_SNAPSHOT_MODE=partial-chain
+  export AGENTGUARD_PROCESS_DETECT MOCK_SNAPSHOT_MODE
+  bash -c '
+    export MOCK_CHILD_PID="$$"
+    PATH="$1:$PATH"
+    source "$2"
+    echo "DEBUG pid=$$ MOCK_CHILD_PID=$MOCK_CHILD_PID bash=$BASH_VERSION" >&2
+    awk -W version 2>&1 | head -1 >&2
+    snap=$(ps -axo pid=,ppid=,comm= 2>/dev/null)
+    echo "DEBUG snapshot:" >&2
+    printf "%s\n" "$snap" | od -c >&2
+    printf "%s\n" "$snap" | awk -v start="$$" -v target="codex" '\''
+    {
+      pid = $1
+      parent[pid] = $2
+      $1 = $2 = ""
+      sub(/^[[:space:]]+/, "")
+      command[pid] = $0
+    }
+    END {
+      if (!(start in command)) exit 2
+      pid = start
+      while (pid != "" && pid != "0" && !seen[pid]++) {
+        name = command[pid]
+        sub(/^.*\//, "", name)
+        if (name == target) { print pid; found = 1; break }
+        if (!(pid in parent)) { incomplete = 1; break }
+        next_pid = parent[pid]
+        if (next_pid == pid) break
+        if (next_pid != "" && next_pid != "0" && !(next_pid in command)) { incomplete = 1; break }
+        pid = next_pid
+      }
+      exit(found ? 0 : (incomplete ? 2 : 1))
+    }'\'' >/dev/null 2>&1
+    echo "DEBUG manual-awk exit for codex: $?" >&2
+    echo "DEBUG _hook_agent_name => $(_hook_agent_name)" >&2
+  ' _ "$MOCK_PS_INCOMPLETE_DIR" "$HELPERS"
+} 2>&1 | sed 's/^/DEBUG-OUT: /'
+
 # Regression: the process-tree fallback must match the executable NAME only,
 # never the argument text. Here an ancestor (comm=bash) merely mentions "codex"
 # in its arguments — exactly the shape of `hm remember`/`git commit` carrying a

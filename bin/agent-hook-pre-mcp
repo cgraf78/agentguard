@@ -45,7 +45,10 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
 }
 # END GENERATED LAUNCHER BOOTSTRAP
 
+# TEMPORARY DEBUG (ci-fix-20261015) - revert before merging
+echo "DEBUG-TERMUX: bootstrap done" >&2
 _hook_parse_mcp
+echo "DEBUG-TERMUX: parse_mcp done server=[${_HOOK_MCP_SERVER-}] tool=[${_HOOK_MCP_TOOL_NAME-}]" >&2
 
 # --- Consecutive failure circuit breaker ---
 if [ -f "$_HOOK_MCP_FAIL_FILE" ]; then
@@ -76,4 +79,6 @@ if [ "$_HOOK_MCP_TOOL_NAME" = "knowledge_load" ]; then
 fi
 
 _hook_source_extensions
+echo "DEBUG-TERMUX: source_extensions done" >&2
 _hook_finish
+echo "DEBUG-TERMUX: finish done (should not print)" >&2
