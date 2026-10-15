@@ -1334,8 +1334,8 @@ _assert_eq "hm hook: tool-complete with Hive Memory off does not call hm" "" "$(
 
 # Shell results per runtime shape. Muse sends a JSON envelope string whose
 # exit_code is the result; without one, only a failed or timed-out
-# terminal_status is a failure (a background run is still running, and a
-# cancelled command fails open). Codex sends plain output text, so
+# terminal_status is a failure (a background run, which has only an
+# execution_state, is still running, and a cancelled command fails open). Codex sends plain output text, so
 # envelope-shaped Codex output is not a status. Fixtures are synthetic.
 _hm_status_envelope() {
   jq -nc --argjson fields "$1" '{tool_input:{command:"run"},
@@ -1362,7 +1362,7 @@ done <<EOF
 muse|0|muse completed envelope|$(_hm_status_envelope '{"exit_code":0,"terminal_status":"completed"}')
 muse|2|muse failed envelope exit code|$(_hm_status_envelope '{"exit_code":2,"terminal_status":"failed"}')
 muse|0|muse cancelled envelope without exit_code|$(_hm_status_envelope '{"terminal_status":"cancelled"}')
-muse|0|muse background run without exit_code|$(_hm_status_envelope '{"terminal_status":"background_running"}')
+muse|0|muse background run (execution_state only)|$(_hm_status_envelope '{"chunk_id":"c1","description":"push","execution_state":"background_running","session_id":7,"work_id":"w1","model_guidance":"Poll with the session id."}')
 muse|0|muse unknown terminal status without exit_code|$(_hm_status_envelope '{"terminal_status":"something_new"}')
 muse|1|muse timed-out envelope without exit_code|$(_hm_status_envelope '{"terminal_status":"timed_out"}')
 muse|1|muse failed envelope with null exit_code|$(_hm_status_envelope '{"exit_code":null,"terminal_status":"failed"}')

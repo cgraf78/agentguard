@@ -327,24 +327,31 @@ _pr_checks_record() {
 # pull requests of the checkout it runs in, so labels from two repositories
 # need two commands (each run from a checkout of its repository).
 _pr_checks_watch_commands() {
-  local label scope groups='' group commands=''
-  local -a labels=()
+  local label scope index map=' ' commands='' i
+  local -a labels=() group_labels=()
   read -r -a labels <<<"$_pr_checks_labels"
+  # One pass: each label's scope is computed once, and " <scope>=<index> "
+  # entries in map find its group by a builtin match.
   for label in ${labels[@]+"${labels[@]}"}; do
     scope=-
     _hook_gh_pr_key_scope "$label" >/dev/null && scope="$_HOOK_GH_PR_SCOPE"
-    case " $groups " in *" $scope "*) ;; *) groups="$groups $scope" ;; esac
+    case "$map" in
+      *" $scope="*)
+        index="${map#* "$scope"=}"
+        index="${index%% *}"
+        group_labels[index]="${group_labels[index]} $label"
+        ;;
+      *)
+        index="${#group_labels[@]}"
+        group_labels[index]=" $label"
+        map="$map$scope=$index "
+        ;;
+    esac
   done
-  for group in $groups; do
-    commands="$commands${commands:+ and }\`git pr-watch --wait"
-    for label in ${labels[@]+"${labels[@]}"}; do
-      scope=-
-      _hook_gh_pr_key_scope "$label" >/dev/null && scope="$_HOOK_GH_PR_SCOPE"
-      [ "$scope" != "$group" ] || commands="$commands $label"
-    done
-    commands="$commands\`"
+  for ((i = 0; i < ${#group_labels[@]}; i++)); do
+    commands="$commands${commands:+ and }\`git pr-watch --wait${group_labels[i]}\`"
   done
-  [ "${groups# }" = "${groups##* }" ] || commands="$commands, each from a checkout of its repository"
+  [ "${#group_labels[@]}" -le 1 ] || commands="$commands, each from a checkout of its repository"
   _pr_checks_commands="$commands"
 }
 
@@ -377,7 +384,7 @@ _pr_checks_rearm_gh() {
         name="${repo##*/}"
         owner="${repo%/*}"
         owner="${owner##*/}"
-        if ! _hook_gh_name_ok "$owner" || ! _hook_gh_name_ok "$name"; then
+        if ! _hook_gh_owner_repo_ok "$owner" "$name"; then
           continue
         fi
         _hook_gh_lower key "${owner}_${name}_$arg"
@@ -430,8 +437,18 @@ _pr_checks_lead="(^|[${_pr_checks_separators}]|\\\$\\()[[:blank:]]*((${_pr_check
 _pr_checks_git_push="${_pr_checks_lead}git([[:blank:]]+[^[:space:]]+)*[[:blank:]]+push([[:space:]]|$)"
 _pr_checks_git_pr="${_pr_checks_lead}(git([[:blank:]]+[^[:space:]]+)*[[:blank:]]+|([^[:space:]]*/)?git-)pr-(open|submit|restack|sync-stack)([[:space:]]|$)"
 _pr_checks_gh_pr="${_pr_checks_lead}gh([[:blank:]]+[^[:space:]]+)*[[:blank:]]+pr[[:space:]]"
-if [[ "$AGENTGUARD_CMD_TRIMMED" =~ $_pr_checks_git_push || "$AGENTGUARD_CMD_TRIMMED" =~ $_pr_checks_git_pr ||
-  "$AGENTGUARD_CMD_TRIMMED" =~ $_pr_checks_gh_pr ]] &&
+# Whether the command runs a `git pr-*` stack command in command position. A
+# builtin substring match first: the position regex costs milliseconds on a
+# long command, and almost no command names these.
+_pr_checks_mentions_git_pr() {
+  case "$AGENTGUARD_CMD_TRIMMED" in
+    *pr-open* | *pr-submit* | *pr-restack* | *pr-sync-stack*) ;;
+    *) return 1 ;;
+  esac
+  [[ "$AGENTGUARD_CMD_TRIMMED" =~ $_pr_checks_git_pr ]]
+}
+if { [[ "$AGENTGUARD_CMD_TRIMMED" =~ $_pr_checks_git_push ]] || _pr_checks_mentions_git_pr ||
+  [[ "$AGENTGUARD_CMD_TRIMMED" =~ $_pr_checks_gh_pr ]]; } &&
   _pr_checks_command_pushed; then
   _pr_checks_key="command:$AGENTGUARD_CMD_TRIMMED"
 # Output evidence covers pushes run indirectly. Commands that are themselves

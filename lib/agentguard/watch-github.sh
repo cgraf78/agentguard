@@ -22,12 +22,17 @@ _HOOK_GH_PR_TOOL_DIR='git-tools/pr-watch'
 _HOOK_GH_PR_WATCH_ARGV='git-pr-watch'
 _HOOK_GH_PR_STATE_VAR='GIT_PR_WATCH_STATE'
 
-# Lowercase ASCII $2 into the variable named by $1 without a fork (Bash 3.2
-# has no case-conversion expansion). Repository names are short.
+# Lowercase ASCII $2 into the variable named by $1 without a fork. Bash 4
+# lowercases in one expansion; Bash 3.2 has none, so it walks the (length-
+# capped, see _hook_gh_owner_repo_ok) name a character at a time.
 _hook_gh_lower() {
   # Prefixed locals: $1 names a variable in the caller's scope.
   local _lc_in="$2" _lc_out='' _lc_c _lc_i _lc_upper='ABCDEFGHIJKLMNOPQRSTUVWXYZ'
   local _lc_lower='abcdefghijklmnopqrstuvwxyz' _lc_prefix
+  if [ "${BASH_VERSINFO[0]:-0}" -ge 4 ]; then
+    printf -v "$1" '%s' "${_lc_in,,}"
+    return 0
+  fi
   for ((_lc_i = 0; _lc_i < ${#_lc_in}; _lc_i++)); do
     _lc_c="${_lc_in:_lc_i:1}"
     case "$_lc_c" in
@@ -47,6 +52,14 @@ _hook_gh_name_ok() {
     '' | . | .. | *[!A-Za-z0-9._-]*) return 1 ;;
   esac
   return 0
+}
+
+# Whether $1 and $2 are a valid owner and repository name, within GitHub's
+# own length limits (39 and 100). The cap also bounds the work every later
+# string operation does on a hostile name.
+_hook_gh_owner_repo_ok() {
+  [ "${#1}" -le 39 ] && [ "${#2}" -le 100 ] &&
+    _hook_gh_name_ok "$1" && _hook_gh_name_ok "$2"
 }
 
 # _hook_gh_pr_key_scope <url>
@@ -84,7 +97,7 @@ _hook_gh_pr_key_scope() {
   case "$number" in
     '' | 0* | *[!0-9]*) return 1 ;;
   esac
-  if ! _hook_gh_name_ok "$owner" || ! _hook_gh_name_ok "$repo"; then
+  if ! _hook_gh_owner_repo_ok "$owner" "$repo"; then
     return 1
   fi
   _hook_gh_lower scope "${owner}_$repo"
@@ -112,7 +125,7 @@ _hook_gh_push_url_scope() {
   [ "$repo" != "$url" ] || return 1
   rest="${url%[:/]*}"
   owner="${rest##*[:/]}"
-  if ! _hook_gh_name_ok "$owner" || ! _hook_gh_name_ok "$repo"; then
+  if ! _hook_gh_owner_repo_ok "$owner" "$repo"; then
     return 1
   fi
   _hook_gh_lower _HOOK_GH_PUSH_REPO "$repo"
@@ -162,6 +175,20 @@ _hook_gh_push_command_inert() {
   return 1
 }
 
+# Add the scope of push block URL $1 to the caller's `pushed` list when the
+# block counted, once per URL and once per scope: a builtin membership test
+# keeps output with thousands of blocks linear. Uses the caller's counted,
+# urls, and pushed (dynamic scope; _hook_gh_push_scopes only).
+_hook_gh_push_count_block() {
+  local _cb_scope
+  [ "$counted" = 1 ] || return 0
+  case "$urls" in *" $1 "*) return 0 ;; esac
+  urls="$urls$1 "
+  _hook_gh_push_url_scope _cb_scope "$1" || return 0
+  case "$pushed" in *" $_cb_scope/"*) return 0 ;; esac
+  pushed="$pushed $_cb_scope/$_HOOK_GH_PUSH_REPO "
+}
+
 # _hook_gh_push_scopes <output> <command>
 #
 # Print the recorded scopes a successful push re-arms, one per line, `ALL`,
@@ -185,16 +212,14 @@ _hook_gh_push_command_inert() {
 # The caller checks the push succeeded; a failed push never re-arms.
 _hook_gh_push_scopes() {
   local output="$1" command="${2:-}" line url='' counted=0 blocks=0 uptodate=0
-  local pushed='' recorded='' pair scope repo rscope
+  local pushed='' urls=' ' recorded='' pair scope repo rscope
   _hook_gh_push_command_inert "$command" && return 0
   # Counted blocks collect as " <scope>/<repo> " pairs (neither holds `/`).
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line//$'\r'/}"
     case "$line" in
       'To '*)
-        if [ "$counted" = 1 ] && _hook_gh_push_url_scope scope "$url"; then
-          pushed="$pushed $scope/$_HOOK_GH_PUSH_REPO "
-        fi
+        _hook_gh_push_count_block "$url"
         url="${line#To }"
         url="${url%%[[:space:]]*}"
         counted=0
@@ -208,9 +233,7 @@ _hook_gh_push_scopes() {
         ;;
     esac
   done <<<"$output"
-  if [ "$counted" = 1 ] && _hook_gh_push_url_scope scope "$url"; then
-    pushed="$pushed $scope/$_HOOK_GH_PUSH_REPO "
-  fi
+  _hook_gh_push_count_block "$url"
   if [ "$blocks" = 0 ]; then
     [ "$uptodate" = 0 ] || return 0
     case "$output" in

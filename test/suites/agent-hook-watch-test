@@ -239,6 +239,9 @@ echo ""
 echo "=== post-bash: per-runtime payloads ==="
 
 _ok='{"exit_code":0,"terminal_status":"completed"}'
+# The real shape of a Muse command still running in the background: no
+# exit_code or terminal_status, an execution_state, and empty output.
+_muse_bg='{"chunk_id":"c1","description":"push","execution_state":"background_running","session_id":7,"work_id":"w1","model_guidance":"Poll with the session id."}'
 _new_sid
 _run "$POST_BASH" codex "$(_string_payload "gh pr create --fill" "$URL"$'\n')"
 _assert_file_exists "codex string: records" "$(_session_tool)/keys/owner_repo_12"
@@ -255,6 +258,11 @@ _assert_eq "codex Muse-envelope-looking string: not unwrapped" "" "$(ls "$(_sess
 _new_sid
 _run "$POST_BASH" muse "$(_string_payload "gh pr create --fill" "$(_muse_envelope "$URL"$'\n' "$_ok")")"
 _assert_file_exists "muse envelope: records" "$(_session_tool)/keys/owner_repo_12"
+
+_new_sid
+_run "$POST_BASH" muse "$(_string_payload "gh pr create --fill" "$(_muse_envelope "" "$_muse_bg")")"
+_assert_eq "muse background launch: records nothing" "" "$(ls "$(_session_tool)/keys" 2>/dev/null)"
+_assert_not_contains "muse background launch: envelope unwrapped, not scanned raw" "execution_state" "$HOOK_STDOUT"
 
 _new_sid
 _run "$POST_BASH" muse "$(_string_payload "gh pr create --fill" "$(_muse_envelope "$URL" '{"exit_code":1,"terminal_status":"failed"}')")"
@@ -367,7 +375,7 @@ _assert_eq "push run in the background" "" "$(
 _assert_eq "muse push still running in the background" "" "$(
   _new_sid
   _seed_key o_r_12 1000 o_r
-  _run "$POST_BASH" muse "$(_string_payload "git push" "$(_muse_envelope "" '{"terminal_status":"background_running"}')")"
+  _run "$POST_BASH" muse "$(_string_payload "git push" "$(_muse_envelope "" "$_muse_bg")")"
   [ "$(_key_epoch o_r_12)" = 1000 ] || printf 'o_r_12 '
 )"
 _assert_eq "muse push that completed" "o_r_12 " "$(
@@ -824,6 +832,14 @@ for _case in \
   IFS='^' read -r _agent _cmd _bg _want <<<"$_case"
   _assert_eq "$_agent '$_cmd' bg=$_bg" "$_want" "$(_launch "$_agent" "$_cmd" "$_bg")"
 done
+_launch claude "git pr-watch --wait 12 &" true >/dev/null
+_assert_contains "detached advice on Claude names run_in_background" "run_in_background" "$HOOK_STDERR"
+for _agent in codex muse; do
+  _launch "$_agent" "setsid -f git pr-watch --wait 12" >/dev/null
+  _assert_contains "detached advice on $_agent names the shell tool's background option" \
+    "shell tool's background or yield option" "$HOOK_STDERR"
+  _assert_not_contains "detached advice on $_agent does not name run_in_background" "run_in_background" "$HOOK_STDERR"
+done
 WATCH_ENV=(AGENTGUARD_WATCH_BLOCK=1)
 _assert_eq "AGENTGUARD_WATCH_BLOCK=1: detached blocks" "2 detached" "$(_launch codex "git pr-watch --wait 12 &")"
 _assert_eq "AGENTGUARD_WATCH_BLOCK=1: foreground blocks on Claude" "2 foreground" "$(_launch claude "git pr-watch --wait 12")"
@@ -957,6 +973,34 @@ for _shell in "${_shells[@]}"; do
     "$(_engine "$_shell" "_hook_gh_push_scopes '' 'git push --dry-run'")"
   _assert_eq "$_shell watch-github: --no-push command" "" \
     "$(_engine "$_shell" "_hook_gh_push_scopes '' 'git pr-sync-stack --no-push'")"
+  _assert_eq "$_shell watch-github: owner over 39 characters refused" 1 \
+    "$(_engine "$_shell" "_hook_gh_pr_key_scope https://github.com/$(printf 'o%.0s' {1..40})/r/pull/1 >/dev/null; echo \$?")"
+  _assert_eq "$_shell watch-github: repository over 100 characters refused" 1 \
+    "$(_engine "$_shell" "_hook_gh_pr_key_scope https://github.com/o/$(printf 'r%.0s' {1..101})/pull/1 >/dev/null; echo \$?")"
+  _assert_eq "$_shell watch-github: names at the limits accepted" 0 \
+    "$(_engine "$_shell" "_hook_gh_pr_key_scope https://github.com/$(printf 'O%.0s' {1..39})/$(printf 'R%.0s' {1..100})/pull/1 >/dev/null; echo \$?")"
+done
+
+# Liveness without /proc (forced through the engine's /proc path): `ps`
+# decides, and with no `ps` either a watcher file counts as watched.
+for _shell in "${_shells[@]}"; do
+  _new_sid
+  rm -rf "$HOME/.local/state/example"
+  (umask 077 && mkdir -p "$HOME/.local/state/example/tracker/watchers")
+  _engine "$_shell" "_hook_watch_record example/tracker EXAMPLE-3 - example-watch l h" >/dev/null
+  printf '%s\n' "$DEAD_PID" >"$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$DEAD_PID"
+  _assert_eq "$_shell: no /proc, ps says the watcher is dead" 1 \
+    "$(_engine "$_shell" '_HOOK_WATCH_PROC=/nonexistent; _hook_watch_collect; echo ${#_HOOK_WATCH_UNMET[@]}')"
+  _start_watcher example-watch
+  printf '%s\n' "$WATCHER_PID" >"$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$WATCHER_PID"
+  rm -f "$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$DEAD_PID"
+  _assert_eq "$_shell: no /proc, ps finds the live watcher" 0 \
+    "$(_engine "$_shell" '_HOOK_WATCH_PROC=/nonexistent; _hook_watch_collect; echo ${#_HOOK_WATCH_UNMET[@]}')"
+  _stop_watcher
+  printf '%s\n' "$DEAD_PID" >"$HOME/.local/state/example/tracker/watchers/EXAMPLE-3.$DEAD_PID"
+  _assert_eq "$_shell: no /proc and no ps: a watcher file counts (fail open)" 0 \
+    "$(_engine "$_shell" '_HOOK_WATCH_PROC=/nonexistent; PATH=/nonexistent; _hook_watch_collect; echo ${#_HOOK_WATCH_UNMET[@]}')"
+  rm -rf "$HOME/.local/state/example"
 done
 
 echo ""

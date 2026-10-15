@@ -191,8 +191,8 @@ Read from the hook environment, which an agent's tool shell cannot change:
 All of this happens only after a builtin prefilter matched a command in
 command position, and only for a successful command (status 0) that the host
 did not run in the background (a Claude Code `run_in_background` call, or a
-shell Muse reports as `background_running`, reports before the command has
-done anything):
+shell Muse reports with `execution_state: "background_running"`, reports
+before the command has done anything):
 
 - **Record**: `gh pr create` or its alias `gh pr new` (not `--dry-run`),
   `git pr-open`, or `git pr-submit` (also the dashed `git-pr-*` forms; not
@@ -270,7 +270,14 @@ watcher basename.
   that way reports to post-bash before it has run, so it neither records nor
   re-arms.
 - A command that fails after pushing or printing a pull-request URL (a
-  PostToolUseFailure event) neither records nor re-arms.
+  PostToolUseFailure event) neither records nor re-arms. Muse reports every
+  failed command that way (its `error` string carries the result), so
+  post-bash never sees a failed Muse command at all.
+- A Codex command that outlives the shell tool's `yield_time_ms` keeps
+  running as a polled session and gets no PostToolUse, so a long push or
+  pull-request creation there neither records nor re-arms.
+- On a host without `/proc` and without `ps`, liveness cannot be probed:
+  any watcher file then counts as a live watcher (fail open).
 - Indirect pushes (a script, or a `git push` mixing deletions and updates in
   one refspec list) do not re-arm; the general reminder still fires on their
   printed summary.

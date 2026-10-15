@@ -710,8 +710,9 @@ _hook_mark_once() {
 
   # If state cannot be written, fail open and show the reminder or warning.
   # Missing a de-duplication marker is less harmful than silently dropping
-  # behavioral steer.
-  _hook_mkstate "$dir" || return 0
+  # behavioral steer. The directory test spares the subshell and mkdir once
+  # the directory exists (a Stop marks one per unwatched key).
+  [ -d "$dir" ] || _hook_mkstate "$dir" || return 0
   : >"$marker" 2>/dev/null || true
   return 0
 }
@@ -1425,7 +1426,9 @@ _hook_parse_command() {
 # Codex reports a shell call's result as one plain string in tool_response
 # (stdout and stderr combined). Muse also sends a string, but one holding a
 # JSON envelope whose `output` is the combined text and whose `exit_code` /
-# `terminal_status` carry the result. A Codex command can print text shaped
+# `terminal_status` carry the result; a command still running in the
+# background has `execution_state: "background_running"` (and an empty
+# `output`) instead of either. A Codex command can print text shaped
 # like that envelope, so unwrapping needs both the detected runtime and the
 # envelope's shape; anything else is taken as the raw string.
 #
@@ -1434,11 +1437,13 @@ _hook_parse_command() {
 # definition it is handed, and every other runtime's post-bash would pay for
 # it on each call.
 _HOOK_MUSE_ENVELOPE_JQ='fromjson? | objects
-  | select(has("output") and (has("exit_code") or has("terminal_status")))'
+  | select(has("output")
+      and (has("exit_code") or has("terminal_status") or has("execution_state")))'
 # A Muse call that ended without an exit code fails only on a known failure
-# state. Anything else gives no status (so 0): a backgrounded shell reports
-# `background_running` and is still running, and a cancelled command may
-# already have done its work, so consumers gated on status fail open for it.
+# state. Anything else gives no status (so 0): a backgrounded shell (only an
+# `execution_state` of `background_running`) is still running, and a
+# cancelled command may already have done its work, so consumers gated on
+# status fail open for it.
 _HOOK_MUSE_STATUS_JQ='if .exit_code != null then .exit_code
   elif .terminal_status == "failed" or .terminal_status == "timed_out" then 1
   else empty end'
@@ -1511,7 +1516,8 @@ _hook_tool_stderr() {
 # shell tool sets is_background (taken from the Gemini CLI tool schema, not
 # verified against a local install; a wrong field name only fails to suppress
 # advice). In a post-tool payload, a Muse result envelope reports a shell it
-# backgrounded as terminal_status `background_running`. Runners without such
+# backgrounded as execution_state `background_running` (terminal_status is
+# accepted too, should a release report it there). Runners without such
 # a signal (Codex, OpenCode) background only through shell syntax, which the
 # command classifier sees. A payload without any of those names cannot carry
 # them, so a builtin match skips the jq fork for the common foreground call;
@@ -1528,7 +1534,8 @@ _hook_tool_runs_in_background() {
   # The envelope is spliced in only for Muse, as the other adapters do.
   _hook_agent_name _background_agent
   [ "$_background_agent" != muse ] ||
-    _background_muse="(.tool_response? | strings | $_HOOK_MUSE_ENVELOPE_JQ | .terminal_status == \"background_running\")"
+    _background_muse="(.tool_response? | strings | $_HOOK_MUSE_ENVELOPE_JQ
+      | .execution_state == \"background_running\" or .terminal_status == \"background_running\")"
   printf '%s' "$_HOOK_INPUT" | jq -e '
     [ ((.tool_input? // .toolInput?) | objects |
         .run_in_background == true or .is_background == true),

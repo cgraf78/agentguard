@@ -530,7 +530,7 @@ case "$-" in
           # (`git pr-watch` already goes there as a git command), and so does
           # one behind a wrapper the classifier keeps as the command word.
           case "$text" in
-            *pr-watch*) return 0 ;;
+            *pr-watch*-w*) return 0 ;;
           esac
           return 1
           ;;
@@ -1405,11 +1405,18 @@ case "$-" in
       _hook_flag_disabled "${AGENTGUARD_WATCH:-}" && return 0
       _hook_load_watch || return 0
       _hook_watch_launch '--wait|-w' git pr-watch || return 0
+      _hook_agent_name agent
       if [ "$_HOOK_WATCH_DETACHED" = 1 ]; then
+        # The remedy is the runtime's own background execution. Muse refuses
+        # a bare `&` and suggests `setsid -f`, which detaches just the same.
         # shellcheck disable=SC2016 # Backticks are literal Markdown for the agent.
-        message='run `git pr-watch --wait` attached, without `&`, nohup, setsid, or disown (on Claude Code, as its own Bash call with run_in_background: true). A detached watcher keeps running with nobody receiving its result, yet the Stop hook counts it as watching.'
+        if [ "$agent" = claude ]; then
+          message='run `git pr-watch --wait` attached, without `&`, nohup, setsid, or disown, as its own Bash call with run_in_background: true.'
+        else
+          message='run `git pr-watch --wait` attached, without `&`, nohup, setsid, or disown: use your shell tool'"'"'s background or yield option (a long command keeps running as a session you can poll) instead.'
+        fi
+        message="$message A detached watcher keeps running with nobody receiving its result, yet the Stop hook counts it as watching."
       else
-        _hook_agent_name agent
         if [ "$agent" = claude ] && ! _hook_tool_runs_in_background; then
           # shellcheck disable=SC2016 # Backticks are literal Markdown for the agent.
           message='run `git pr-watch --wait` with run_in_background: true. A foreground Bash call is killed at its timeout long before the watch ends, so watching would silently stop. Rerun the same command in the background, then act on its result when the completion notification arrives.'
@@ -1422,8 +1429,10 @@ case "$-" in
         _hook_warn "$message"
       fi
     }
+    # Only a command naming the watcher and a `-w`/`--wait` option loads
+    # watch.sh; a plain mention (`cat pr-watch.log`) costs nothing.
     case "$AGENTGUARD_CMD_TRIMMED" in
-      *pr-watch*) _pre_bash_watch_advice ;;
+      *pr-watch*-w*) _pre_bash_watch_advice ;;
     esac
 
     # Every guard above may have stopped early at the deadline; a partial scan

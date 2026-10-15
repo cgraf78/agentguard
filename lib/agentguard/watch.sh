@@ -196,23 +196,31 @@ _hook_watch_roots() {
 # argv[0] or argv[1] (a script may run as `bash /path/<name> ...`). A pid in a
 # watcher file can be reused after a crash, so liveness alone is not enough.
 # Linux reads argv from /proc with builtins; elsewhere `ps` prints the joined
-# command line, matched so a path containing spaces still works. Termux execs
-# programs through Android's dynamic linker, which repeats the program's path
-# after its argv[0] (`bash /data/.../bash /path/<name>`), so a leading word
-# whose basename the next word repeats is skipped (at most twice).
+# command line, matched so a path containing spaces still works. Where a
+# launcher repeats the interpreter, as Termux does
+# (`bash /path/to/bash /path/<name>`), a first word whose basename the next
+# word repeats is skipped (at most twice). Returns 0 when it runs the
+# program, 1 when it does not, and 2 when liveness cannot be probed at all
+# (no /proc and no ps), which callers treat as watched: enforcing nothing
+# beats nagging about a watcher that may be alive.
+_HOOK_WATCH_PROC=/proc
 _hook_watch_pid_runs() {
   local pid="$1" name="$2" word i=0 command
   local -a words=()
   case "$pid" in
     '' | 0* | *[!0-9]*) return 1 ;;
   esac
-  if [ -r /proc/self/cmdline ]; then
-    [ -r "/proc/$pid/cmdline" ] || return 1
+  if [ -r "$_HOOK_WATCH_PROC/self/cmdline" ]; then
+    [ -r "$_HOOK_WATCH_PROC/$pid/cmdline" ] || return 1
     {
       while [ "${#words[@]}" -lt 4 ] && IFS= read -r -d '' word; do
+        # Basename stripping is quadratic in a word's length; no program
+        # path is this long, so a longer word (a reused pid's argument)
+        # simply never matches.
+        [ "${#word}" -le 4096 ] || word=/
         words[${#words[@]}]="$word"
       done
-    } 2>/dev/null <"/proc/$pid/cmdline" || return 1
+    } 2>/dev/null <"$_HOOK_WATCH_PROC/$pid/cmdline" || return 1
     while [ "$i" -lt 2 ] && [ "${#words[@]}" -gt $((i + 1)) ] &&
       [ "${words[i]##*/}" = "${words[i + 1]##*/}" ]; do
       i=$((i + 1))
@@ -223,6 +231,7 @@ _hook_watch_pid_runs() {
     [ -n "$word" ] && [ "${word##*/}" = "$name" ]
     return
   fi
+  command -v ps >/dev/null 2>&1 || return 2
   kill -0 "$pid" 2>/dev/null || return 1
   command=$(ps -o command= -p "$pid" 2>/dev/null) || return 1
   case " $command " in
@@ -248,7 +257,9 @@ _hook_watch_watched() {
       if [ "$rest" = "$key" ] || [ "$rest" = pending ] ||
         { [ "$scope" != - ] && [ "$rest" = "pending.$scope" ]; }; then
         _hook_watch_file_ok "$file" || continue
-        _hook_watch_pid_runs "$pid" "$argv" && return 0
+        _hook_watch_pid_runs "$pid" "$argv"
+        # 2: liveness cannot be probed; count the watcher (fail open).
+        [ "$?" = 1 ] || return 0
       fi
     done
   done
@@ -737,19 +748,21 @@ _hook_watch_unquoted() {
 # A lone `&` anywhere in the rest of its and-or list (up to `;` or the line's
 # end, ignoring `&&`, `>&`, `&>`, `<&`, and `|&`) backgrounds the whole list.
 # Lines without both the name and an `&` are skipped unmasked, and so is a
-# line over 8 KiB: masking costs a copy of the rest of the line per quote or
-# backslash, pre-bash must stay inside its classification deadline, and
-# reading it raw could turn a quoted `&` into a false block. Skipping fails
-# open (nohup, setsid, and disown are still seen). An `&` inside `bash -c '...'`, `$(...)`,
+# line over 8 KiB or one past a 16 KiB budget for the whole command: masking
+# costs a copy of the rest of the line per quote or backslash, pre-bash must
+# stay inside its classification deadline, and reading such a line raw could
+# turn a quoted `&` into a false block. Skipping fails open (nohup, setsid,
+# and disown are still seen). An `&` inside `bash -c '...'`, `$(...)`,
 # `{ ...; } &`, or ANSI-C quoting is not modeled.
 _hook_watch_text_detaches() {
   # No local C locale: restoring an uninstalled caller locale on return
   # makes bash print a setlocale warning on every launch check.
-  local needle="$1" command="${2:-}" line rest before simple seg
+  local needle="$1" command="${2:-}" line rest before simple seg budget=16384
   while IFS= read -r line; do
     case "$line" in *"$needle"*) ;; *) continue ;; esac
     case "$line" in *'&'*) ;; *) continue ;; esac
-    [ "${#line}" -le 8192 ] || continue
+    [ "${#line}" -le 8192 ] && [ "${#line}" -le "$budget" ] || continue
+    budget=$((budget - ${#line}))
     _hook_watch_unquoted "$line" rest
     while :; do
       case "$rest" in *"$needle"*) ;; *) break ;; esac
