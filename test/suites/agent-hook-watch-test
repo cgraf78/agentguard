@@ -273,6 +273,7 @@ _rearmed_by() {
   _seed_key o_r_13 1000 o_r
   _seed_key x_y_12 1000 x_y
   _run "$POST_BASH" claude "$(_payload "$1" "${2:-}")"
+  [ "$HOOK_EXIT" = 0 ] || printf 'hook-exit-%s ' "$HOOK_EXIT"
   for key in o_r_12 o_r_13 x_y_12; do
     [ "$(_key_epoch "$key")" = 1000 ] || printf '%s ' "$key"
   done
@@ -289,6 +290,7 @@ for _case in \
   "gh pr ready|o_r_12 o_r_13 x_y_12 " \
   "gh pr reopen --comment why 12|o_r_12 x_y_12 " \
   "gh pr reopen -c 'a reason' https://github.com/o/r/pull/12|o_r_12 " \
+  "gh pr ready 12 -R x/y|x_y_12 " \
   "gh pr ready 12 --undo|" \
   "gh pr ready 99 -R o/r|" \
   "gh pr view 12|"; do
@@ -323,6 +325,7 @@ _push_rearms() {
   _seed_key o_r_12 1000 o_r
   _seed_key x_y_5 1000 x_y
   _run "$POST_BASH" claude "$(_payload "$cmd" "" "$status" "$err")"
+  [ "$HOOK_EXIT" = 0 ] || printf 'hook-exit-%s ' "$HOOK_EXIT"
   for key in o_r_12 x_y_5; do
     [ "$(_key_epoch "$key")" = 1000 ] || printf '%s ' "$key"
   done
@@ -341,13 +344,17 @@ _assert_eq "multiple URLs" "o_r_12 x_y_5 " "$(_push_rearms "git push" "$_ff"$'\n
 _assert_eq "fork with the same repository name" "o_r_12 " "$(_push_rearms "git push fork" $'To github.com:me/r.git\n * [new branch]      HEAD -> fix/x')"
 _assert_eq "unrelated repository" "" "$(_push_rearms "git push" $'To github.com:me/other.git\n * [new branch]      HEAD -> fix/x')"
 _assert_eq "quiet push re-arms everything" "o_r_12 x_y_5 " "$(_push_rearms "git push -q" "")"
-_assert_eq "scp alias" "o_r_12 " "$(_push_rearms "git push" $'To gh-work:O/R.git\n   1111111..2222222  main -> main')"
+_assert_eq "scp alias" "o_r_12 " "$(_push_rearms "git push" $'To gh-alias:O/R.git\n   1111111..2222222  main -> main')"
 _assert_eq "tag only" "" "$(_push_rearms "git push origin v1" $'To github.com:o/r.git\n * [new tag]         v1 -> v1')"
 _assert_eq "failed push" "" "$(_push_rearms "git push" "$_ff" 1)"
 _assert_eq "git pr-restack" "o_r_12 " "$(_push_rearms "git pr-restack 12" "$_ff")"
 _assert_eq "git pr-sync-stack" "o_r_12 " "$(_push_rearms "git pr-sync-stack" "$_ff")"
 _assert_eq "git pr-restack --no-push" "" "$(_push_rearms "git pr-restack --no-push 12" "$_ff")"
 _assert_eq "git pr-restack -n" "" "$(_push_rearms "git pr-restack -n 12" "$_ff")"
+_assert_eq "git push --help" "" "$(_push_rearms "git push --help" "$_ff")"
+_new_sid
+_run "$POST_BASH" claude "$(_payload "git push --help" "usage: git push [<options>]")"
+_assert_not_contains "git push --help: no reminder" "$GATE" "$(_context)"
 _assert_eq "stack tool with nothing to push" "" "$(_push_rearms "git pr-sync-stack" "Nothing to sync.")"
 _assert_eq "stack tool with redirected output" "o_r_12 x_y_5 " "$(_push_rearms "git pr-sync-stack >/dev/null 2>&1" "")"
 _assert_eq "restack with stderr redirected" "o_r_12 x_y_5 " "$(_push_rearms "git pr-restack 12 2>/dev/null" "")"
@@ -429,10 +436,11 @@ _assert_not_contains "unwatched: once per prompt" "REMINDER" "$HOOK_STDERR"
 _new_prompt
 _stop
 _assert_contains "unwatched: again after a new prompt" "REMINDER" "$HOOK_STDERR"
-_new_prompt
+_stop
+_assert_not_contains "unwatched: once per prompt again" "REMINDER" "$HOOK_STDERR"
 _seed_key o_r_12 1001 o_r https://github.com/o/r/pull/12
 _stop
-_assert_contains "new submit: reminds" "REMINDER" "$HOOK_STDERR"
+_assert_contains "new submit in the same prompt: reminds" "REMINDER" "$HOOK_STDERR"
 
 # Each case: seed o_r_12 (scope o_r, epoch 1000) and x_9 (scope -, epoch
 # 1000), set up producer state, and report which keys the Stop names.
@@ -442,6 +450,14 @@ _unmet_after() {
   _seed_key o_r_12 1000 o_r KEY_A
   _seed_key x_9 1000 - KEY_B
   _stop "${STOP_AGENT:-claude}"
+  # A hook that never ran (or crashed) must not pass as "nothing unmet".
+  case "$HOOK_EXIT" in
+    0 | 2) ;;
+    *)
+      printf 'hook-exit-%s\n' "$HOOK_EXIT"
+      return
+      ;;
+  esac
   case "$HOOK_STDERR" in *KEY_A*) out="${out}a" ;; esac
   case "$HOOK_STDERR" in *KEY_B*) out="${out}b" ;; esac
   printf '%s\n' "${out:-none}"
@@ -470,6 +486,10 @@ rm -f "$PRODUCER/watchers/o_r_12.$WATCHER_PID~123.AbCdEf"
 printf '%s\n' "$WATCHER_PID" >"$PRODUCER/watchers/o_r_123.$WATCHER_PID"
 _assert_eq "another key sharing a prefix covers nothing" "ab" "$(_unmet_after)"
 rm -f "$PRODUCER/watchers/o_r_123.$WATCHER_PID"
+printf '%s\n' "$WATCHER_PID" >"$TEST_TMPDIR/real-watcher"
+ln -s "$TEST_TMPDIR/real-watcher" "$PRODUCER/watchers/o_r_12.$WATCHER_PID"
+_assert_eq "symlinked watcher file is not trusted" "ab" "$(_unmet_after)"
+rm -f "$PRODUCER/watchers/o_r_12.$WATCHER_PID"
 _stop_watcher
 
 printf '%s\n' "$DEAD_PID" >"$PRODUCER/watchers/o_r_12.$DEAD_PID"
@@ -561,6 +581,12 @@ mkdir -p "$TEST_TMPDIR/xdg-state/git-tools/pr-watch/done"
 printf '%s green 1001\n' "$_commit" >"$TEST_TMPDIR/xdg-state/git-tools/pr-watch/done/o_r_12"
 WATCH_ENV=(XDG_STATE_HOME="$TEST_TMPDIR/xdg-state")
 _assert_eq "done under XDG_STATE_HOME counts" "b" "$(_unmet_after)"
+# The newest record wins across roots, whichever root it is in.
+printf '%s green 900\n' "$_commit" >"$TEST_TMPDIR/xdg-state/git-tools/pr-watch/done/o_r_12"
+printf '%s green 1001\n' "$_commit" >"$PRODUCER/done/o_r_12"
+WATCH_ENV=(XDG_STATE_HOME="$TEST_TMPDIR/xdg-state")
+_assert_eq "newest done across two roots counts" "b" "$(_unmet_after)"
+rm -f "$PRODUCER/done/o_r_12"
 WATCH_ENV=(XDG_STATE_HOME=relative/state)
 _assert_eq "relative XDG_STATE_HOME is ignored" "ab" "$(_unmet_after)"
 WATCH_ENV=()
@@ -580,14 +606,15 @@ _producer_reset
 ln -s "$TEST_TMPDIR/elsewhere" "$TEST_TMPDIR/state-link"
 WATCH_ENV=(XDG_STATE_HOME="$TEST_TMPDIR/state-link")
 _assert_eq "symlinked state root: enforces nothing" "none" "$(_unmet_after)"
-WATCH_ENV=(-u HOME)
+WATCH_ENV=(HOME=)
 _assert_eq "no absolute state root: enforces nothing" "none" "$(_unmet_after)"
 WATCH_ENV=()
 rm -rf "$HOME/.local/state"
 _assert_eq "no producer state at all: enforces" "ab" "$(_unmet_after)"
 _producer_reset
 printf '%s green 1001\n' "$_commit" >"$PRODUCER/done/o_r_12"
-ln -sf /dev/null "$PRODUCER/done/x_9"
+printf 'x green 1001\n' >"$TEST_TMPDIR/real-done"
+ln -sf "$TEST_TMPDIR/real-done" "$PRODUCER/done/x_9"
 _assert_eq "symlinked done record is not trusted" "b" "$(_unmet_after)"
 _producer_reset
 
@@ -627,7 +654,9 @@ _new_prompt
 _stop
 _assert_eq "block: a new prompt alone does not re-arm" 0 "$HOOK_EXIT"
 _assert_contains "block: but reminds" "KEY_A" "$HOOK_STDERR"
-sleep 1
+# Age the block marker instead of sleeping: the arming test compares whole
+# seconds.
+touch -t 200001010000 "$(_session_tool)/blocked/o_r_12"
 _seed_key o_r_12 1001 o_r KEY_A
 _new_prompt
 _stop
@@ -648,6 +677,26 @@ for _round in 1 2 3 4; do
   _assert_eq "red-exit loop round $_round: ends the turn" 0 "$HOOK_EXIT"
   _assert_not_contains "red-exit loop round $_round: no reminder" "KEY_A" "$HOOK_STDERR"
 done
+_producer_reset
+# The same rule within one prompt (no new prompt between Stops).
+_new_sid
+_seed_key o_r_12 1000 o_r KEY_A
+printf '1 action failed 1001\n' >"$PRODUCER/exited/o_r_12"
+_stop
+_assert_eq "one prompt: newer exit satisfies, no block" 0 "$HOOK_EXIT"
+_assert_not_contains "one prompt: newer exit satisfies, no reminder" "KEY_A" "$HOOK_STDERR"
+printf '143 pending checks-running -\n' >"$PRODUCER/exited/o_r_12"
+_stop
+_assert_eq "one prompt: an exit with - is unmet and blocks" 2 "$HOOK_EXIT"
+_stop
+_assert_eq "one prompt: but only once per submit" 0 "$HOOK_EXIT"
+_new_sid
+_seed_key o_r_12 1000 o_r KEY_A
+printf '%s green 900\n' "$(printf 'd%.0s' {1..40})" >"$PRODUCER/done/o_r_12"
+printf '0 done green 1100\n' >"$PRODUCER/exited/o_r_12"
+_stop
+_assert_eq "one prompt: stale done plus a newer exit satisfies, no block" 0 "$HOOK_EXIT"
+_assert_not_contains "one prompt: stale done plus a newer exit, no reminder" "KEY_A" "$HOOK_STDERR"
 _producer_reset
 for _agent in codex muse gemini agent; do
   _new_sid
@@ -747,7 +796,12 @@ for _case in \
   "claude^echo pr-watch & git pr-watch --wait 1^true^0 none" \
   "claude^git pr-watch -w 12^false^0 foreground" \
   "codex^git pr-watch -w 12 &^false^0 detached" \
-  "claude^git pr-watch -w -h^false^0 none"; do
+  "claude^git pr-watch -w -h^false^0 none" \
+  "claude^git pr-watch --wait 12 && echo done^true^0 none" \
+  "claude^git pr-watch --wait 12 && echo done^false^0 foreground" \
+  "codex^git pr-watch --wait 12 && echo done^false^0 none" \
+  "claude^{ git pr-watch --wait 12; } & disown^true^0 detached" \
+  "claude^git pr-watch --wait 12; disown^true^0 detached"; do
   IFS='^' read -r _agent _cmd _bg _want <<<"$_case"
   _assert_eq "$_agent '$_cmd' bg=$_bg" "$_want" "$(_launch "$_agent" "$_cmd" "$_bg")"
 done
@@ -795,8 +849,9 @@ _engine() {
       source "$1" >/dev/null 2>&1 </dev/null
       _hook_refresh_state_dir 2>/dev/null
       source "$2"
-      eval "$3"
-    ' _ "$HELPERS" "$WATCH_LIB" "$snippet"
+      source "$3"
+      eval "$4"
+    ' _ "$HELPERS" "$WATCH_LIB" "$WATCH_GH_LIB" "$snippet"
 }
 
 # Exercises the engine with tool dir $2, key $3, scope $4, and watcher name
@@ -861,25 +916,29 @@ for _shell in "${_shells[@]}"; do
   _engine_cases "$_shell" git-tools/pr-watch o_r_12 o_r git-pr-watch
 done
 
-_new_sid
-_assert_eq "watch-github: key and scope from a URL" "owner_repo.js_42 owner_repo.js" \
-  "$(_engine bash "source '$WATCH_GH_LIB'; _hook_gh_pr_key_scope https://github.com/Owner/Repo.JS/pull/42")"
-for _bad in http://user@github.com/o/r/pull/1 https://github.com:8443/o/r/pull/1 \
-  https://github.com/o/r/issues/1 https://github.com/o/r/pull/01 https://github.com/o/pull/1 \
-  'https://github.com/o/r$x/pull/1' ftp://github.com/o/r/pull/1; do
-  _assert_eq "watch-github: rejects $_bad" 1 \
-    "$(_engine bash "source '$WATCH_GH_LIB'; _hook_gh_pr_key_scope '$_bad' >/dev/null; echo \$?")"
+for _shell in "${_shells[@]}"; do
+  _new_sid
+  _assert_eq "$_shell watch-github: key and scope from a URL" "owner_repo.js_42 owner_repo.js" \
+    "$(_engine "$_shell" "_hook_gh_pr_key_scope https://github.com/Owner/Repo.JS/pull/42")"
+  for _bad in http://user@github.com/o/r/pull/1 https://github.com:8443/o/r/pull/1 \
+    https://github.com/o/r/issues/1 https://github.com/o/r/pull/01 https://github.com/o/pull/1 \
+    'https://github.com/o/r$x/pull/1' ftp://github.com/o/r/pull/1; do
+    _assert_eq "$_shell watch-github: rejects $_bad" 1 \
+      "$(_engine "$_shell" "_hook_gh_pr_key_scope '$_bad' >/dev/null; echo \$?")"
+  done
+  _assert_eq "$_shell watch-github: push scopes ALL for no output" "ALL" \
+    "$(_engine "$_shell" "_hook_gh_push_scopes '' 'git push'")"
+  _assert_eq "$_shell watch-github: wrapper with blank output re-arms ALL" "ALL" \
+    "$(_engine "$_shell" "_hook_gh_push_scopes ' ' 'ship-it'")"
+  _assert_eq "$_shell watch-github: wrapper with other output re-arms nothing" "" \
+    "$(_engine "$_shell" "_hook_gh_push_scopes 'Nothing to ship.' 'ship-it'")"
+  _assert_eq "$_shell watch-github: push command with other output re-arms ALL" "ALL" \
+    "$(_engine "$_shell" "_hook_gh_push_scopes 'Pushing...' 'tool push'")"
+  _assert_eq "$_shell watch-github: inert command" "" \
+    "$(_engine "$_shell" "_hook_gh_push_scopes '' 'git push --dry-run'")"
+  _assert_eq "$_shell watch-github: --no-push command" "" \
+    "$(_engine "$_shell" "_hook_gh_push_scopes '' 'git pr-sync-stack --no-push'")"
 done
-_assert_eq "watch-github: push scopes ALL for no output" "ALL" \
-  "$(_engine bash "source '$WATCH_GH_LIB'; _hook_gh_push_scopes '' 'git push'")"
-_assert_eq "watch-github: wrapper with blank output re-arms ALL" "ALL" \
-  "$(_engine bash "source '$WATCH_GH_LIB'; _hook_gh_push_scopes ' ' 'ship-it'")"
-_assert_eq "watch-github: wrapper with other output re-arms nothing" "" \
-  "$(_engine bash "source '$WATCH_GH_LIB'; _hook_gh_push_scopes 'Nothing to ship.' 'ship-it'")"
-_assert_eq "watch-github: push command with other output re-arms ALL" "ALL" \
-  "$(_engine bash "source '$WATCH_GH_LIB'; _hook_gh_push_scopes 'Pushing...' 'tool push'")"
-_assert_eq "watch-github: inert command" "" \
-  "$(_engine bash "source '$WATCH_GH_LIB'; _hook_gh_push_scopes '' 'git push --dry-run'")"
 
 echo ""
 echo "=== engine: no added subprocesses ==="
@@ -928,5 +987,55 @@ if [ -r /proc/self/cmdline ]; then
   _stop_watcher
 fi
 _producer_reset
+
+echo ""
+echo "=== hooks: exact subprocess counts on paths without obligations ==="
+
+# The whole hooks, not copies of their gates: a no-obligation Stop, and a
+# post-bash and a pre-bash call that match nothing, must not fork more than
+# they did before watch obligations. The numbers are those paths' exact
+# counts; when unrelated work on them changes, update the numbers, never to
+# hide a fork added for watch obligations.
+#
+# Stop and post-bash: xtrace with the shell pid in PS4 (inherited through
+# SHELLOPTS) counts the distinct shells that ran traced commands, so every
+# subshell counts once. Bash running as root ignores an inherited PS4, and
+# Bash 3.2 has no BASHPID, so those hosts skip.
+_hook_shells() {
+  local hook="$1" agent="$2" payload="$3"
+  _new_sid
+  printf '%s' "$payload" |
+    env PS4='+$BASHPID ' SHELLOPTS=xtrace AGENTGUARD_NAME="$agent" CODEX_THREAD_ID= \
+      AGENTGUARD_SESSION_ID="$SID" TMPDIR="$TEST_TMPDIR" PATH="$WITH_WATCH_PATH" \
+      "$hook" 2>&1 >/dev/null | sed -n 's/^+* *\([0-9][0-9]*\) .*/\1/p' | sort -u | wc -l | tr -d ' '
+}
+if [ "$(id -u)" != 0 ] && [ "$(bash -c 'echo ${BASH_VERSINFO[0]}')" -ge 4 ]; then
+  _assert_eq "Stop without watch state: exact shell count" 10 "$(_hook_shells "$STOP" claude '{}')"
+  _assert_eq "post-bash, non-matching: exact shell count" 9 \
+    "$(_hook_shells "$POST_BASH" claude "$(_payload ls "a b")")"
+else
+  echo "  SKIP: hook shell counts (root ignores PS4, or no BASHPID)"
+fi
+# pre-bash runs privileged, which ignores SHELLOPTS, so count its process
+# creations with strace where it is installed and allowed. The count includes
+# the launcher's fixed tools, which differ between distributions, so only a
+# developer run (no CI variable) asserts it.
+_hook_forks() {
+  local cmd="$1" log="$TEST_TMPDIR/pre-bash-strace.log"
+  _new_sid
+  jq -nc --arg cmd "$cmd" '{tool_input:{command:$cmd}}' |
+    env AGENTGUARD_NAME=claude CODEX_THREAD_ID= AGENTGUARD_SESSION_ID="$SID" \
+      TMPDIR="$TEST_TMPDIR" PATH="$WITH_WATCH_PATH" \
+      strace -f -qq -e trace=clone,clone3,fork,vfork -o "$log" "$PRE_BASH" >/dev/null 2>&1
+  grep -cv resumed "$log"
+}
+if [ -z "${CI:-}" ] && command -v strace >/dev/null 2>&1 &&
+  strace -f -qq -e trace=clone -o /dev/null true >/dev/null 2>&1; then
+  _assert_eq "pre-bash, non-matching fast path: exact process creations" 55 "$(_hook_forks 'ls -la')"
+  _assert_eq "pre-bash, non-matching classifier path: exact process creations" 63 \
+    "$(_hook_forks 'rg -n foo src | head')"
+else
+  echo "  SKIP: pre-bash process counts (CI, or no usable strace)"
+fi
 
 _test_summary

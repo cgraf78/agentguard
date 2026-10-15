@@ -34,11 +34,11 @@ because the hook's environment may differ from the agent shell's.
 
 ```text
 <root>/<tool dir>/
-  watchers/<key>.<pid>             a watcher is following <key>
-  watchers/pending.<pid>           a watcher still resolving its targets: every key
-  watchers/pending.<scope>.<pid>   the same, for every key recorded with <scope>
-  exited/<key>                     "<status> <state> <reason> <epoch>": a watcher run for <key> ended
-  done/<key>                       "<commit> <word> <epoch>": <key> finished
+  watchers/<key>.<pid>            a watcher is following <key>
+  watchers/pending.<pid>          a watcher still resolving: every key
+  watchers/pending.<scope>.<pid>  the same, for every key with <scope>
+  exited/<key>                    "<status> <state> <reason> <epoch>"
+  done/<key>                      "<commit> <word> <epoch>"
 ```
 
 - A *key* names one watched item and a *scope* groups keys (for pull
@@ -154,9 +154,9 @@ turn ends; a subagent's own Stop enforces nothing.
   blocking for pull requests.
 - **pre-bash**: a `git pr-watch --wait` or `-w` (also `git-pr-watch`, an
   interpreter running its script, or behind setsid, stdbuf, or caffeinate;
-  not with `--help`) launched detached (`&`, nohup, setsid, disown) gets a warning on
-  every runtime; one launched in the foreground on Claude Code without
-  `run_in_background` gets a warning too. Both become blocks under
+  not with `--help`) launched detached (`&`, nohup, setsid, disown) gets a
+  warning on every runtime; one launched in the foreground on Claude Code
+  without `run_in_background` gets a warning too. Both become blocks under
   `AGENTGUARD_WATCH_BLOCK=1`.
 - Everything fails open: unreadable or untrusted state, or an unwritable
   session dir, means less enforcement, never a stuck turn.
@@ -193,10 +193,11 @@ did not run in the background (a Claude Code `run_in_background` call, or a
 shell Muse reports as `background_running`, reports before the command has
 done anything):
 
-- **Record**: `gh pr create` or its alias `gh pr new` (not `--dry-run`), `git pr-open`, or
-  `git pr-submit` (also the dashed `git-pr-*` forms; not `-n`, `--dry-run`, or
-  `--help`), when the command printed a bare `https://<host>/<owner>/<repo>/pull/<n>`
-  line (any host) and `git-pr-watch` is on `PATH`. The label is the URL.
+- **Record**: `gh pr create` or its alias `gh pr new` (not `--dry-run`),
+  `git pr-open`, or `git pr-submit` (also the dashed `git-pr-*` forms; not
+  `-n`, `--dry-run`, or `--help`), when the command printed a bare
+  `https://<host>/<owner>/<repo>/pull/<n>` line (any host) and
+  `git-pr-watch` is on `PATH`. The label is the URL.
 - **`gh pr ready|reopen|update-branch`**: a URL argument, or `-R`/`--repo`
   `owner/repo` (or `host/owner/repo`) plus a number, re-arms that key; a bare
   number (a leading `#` is ignored) re-arms every recorded key ending in
@@ -247,9 +248,14 @@ instead of exiting, run under Bash 3.2, and are `set -u` clean.
 | `_hook_gh_push_scopes <output> <command>` | prints the recorded scopes a successful push re-arms, `ALL`, or nothing. `<command>` decides two things: a dry-run, delete, `--no-push`, or help word means nothing re-arms, and only a command with a `push` word re-arms `ALL` when it printed output but no `To` block (blank output re-arms `ALL` for any command). Its words are split on whitespace without honoring quotes, so `-o 'x -n'` reads as `-n` |
 
 An extension that wraps pull-request creation records with
-`_hook_gh_pr_key_scope` plus
-`_hook_watch_record "$_HOOK_GH_PR_TOOL_DIR" "$_HOOK_GH_PR_KEY" "$_HOOK_GH_PR_SCOPE" "$_HOOK_GH_PR_WATCH_ARGV" <label> <hint>`;
-one that wraps a push re-arms with the output of `_hook_gh_push_scopes`
+`_hook_gh_pr_key_scope` plus:
+
+```bash
+_hook_watch_record "$_HOOK_GH_PR_TOOL_DIR" "$_HOOK_GH_PR_KEY" \
+  "$_HOOK_GH_PR_SCOPE" "$_HOOK_GH_PR_WATCH_ARGV" "$label" "$hint"
+```
+
+One that wraps a push re-arms with the output of `_hook_gh_push_scopes`
 passed to `_hook_watch_rearm "$_HOOK_GH_PR_TOOL_DIR"`. An overlay-defined
 kind uses its own tool dir, keys (`EXAMPLE-12`, say), scope or `-`, and
 watcher basename.
@@ -280,6 +286,9 @@ watcher basename.
   `$HOME/.local/state`.
 - A push to a bare URL (rather than a configured remote) skips the producer's
   push-race guard.
+- A re-arm while the producer state cannot be trusted (a symlinked or foreign
+  component) cannot tell terminal keys apart, so it re-arms them too; the
+  Stop check then enforces nothing for that tool anyway.
 - A merged or closed record from an earlier lifetime of a pull request makes
   scope and `ALL` re-arms skip it until a per-key re-arm (such as
   `gh pr reopen <url>`) revives it.

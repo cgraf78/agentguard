@@ -451,8 +451,8 @@ To add a new managed agent runtime:
   `gh pr ready|reopen|update-branch` re-arms it, and the reminder recommends
   `git pr-watch --wait <pull requests>` (`AGENTGUARD_PR_WATCH_HINT` replaces
   that advice; `AGENTGUARD_WATCH=0` turns obligations off). See
-  [`docs/watch-protocol.md`](docs/watch-protocol.md). Output extraction is centralized so agent-specific payload
-  names do not leak into the base hook: it reads Claude-style output objects,
+  [`docs/watch-protocol.md`](docs/watch-protocol.md). Output extraction is
+  centralized so agent-specific payload names do not leak into the base hook: it reads Claude-style output objects,
   Codex's combined output string, and Muse's JSON output envelope (unwrapped
   only when the detected runtime is Muse, whose `exit_code`, or without one a
   `failed` or `timed_out` `terminal_status`, also decides whether the command
