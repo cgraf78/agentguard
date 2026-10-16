@@ -17,9 +17,31 @@ or
 .BR reopen ,
 or
 .BR update-branch ,
-or output showing a push summary or a new pull-request URL, it reminds the
-agent once per prompt that the pull request is not done until its checks pass
-on the pushed commit.
+or output showing a push summary or a new pull-request URL (from any GitHub
+host), it reminds the agent once per prompt that the pull request is not done
+until its checks pass on the pushed commit.
+.BR "git pr-open" ,
+.BR "git pr-submit" ,
+.BR "git pr-restack" ,
+and
+.B git pr-sync-stack
+count as pushes too.
+.PP
+When
+.B git-pr-watch
+is on
+.BR PATH ,
+a successful pull-request creation that prints the pull request's URL also
+records it as a watch obligation for the session, and a later successful push
+or
+.B gh pr ready|reopen|update-branch
+re-arms recorded ones; the reminder then recommends
+.B git pr-watch \-\-wait
+with their URLs.
+.BR agent-hook-stop (1)
+checks the obligations. The rules are in
+.I docs/watch-protocol.md
+in the AgentGuard checkout.
 .PP
 The hook centralizes output extraction so agent-specific payload field names do
 not leak into local extension policy. It reads output objects, a combined
@@ -33,10 +55,22 @@ of
 or
 .B timed_out
 counts as a failure.
+.SH ENVIRONMENT
+.TP
+.B AGENTGUARD_WATCH
+Set to
+.B 0
+to stop recording and re-arming watch obligations.
+.TP
+.B AGENTGUARD_PR_WATCH_HINT
+Replaces the advice on how to watch recorded pull requests, here and in the
+Stop hook's message.
 .SH EXIT STATUS
 .TP
 .B 0
 The post-command checks completed. Credential findings and pull-request
 reminders are reported as warnings or reminders rather than blocks.
 .SH SEE ALSO
-.BR agent-hook-pre-bash (1)
+.BR agent-hook-pre-bash (1),
+.BR agent-hook-stop (1),
+.BR git-pr-watch (1)

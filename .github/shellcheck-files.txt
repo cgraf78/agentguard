@@ -30,6 +30,8 @@ program	lib/agentguard/detect.sh
 program	lib/agentguard/hook-command-classifier.sh
 program	lib/agentguard/hook-helpers.sh
 program	lib/agentguard/telemetry.sh
+program	lib/agentguard/watch-github.sh
+program	lib/agentguard/watch.sh
 program	share/agentguard/shell.sh
 program	support/script-resolver.sh.template
 program	support/secure-launcher.sh.template
@@ -74,6 +76,7 @@ program	test/suites/agent-hook-performance-test
 program	test/suites/agent-hook-session-test
 program	test/suites/agent-hook-search-test
 program	test/suites/agent-hook-telemetry-test
+program	test/suites/agent-hook-watch-test
 program	test/suites/agentguard-api-test
 program	test/suites/bootstrap-test
 program	test/suites/examples-test

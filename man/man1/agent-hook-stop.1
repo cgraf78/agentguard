@@ -24,6 +24,21 @@ item IDs. Prompt-submit still surfaces memory reminders before Stop. On Grok,
 the response is always empty JSON because Grok treats Stop context as
 keep-working feedback; an extension block still exits with status 2.
 .PP
+After its extensions, a foreground Stop checks the session's watch
+obligations (pull requests that
+.BR agent-hook-post-bash (1)
+recorded or re-armed): one that no live
+.B git pr-watch
+watcher covers, and that no green, merged, or closed result from a check
+started after the last push or submit satisfies, gets one reminder on
+standard error per prompt. With
+.B AGENTGUARD_WATCH_BLOCK=1
+on Claude Code, the first such Stop after a push, submit, or watcher exit
+blocks instead, once; a watcher that reported a stall never re-arms it. A
+session that recorded nothing pays only a directory test. The rules are in
+.I docs/watch-protocol.md
+in the AgentGuard checkout.
+.PP
 A foreground Stop that lets the turn end also clears the agent's busy tmux
 pane mark with
 .BR "term-pane-mark clear busy" .
@@ -44,6 +59,25 @@ Set to
 by a runtime adapter whose runtime logs this hook's exit status 2 and ends the
 turn anyway (the OpenCode adapter does). A blocked Stop then counts as the end
 of the turn.
+.TP
+.B AGENTGUARD_WATCH
+Set to
+.B 0
+to skip the watch-obligation check.
+.TP
+.B AGENTGUARD_WATCH_BLOCK
+Set to
+.B 1
+to block (once per push, submit, or non-stall watcher exit) instead of
+only reminding,
+on Claude Code.
+.TP
+.B GIT_PR_WATCH_STATE
+When the hook environment sets it to
+.BR 0 ,
+which turns
+.BR git-pr-watch 's
+state files off, the check says so instead of reminding or blocking.
 .SH EXIT STATUS
 .TP
 .B 0
@@ -54,5 +88,7 @@ On runtimes other than Codex, the hook asks the agent runtime to continue
 because a block must be surfaced.
 .SH SEE ALSO
 .BR agent-hook-notification (1),
+.BR agent-hook-post-bash (1),
+.BR git-pr-watch (1),
 .BR hm (1),
 .BR term-pane-mark (1)

@@ -48,6 +48,24 @@ is guarded like a
 .B bash \-c
 payload, since that is how it runs.
 .PP
+It warns when
+.B git pr-watch \-\-wait
+is launched detached (with
+.BR & ,
+.BR nohup ,
+.BR setsid ,
+or
+.BR disown ),
+and, on Claude Code, when it runs in the foreground without
+.BR run_in_background :
+either way nobody receives the watcher's result, while its watcher file still
+satisfies
+.BR agent-hook-stop (1).
+A watcher chained in one call behind a push or pull-request creation (as in
+.BR "git push && git pr-watch \-\-wait" )
+gets advice to run the push first and the watcher alone in the background:
+chained, the push is never recorded or re-armed.
+.PP
 The hook is agent-agnostic. Launchers identify the concrete runtime with
 .B AGENTGUARD_NAME
 and
@@ -109,6 +127,18 @@ Seconds the classifier may spend on one command before the hook blocks it
 (default 30, maximum 3600). Commands over 256 KiB, with more than 2048
 commands, or with one command of more than 2048 words are also blocked,
 because a hook that outlives the host timeout lets the command run unguarded.
+.TP
+.B AGENTGUARD_WATCH
+Set to
+.B 0
+to turn off the
+.B git pr-watch
+launch warnings.
+.TP
+.B AGENTGUARD_WATCH_BLOCK
+Set to
+.B 1
+to block those launches instead of warning.
 .SH EXTENSIONS
 After base policy runs, AgentGuard sources matching extension files through
 its hook helper API. Extensions can add warnings, blocks, or context while the

@@ -205,7 +205,7 @@ _expect_agent quiet muse "muse failed push summary envelope" \
 _expect_agent reminder muse "muse cancelled push without exit_code" \
   "$(_string_payload "./scripts/release.sh" "$(_muse_envelope "$_push_summary" '{"terminal_status":"cancelled"}')")"
 _expect_agent reminder muse "muse backgrounded git push" \
-  "$(_string_payload "git push origin main" "$(_muse_envelope "" '{"terminal_status":"background_running"}')")"
+  "$(_string_payload "git push origin main" "$(_muse_envelope "" '{"chunk_id":"c1","description":"push","execution_state":"background_running","session_id":7,"work_id":"w1","model_guidance":"Poll with the session id."}')")"
 _expect_agent quiet muse "muse timed-out push without exit_code" \
   "$(_string_payload "./scripts/release.sh" "$(_muse_envelope "$_push_summary" '{"terminal_status":"timed_out"}')")"
 _expect_agent quiet muse "muse failed git push command" \

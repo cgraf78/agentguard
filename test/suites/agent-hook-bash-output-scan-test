@@ -272,6 +272,10 @@ _assert_eq "adapter: muse envelope with only exit_code unwraps output" "x
 |rc=0" "$(_adapter muse _hook_tool_stdout "$(_string_payload "$(_muse_envelope x '{"exit_code":0}')")")"
 _assert_eq "adapter: muse envelope with empty output prints nothing" "|rc=0" \
   "$(_adapter muse _hook_tool_stdout "$(_string_payload "$(_muse_envelope '')")")"
+# The real shape of a command still running in the background: only an
+# execution_state, with empty output, so nothing is scanned.
+_assert_eq "adapter: muse background envelope unwraps to its empty output" "|rc=0" \
+  "$(_adapter muse _hook_tool_stdout "$(_string_payload "$(_muse_envelope '' '{"chunk_id":"c1","execution_state":"background_running","session_id":7,"work_id":"w1","model_guidance":"Poll."}')")")"
 _muse_no_result='{"output":"x","command":"run"}'
 _assert_eq "adapter: muse JSON without result fields stays raw" "$_muse_no_result
 |rc=0" "$(_adapter muse _hook_tool_stdout "$(_string_payload "$_muse_no_result")")"

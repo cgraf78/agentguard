@@ -35,6 +35,8 @@ runtime_shell_files=(
   "$root/lib/agentguard/hook-command-classifier.sh"
   "$root/lib/agentguard/hook-helpers.sh"
   "$root/lib/agentguard/telemetry.sh"
+  "$root/lib/agentguard/watch-github.sh"
+  "$root/lib/agentguard/watch.sh"
   "$root/share/agentguard/shell.sh"
   "$root/support/install-checkout.sh"
   "$root/support/script-resolver.sh.template"

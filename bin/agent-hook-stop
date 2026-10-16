@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # agent-hook-stop — Stop hook.
 # Runs after every response: surface any pending Hive Memory reminder, run
-# extensions, then, once the foreground turn really ends, ring for the first
-# such Stop after a valid prompt (not repeated or re-entrant callbacks) and
-# clear the agent's busy pane mark.
+# extensions, check watch obligations, then, once the foreground turn really
+# ends, ring for the first such Stop after a valid prompt (not repeated or
+# re-entrant callbacks) and clear the agent's busy pane mark.
 
 set -u
 _HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}" # captured before sourcing so _hook_source_extensions finds agent/local variants
@@ -54,6 +54,16 @@ _hook_hm_read_input
 _hook_stop_arm
 _hook_hm_stop
 _hook_source_extensions
+# Watch obligations (lib/agentguard/watch.sh): work this session started that
+# a watcher should follow, such as pull-request checks after a push. A builtin
+# directory test keeps sessions that never recorded one free of any added
+# work; a subagent's Stop leaves enforcement to the turn that owns it. Runs
+# after extensions and before the continuation check, so a block here keeps
+# the turn going like an extension's.
+if [ -d "$_HOOK_STATE_DIR/watch" ] && ! _hook_flag_disabled "${AGENTGUARD_WATCH:-}" &&
+  _hook_stop_is_foreground && _hook_load_watch_github; then
+  _hook_watch_stop "$_HOOK_GH_PR_TOOL_DIR=$_HOOK_GH_PR_STATE_VAR"
+fi
 # Ring and clear only after extensions, which can still block the Stop and keep
 # the turn going. A Stop that continues stays silent and leaves a mark, so the
 # Stop that really ends the turn rings although the host flags it as a
