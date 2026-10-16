@@ -720,7 +720,8 @@ _hook_gh_checks_reminder() {
 # its `<labels>` token filled in. Needs Bash 4 (the command classifier).
 # Sets _HOOK_GH_WATCH_LABELS (the labels recorded or re-armed),
 # _HOOK_GH_WATCH_PASS_REMINDED (1 when this call reminded, reset at entry),
-# and, after any reminder, _HOOK_GH_WATCH_REMINDED.
+# and _HOOK_GH_WATCH_REMINDED once the command's reminder is handled: given,
+# or skipped as a repeat within the prompt.
 _hook_gh_watch_pass() {
   local text="$1" output="$2" status="$3" background="$4" watch="${5:-}"
   local hint command advice key
@@ -788,6 +789,11 @@ _hook_gh_watch_pass() {
   if _hook_once_per_prompt "$key"; then
     _hook_gh_checks_reminder "$watch"
     _HOOK_GH_WATCH_PASS_REMINDED=1
+  else
+    # Already reminded for this command in the prompt: the output it printed
+    # is handled too, so post-bash's output-evidence reminder must not stand
+    # in for it with another watcher.
+    _HOOK_GH_WATCH_REMINDED=1
   fi
   return 0
 }

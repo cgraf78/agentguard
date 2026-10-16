@@ -380,6 +380,13 @@ _run "$EXT_POST" claude "$(_payload "git push" "" 0 "$_summary")"
 _run "$EXT_POST" claude "$(_payload "git push" "" 0 "$_summary")"
 _assert_eq "direct push again in the prompt: no reminder" 0 "$(_gates)"
 _new_sid
+_run "$EXT_POST" claude "$(_payload "wrap -- git push" "" 0 "$_summary")"
+_assert_eq "same wrapped push twice in a prompt: one reminder first" 1 "$(_gates)"
+_run "$EXT_POST" claude "$(_payload "wrap -- git push" "" 0 "$_summary")"
+_assert_eq "same wrapped push twice in a prompt: then none" 0 "$(_gates)"
+_assert_eq "same wrapped push twice in a prompt: handled, but the pass did not remind" \
+  "PASS-RC=0 LABELS= REMINDED= ANY=1" "$(_pass_line)"
+_new_sid
 _seed_key o_r_12 1000 o_r
 _run "$POST_BASH" claude "$(_payload "sudo git push" "" 0 $'To github.com:o/r.git\n   1111111..2222222  main -> main')"
 _assert_eq "prefilter: a push behind sudo re-arms" 1 "$([ "$(_key_epoch o_r_12)" != 1000 ] && echo 1)"

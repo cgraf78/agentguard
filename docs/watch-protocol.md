@@ -304,10 +304,13 @@ The contract with an extension:
   indirect command's output, which a wrapper prints) runs after them, and
   only when no PR checks reminder was given yet in the hook process: a
   wrapped push gets one reminder, the pass's.
-- `_HOOK_GH_WATCH_REMINDED` is set by every PR checks reminder, the base's
-  and the pass's, and never reset within the hook process; the pass skips
-  its general reminder when it is set. `_HOOK_GH_WATCH_PASS_REMINDED` says
-  whether the last call reminded (reset at entry), and
+- `_HOOK_GH_WATCH_REMINDED` means the command's reminder is handled: set by
+  every PR checks reminder, the base's and the pass's, and by a pass that
+  skipped its general reminder as a repeat within the prompt, and never
+  reset within the hook process; the pass and post-bash's output path skip
+  their general reminder when it is set. `_HOOK_GH_WATCH_PASS_REMINDED` says
+  whether the last call itself reminded (reset at entry, unset for such a
+  repeat), and
   `_HOOK_GH_WATCH_LABELS` which pull requests it recorded or re-armed.
 - A caller of `_hook_gh_checks_reminder` de-duplicates it itself, as post-bash
   does: `_hook_once_per_prompt "pr-checks-<cksum of a stable key>"`, the key
