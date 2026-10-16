@@ -1699,6 +1699,9 @@ _HOOK_GH_PREFILTER_GIT_PUSH="${_hook_gh_prefilter_lead}git([[:blank:]]+[^[:space
 _HOOK_GH_PREFILTER_GIT_PR="${_hook_gh_prefilter_lead}(git([[:blank:]]+[^[:space:]]+)*[[:blank:]]+|([^[:space:]]*/)?git-)pr-(open|submit|restack|sync-stack)([[:space:]]|$)"
 _HOOK_GH_PREFILTER_GH_PR="${_hook_gh_prefilter_lead}gh([[:blank:]]+[^[:space:]]+)*[[:blank:]]+pr[[:space:]]"
 unset _hook_gh_prefilter_separators _hook_gh_prefilter_wrappers _hook_gh_prefilter_lead
+# Set once this hook process gave a PR checks reminder (watch-github.sh), so
+# a hook extension's watch pass does not repeat the general one.
+_HOOK_GH_WATCH_REMINDED=''
 
 # Whether command text $1 may run a command that starts pull-request checks
 # (builtin regexes only; the classifier decides). The `git pr-*` regex sits

@@ -644,6 +644,23 @@ _hook_gh_watch_commands() {
   printf -v "$1" '%s' "$_wc_out"
 }
 
+# Store in the variable named by $1 hint $2 with every `<labels>` token
+# replaced by $3. Prefix and suffix expansion: a pattern replacement would
+# treat `&` in the replacement specially in newer Bash.
+_hook_gh_fill_hint() {
+  local _fh_in="$2" _fh_out=''
+  while :; do
+    case "$_fh_in" in
+      *'<labels>'*)
+        _fh_out="$_fh_out${_fh_in%%<labels>*}$3"
+        _fh_in="${_fh_in#*<labels>}"
+        ;;
+      *) break ;;
+    esac
+  done
+  printf -v "$1" '%s' "$_fh_out$_fh_in"
+}
+
 # _hook_gh_checks_reminder [<watch-command>]
 #
 # Emit the general pull-request checks reminder, for output or commands that
@@ -651,13 +668,15 @@ _hook_gh_watch_commands() {
 # AGENTGUARD_PR_WATCH_HINT when set; otherwise <watch-command> (default `git
 # pr-watch --wait`) when it can run here (any given command, or `git-pr-watch`
 # on PATH), with this runtime's background advice; otherwise `gh pr checks
-# --watch`. Sets _HOOK_GH_WATCH_REMINDED. Callers de-duplicate.
+# --watch`. A `<labels>` token in the hint becomes `<pr>`: no pull request
+# is known here. Sets _HOOK_GH_WATCH_REMINDED. Callers de-duplicate.
 _hook_gh_checks_reminder() {
-  local watch="${1:-}" advice lead
+  local watch="${1:-}" advice lead hint
   lead='PR checks gate: if this pushed or opened a GitHub pull request, it is not done or green until its checks pass on the pushed commit.'
   _HOOK_GH_WATCH_REMINDED=1
   if [ -n "${AGENTGUARD_PR_WATCH_HINT:-}" ]; then
-    _hook_remind "$lead $AGENTGUARD_PR_WATCH_HINT"
+    _hook_gh_fill_hint hint "$AGENTGUARD_PR_WATCH_HINT" '<pr>'
+    _hook_remind "$lead $hint"
     return 0
   fi
   if [ -z "$watch" ] && command -v "$_HOOK_GH_PR_WATCH_ARGV" >/dev/null 2>&1; then
@@ -693,16 +712,21 @@ _hook_gh_checks_reminder() {
 # `gh pr ready|reopen|update-branch` and pushes (a background call records
 # nothing and a pushing one re-arms all), and reminds: after a record or
 # re-arm, every time, with the watch commands; otherwise once per prompt per
-# command text, with _hook_gh_checks_reminder. AGENTGUARD_WATCH=0 turns
-# recording and re-arming off; AGENTGUARD_PR_WATCH_HINT replaces the advice.
-# Needs Bash 4 (the command classifier). Sets _HOOK_GH_WATCH_LABELS (the
-# labels recorded or re-armed) and, after any reminder,
-# _HOOK_GH_WATCH_REMINDED.
+# command text, with _hook_gh_checks_reminder, and not at all when this
+# hook process already gave a PR checks reminder (_HOOK_GH_WATCH_REMINDED,
+# say post-bash's own for a wrapped push's printed summary), so a wrapped
+# command gets one general reminder, not two. AGENTGUARD_WATCH=0 turns
+# recording and re-arming off; AGENTGUARD_PR_WATCH_HINT replaces the advice,
+# its `<labels>` token filled in. Needs Bash 4 (the command classifier).
+# Sets _HOOK_GH_WATCH_LABELS (the labels recorded or re-armed),
+# _HOOK_GH_WATCH_PASS_REMINDED (1 when this call reminded, reset at entry),
+# and, after any reminder, _HOOK_GH_WATCH_REMINDED.
 _hook_gh_watch_pass() {
   local text="$1" output="$2" status="$3" background="$4" watch="${5:-}"
   local hint command advice key
   _HOOK_GH_W_LABELS=''
   _HOOK_GH_WATCH_LABELS=''
+  _HOOK_GH_WATCH_PASS_REMINDED=''
   _hook_gh_watch_prefilter "$text" || return 1
   _hook_gh_classify "$text" || return 1
   [ "$status" != - ] || status=$(_hook_hm_tool_status)
@@ -746,8 +770,10 @@ _hook_gh_watch_pass() {
     # Every record or re-arm is new work, so it always reminds, even when the
     # same command ran earlier in the prompt.
     _HOOK_GH_WATCH_REMINDED=1
+    _HOOK_GH_WATCH_PASS_REMINDED=1
     if [ -n "${AGENTGUARD_PR_WATCH_HINT:-}" ]; then
-      _hook_remind "PR checks gate: this started checks on $_HOOK_GH_WATCH_LABELS, which is not done or green until they pass on the pushed commit. $AGENTGUARD_PR_WATCH_HINT"
+      _hook_gh_fill_hint hint "$AGENTGUARD_PR_WATCH_HINT" "$_HOOK_GH_WATCH_LABELS"
+      _hook_remind "PR checks gate: this started checks on $_HOOK_GH_WATCH_LABELS, which is not done or green until they pass on the pushed commit. $hint"
       return 0
     fi
     _hook_gh_watch_commands command "${watch:-git pr-watch --wait}" "$_HOOK_GH_WATCH_LABELS"
@@ -757,7 +783,11 @@ _hook_gh_watch_pass() {
   fi
   # Otherwise once per prompt for the same command text: re-running it while
   # monitoring must not repeat the reminder.
+  [ -z "${_HOOK_GH_WATCH_REMINDED:-}" ] || return 0
   key="pr-checks-$(printf '%s' "command:$text" | cksum | tr -d ' ')"
-  _hook_once_per_prompt "$key" && _hook_gh_checks_reminder "$watch"
+  if _hook_once_per_prompt "$key"; then
+    _hook_gh_checks_reminder "$watch"
+    _HOOK_GH_WATCH_PASS_REMINDED=1
+  fi
   return 0
 }

@@ -281,7 +281,7 @@ case "$AGENTGUARD_CMD_TRIMMED" in
   "wrap -- "*)
     _hook_load_gh_helpers || return 0
     if _hook_gh_watch_pass "${AGENTGUARD_CMD_TRIMMED#wrap -- }" "$_stdout" - - "wrap watch"; then
-      printf 'PASS-RC=0 LABELS=%s\n' "$_HOOK_GH_WATCH_LABELS" >&2
+      printf 'PASS-RC=0 LABELS=%s REMINDED=%s\n' "$_HOOK_GH_WATCH_LABELS" "$_HOOK_GH_WATCH_PASS_REMINDED" >&2
     else
       printf 'PASS-RC=1\n' >&2
     fi
@@ -291,7 +291,7 @@ EXT
 EXT_POST="$_ext_dir/bin/agent-hook-post-bash"
 _new_sid
 _run "$EXT_POST" claude "$(_payload "wrap -- gh pr create --fill" "$URL")"
-_assert_contains "API: a wrapped create succeeds and names its label" "PASS-RC=0 LABELS=$URL" "$HOOK_STDERR"
+_assert_contains "API: a wrapped create succeeds and names its label" "PASS-RC=0 LABELS=$URL REMINDED=1" "$HOOK_STDERR"
 _assert_file_exists "API: a wrapped create records the key" "$(_session_tool)/keys/owner_repo_12"
 _assert_contains "API: the reminder names the extension's watcher" "\`wrap watch $URL\`" "$(_context)"
 _assert_contains "API: the stored hint names the extension's watcher" "wrap watch <labels>" "$(sed -n 3p "$(_session_tool)/tool")"
@@ -314,7 +314,34 @@ _run "$EXT_POST" claude "$(jq -nc '{tool_input:{command:"wrap -- git push",run_i
 _assert_eq "API: a backgrounded wrapped push re-arms all" 1 "$([ "$(_key_epoch o_r_12)" != 1000 ] && echo 1)"
 _new_sid
 _run "$EXT_POST" claude "$(_payload "wrap -- git push" "" 0 "$_summary")"
-_assert_contains "API: nothing recorded: the general reminder names the extension's watcher" "\`wrap watch <pr>\`" "$(_context)"
+_assert_contains "API: nothing recorded: one general reminder (post-bash's, for the printed summary)" \
+  "1" "$(_context | grep -c 'PR checks gate')"
+_assert_eq "API: nothing recorded: the pass reports it did not remind" "PASS-RC=0 LABELS= REMINDED=" \
+  "$(printf '%s\n' "$HOOK_STDERR" | grep '^PASS-RC=')"
+_new_sid
+_run "$EXT_POST" claude "$(_payload "wrap -- git push" "" 0 "")"
+_assert_contains "API: no summary printed: the pass gives the general reminder, naming its watcher" "\`wrap watch <pr>\`" "$(_context)"
+_assert_contains "API: no summary printed: the pass reports it reminded" "REMINDED=1" "$HOOK_STDERR"
+_new_sid
+_seed_key o_r_12 1000 o_r https://github.com/o/r/pull/12
+_run "$EXT_POST" claude "$(_payload "wrap -- git push" "" 0 $'To github.com:o/r.git\n   1111111..2222222  main -> main')"
+# post-bash's general reminder for the printed summary comes first; the pass
+# adds only its labelled one.
+_assert_eq "API: push after a record: one general reminder (post-bash's)" "1" \
+  "$(_context | grep -c 'if this pushed or opened')"
+_assert_contains "API: push after a record: the labelled reminder fires" "started checks on https://github.com/o/r/pull/12" "$(_context)"
+
+echo ""
+echo "=== AGENTGUARD_PR_WATCH_HINT: the <labels> token ==="
+
+WATCH_ENV=("AGENTGUARD_PR_WATCH_HINT=Run team-watch <labels> in the background.")
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr create --fill" "$URL")"
+_assert_contains "hint token: labelled reminder fills in the labels" "Run team-watch $URL in the background." "$(_context)"
+_new_sid
+RUN_PATH="$NO_WATCH_PATH" _run "$POST_BASH" claude "$(_payload "./ship.sh" "" 0 "$_summary")"
+_assert_contains "hint token: general reminder says <pr>" "Run team-watch <pr> in the background." "$(_context)"
+WATCH_ENV=()
 
 echo ""
 echo "=== post-bash: per-runtime payloads ==="
