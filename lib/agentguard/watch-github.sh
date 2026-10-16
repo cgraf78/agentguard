@@ -185,13 +185,22 @@ _hook_gh_push_command_inert() {
 }
 
 # Add the scope of push block URL $1 to the caller's `pushed` list when the
-# block counted, once per URL and once per scope: a builtin membership test
-# keeps output with thousands of blocks linear. Uses the caller's counted,
-# urls, and pushed (dynamic scope; _hook_gh_push_scopes only).
+# block counted, once per URL and once per scope. A push has a handful of
+# remotes, so collection stops at 64 distinct URLs and sets `overflow`
+# instead (the caller then re-arms everything): the membership tests scan
+# the growing lists, which would turn quadratic on output with thousands of
+# blocks. Uses the caller's counted, urls, nurls, overflow, and pushed
+# (dynamic scope; _hook_gh_push_scopes only).
 _hook_gh_push_count_block() {
   local _cb_scope
   [ "$counted" = 1 ] || return 0
+  [ "$overflow" = 0 ] || return 0
   case "$urls" in *" $1 "*) return 0 ;; esac
+  if [ "$nurls" -ge 64 ]; then
+    overflow=1
+    return 0
+  fi
+  nurls=$((nurls + 1))
   urls="$urls$1 "
   _hook_gh_push_url_scope _cb_scope "$1" || return 0
   case "$pushed" in *" $_cb_scope/"*) return 0 ;; esac
@@ -217,11 +226,13 @@ _hook_gh_push_count_block() {
 #     other output from a command with a `push` word; other output from any
 #     other command (a stack tool saying it had nothing to push) re-arms
 #     nothing;
-#   - an up-to-date, rejected-only, or tag-only push re-arms nothing.
+#   - an up-to-date, rejected-only, or tag-only push re-arms nothing;
+#   - more than 64 distinct counted `To` URLs re-arm ALL (no push has that
+#     many remotes; the cap bounds the work on hostile output).
 # The caller checks the push succeeded; a failed push never re-arms.
 _hook_gh_push_scopes() {
   local output="$1" command="${2:-}" line url='' counted=0 blocks=0 uptodate=0
-  local pushed='' urls=' ' recorded='' pair scope repo rscope
+  local pushed='' urls=' ' nurls=0 overflow=0 recorded='' pair scope repo rscope
   _hook_gh_push_command_inert "$command" && return 0
   # Counted blocks collect as " <scope>/<repo> " pairs (neither holds `/`).
   while IFS= read -r line || [ -n "$line" ]; do
@@ -243,6 +254,10 @@ _hook_gh_push_scopes() {
     esac
   done <<<"$output"
   _hook_gh_push_count_block "$url"
+  if [ "$overflow" = 1 ]; then
+    printf 'ALL\n'
+    return 0
+  fi
   if [ "$blocks" = 0 ]; then
     [ "$uptodate" = 0 ] || return 0
     case "$output" in

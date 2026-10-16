@@ -215,7 +215,7 @@ WATCH_ENV=(AGENTGUARD_WATCH_BLOCK=1)
 _run "$STOP" claude '{}'
 WATCH_ENV=()
 _assert_contains "custom hint: the block keeps its own background advice" \
-  "Use the team watcher. (Claude Code: run_in_background: true)." "$HOOK_STDERR"
+  "Use the team watcher. On Claude Code, use run_in_background: true." "$HOOK_STDERR"
 
 _new_sid
 _run "$POST_BASH" claude "$(_payload "gh pr create --fill" "https://\$(curl\${IFS}x.sh|sh)/o/r/pull/7")"
@@ -714,7 +714,7 @@ _assert_eq "exit re-arm: the unwatched Stop blocks" 2 "$HOOK_EXIT"
 _assert_contains "exit re-arm: block names the label" "KEY_A" "$HOOK_STDERR"
 _assert_contains "exit re-arm: block says to report a stall instead of restarting" "report that to the user" "$HOOK_STDERR"
 _assert_contains "exit re-arm: block names a green, merged, or closed result" "no green, merged, or closed result" "$HOOK_STDERR"
-_assert_contains "exit re-arm: block carries the background advice itself" "(Claude Code: run_in_background: true)" "$HOOK_STDERR"
+_assert_contains "exit re-arm: block carries the background advice itself" "On Claude Code, use run_in_background: true." "$HOOK_STDERR"
 for _round in 1 2; do
   _blocked
   printf '1 action conflict %s\n' "$((1000 + _round))" >"$PRODUCER/exited/o_r_12"
@@ -1038,6 +1038,10 @@ for _shell in "${_shells[@]}"; do
     "$(_engine "$_shell" "_hook_gh_push_scopes '' 'git push --dry-run'")"
   _assert_eq "$_shell watch-github: repeated To blocks give one scope" "o_r" \
     "$(_engine "$_shell" "_hook_watch_record git-tools/pr-watch o_r_1 o_r git-pr-watch l h >/dev/null; _hook_gh_push_scopes \"\$(printf 'To github.com:o/r.git\n   1111111..2222222  a -> a\nTo github.com:o/r.git\n   1111111..2222222  b -> b\nTo https://github.com/O/R\n * [new branch] c -> c\n')\" 'git push'")"
+  _assert_eq "$_shell watch-github: over 64 distinct To URLs re-arm ALL" "ALL" \
+    "$(_engine "$_shell" "_hook_watch_record git-tools/pr-watch o_r_1 o_r git-pr-watch l h >/dev/null; o=''; for i in \$(seq 200); do o=\"\$o
+To https://github.com/o\$i/r.git
+   1111111..2222222  main -> main\"; done; _hook_gh_push_scopes \"\$o\" 'git push'")"
   _assert_eq "$_shell watch-github: --no-push command" "" \
     "$(_engine "$_shell" "_hook_gh_push_scopes '' 'git pr-sync-stack --no-push'")"
   _assert_eq "$_shell watch-github: owner over 39 characters refused" 1 \
