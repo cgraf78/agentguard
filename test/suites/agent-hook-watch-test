@@ -289,6 +289,15 @@ case "$AGENTGUARD_CMD_TRIMMED" in
       printf 'PASS-RC=1 ANY=%s\n' "$_HOOK_GH_WATCH_REMINDED" >&2
     fi
     ;;
+  "wrap2 -- "*)
+    # Two unwrapped commands in one hook process (distinct texts, so the
+    # once-per-prompt keys differ): the second pass must yield.
+    _hook_load_gh_helpers || return 0
+    _hook_gh_watch_pass "git push" "" - - "wrap watch"
+    printf 'PASS2-FIRST REMINDED=%s\n' "$_HOOK_GH_WATCH_PASS_REMINDED" >&2
+    _hook_gh_watch_pass "git push origin topic" "" - - "wrap watch"
+    printf 'PASS2-SECOND REMINDED=%s ANY=%s\n' "$_HOOK_GH_WATCH_PASS_REMINDED" "$_HOOK_GH_WATCH_REMINDED" >&2
+    ;;
 esac
 EXT
 EXT_POST="$_ext_dir/bin/agent-hook-post-bash"
@@ -387,6 +396,11 @@ _assert_eq "same wrapped push twice in a prompt: then none" 0 "$(_gates)"
 _assert_eq "same wrapped push twice in a prompt: handled, but the pass did not remind" \
   "PASS-RC=0 LABELS= REMINDED= ANY=1" "$(_pass_line)"
 _new_sid
+_run "$EXT_POST" claude "$(_payload "wrap2 -- two pushes" "" 0 "")"
+_assert_eq "two passes in one hook process: one reminder" 1 "$(_gates)"
+_assert_contains "two passes in one hook process: the first reminded" "PASS2-FIRST REMINDED=1" "$HOOK_STDERR"
+_assert_contains "two passes in one hook process: the second yielded" "PASS2-SECOND REMINDED= ANY=1" "$HOOK_STDERR"
+_new_sid
 _seed_key o_r_12 1000 o_r
 _run "$POST_BASH" claude "$(_payload "sudo git push" "" 0 $'To github.com:o/r.git\n   1111111..2222222  main -> main')"
 _assert_eq "prefilter: a push behind sudo re-arms" 1 "$([ "$(_key_epoch o_r_12)" != 1000 ] && echo 1)"
@@ -401,6 +415,15 @@ _assert_contains "hint token: labelled reminder fills in the labels" "Run team-w
 _new_sid
 RUN_PATH="$NO_WATCH_PATH" _run "$POST_BASH" claude "$(_payload "./ship.sh" "" 0 "$_summary")"
 _assert_contains "hint token: general reminder says <pr>" "Run team-watch <pr> in the background." "$(_context)"
+WATCH_ENV=("AGENTGUARD_PR_WATCH_HINT=Run team-watch <labels>; rerun team-watch <labels> after each exit.")
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr create --fill" "$URL")"
+_assert_contains "hint with two tokens: labelled reminder fills both" \
+  "Run team-watch $URL; rerun team-watch $URL after each exit." "$(_context)"
+_new_sid
+RUN_PATH="$NO_WATCH_PATH" _run "$POST_BASH" claude "$(_payload "./ship.sh" "" 0 "$_summary")"
+_assert_contains "hint with two tokens: general reminder fills both with <pr>" \
+  "Run team-watch <pr>; rerun team-watch <pr> after each exit." "$(_context)"
 WATCH_ENV=()
 
 echo ""
