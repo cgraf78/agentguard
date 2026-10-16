@@ -202,7 +202,7 @@ WATCH_ENV=(AGENTGUARD_WATCH=0)
 _run "$POST_BASH" claude "$(_payload "gh pr create --fill" "$URL")"
 WATCH_ENV=()
 _assert_eq "AGENTGUARD_WATCH=0: no watch state" "" "$(ls "$STATE_ROOT/$SID/watch" 2>/dev/null)"
-_assert_contains "AGENTGUARD_WATCH=0: today's reminder" "gh pr checks <pr>" "$(_context)"
+_assert_contains "AGENTGUARD_WATCH=0: the general reminder, naming git pr-watch" "git pr-watch --wait <pr>" "$(_context)"
 
 _new_sid
 WATCH_ENV=("AGENTGUARD_PR_WATCH_HINT=Use the team watcher.")
@@ -239,6 +239,192 @@ _new_sid
 _run "$POST_BASH" claude "$(jq -nc --arg out "$URL" \
   '{tool_input:{command:"gh pr create --fill",run_in_background:true},tool_response:{stdout:$out,stderr:"",exit_code:0}}')"
 _assert_eq "background call: records nothing" "" "$(ls "$(_session_tool)/keys" 2>/dev/null)"
+
+echo ""
+echo "=== post-bash: the general reminder's three variants ==="
+
+# Nothing recorded or re-armed (here a push summary from a script, and a
+# push with nothing recorded yet): the general reminder names the hint when
+# set, else `git pr-watch` when it is on PATH (with this runtime's
+# background advice), else `gh pr checks --watch`.
+_summary=$'To github.com:o/r.git\n   1111111..2222222  main -> main'
+for _case in "./ship.sh|output" "git push|command"; do
+  _cmd="${_case%%|*}"
+  _new_sid
+  RUN_PATH="$NO_WATCH_PATH" _run "$POST_BASH" claude "$(_payload "$_cmd" "" 0 "$_summary")"
+  _assert_contains "general reminder ($_cmd), no watcher: gh pr checks" "gh pr checks <pr> --repo <owner/repo> --watch --fail-fast" "$(_context)"
+  _new_sid
+  _run "$POST_BASH" claude "$(_payload "$_cmd" "" 0 "$_summary")"
+  _assert_contains "general reminder ($_cmd), git-pr-watch on PATH: git pr-watch" "\`git pr-watch --wait <pr>\` (Claude Code: run_in_background: true" "$(_context)"
+  _assert_not_contains "general reminder ($_cmd), git-pr-watch on PATH: no gh pr checks" "gh pr checks" "$(_context)"
+  _new_sid
+  _run "$POST_BASH" codex "$(_string_payload "$_cmd" "$_summary")"
+  _assert_contains "general reminder ($_cmd) on Codex: the shell tool's background option" "shell tool's background or yield option" "$(_context)"
+  _new_sid
+  WATCH_ENV=("AGENTGUARD_PR_WATCH_HINT=Use the team watcher.")
+  RUN_PATH="$NO_WATCH_PATH" _run "$POST_BASH" claude "$(_payload "$_cmd" "" 0 "$_summary")"
+  WATCH_ENV=()
+  _assert_contains "general reminder ($_cmd), hint set: the hint" "pushed commit. Use the team watcher." "$(_context)"
+  _assert_not_contains "general reminder ($_cmd), hint set: no gh pr checks" "gh pr checks" "$(_context)"
+done
+
+echo ""
+echo "=== watch pass API for hook extensions ==="
+
+# A hook extension that unwraps `wrap -- <command>` and hands the inner
+# command to the shared watch pass, naming its own watcher. WRAP_STATUS and
+# WRAP_BG (default `-`) pass explicit status and background values.
+_ext_dir=$(_tmpdir)
+_install_hook_fixture "$_ext_dir" agent-hook-post-bash
+cat >"$_ext_dir/bin/agent-hook-post-bash-work" <<'EXT'
+# shellcheck shell=bash
+case "$AGENTGUARD_CMD_TRIMMED" in
+  "wrap -- "*)
+    _hook_load_gh_helpers || return 0
+    if _hook_gh_watch_pass "${AGENTGUARD_CMD_TRIMMED#wrap -- }" "$_stdout" \
+      "${WRAP_STATUS:--}" "${WRAP_BG:--}" "wrap watch"; then
+      printf 'PASS-RC=0 LABELS=%s REMINDED=%s ANY=%s\n' "$_HOOK_GH_WATCH_LABELS" \
+        "$_HOOK_GH_WATCH_PASS_REMINDED" "$_HOOK_GH_WATCH_REMINDED" >&2
+    else
+      printf 'PASS-RC=1 ANY=%s\n' "$_HOOK_GH_WATCH_REMINDED" >&2
+    fi
+    ;;
+  "wrap2 -- "*)
+    # Two unwrapped commands in one hook process (distinct texts, so the
+    # once-per-prompt keys differ): the second pass must yield.
+    _hook_load_gh_helpers || return 0
+    _hook_gh_watch_pass "git push" "" - - "wrap watch"
+    printf 'PASS2-FIRST REMINDED=%s\n' "$_HOOK_GH_WATCH_PASS_REMINDED" >&2
+    _hook_gh_watch_pass "git push origin topic" "" - - "wrap watch"
+    printf 'PASS2-SECOND REMINDED=%s ANY=%s\n' "$_HOOK_GH_WATCH_PASS_REMINDED" "$_HOOK_GH_WATCH_REMINDED" >&2
+    ;;
+esac
+EXT
+EXT_POST="$_ext_dir/bin/agent-hook-post-bash"
+# The pass's report line, and the number of PR checks reminders the hook gave.
+_pass_line() { printf '%s\n' "$HOOK_STDERR" | grep '^PASS-RC='; }
+_gates() { _context | grep -o 'PR checks gate' | wc -l | tr -d ' '; }
+_bg_payload() {
+  jq -nc --arg cmd "$1" --arg out "${2:-}" --argjson status "${3:-0}" \
+    '{tool_input:{command:$cmd,run_in_background:true},tool_response:{stdout:$out,stderr:"",exit_code:$status}}'
+}
+
+_new_sid
+_run "$EXT_POST" claude "$(_payload "wrap -- gh pr create --fill" "$URL")"
+_assert_eq "API: a wrapped create succeeds, names its label, and reminds" \
+  "PASS-RC=0 LABELS=$URL REMINDED=1 ANY=1" "$(_pass_line)"
+_assert_file_exists "API: a wrapped create records the key" "$(_session_tool)/keys/owner_repo_12"
+_assert_contains "API: the reminder names the extension's watcher" "\`wrap watch $URL\`" "$(_context)"
+_assert_contains "API: the stored hint names the extension's watcher" "wrap watch <labels>" "$(sed -n 3p "$(_session_tool)/tool")"
+_seed_key owner_repo_12 1000 owner_repo "$URL"
+_run "$EXT_POST" claude "$(_payload "wrap -- git push" "" 0 $'To github.com:Owner/Repo.git\n   1111111..2222222  main -> main')"
+_assert_eq "API: a wrapped push re-arms" 1 "$([ "$(_key_epoch owner_repo_12)" != 1000 ] && echo 1)"
+_new_sid
+_run "$EXT_POST" claude "$(_payload "wrap -- gh pr create --fill" "$URL" 1)"
+_assert_eq "API: a failed command still matched, labels empty, no reminder" \
+  "PASS-RC=0 LABELS= REMINDED= ANY=" "$(_pass_line)"
+_assert_eq "API: a failed command records nothing" "" "$(ls "$(_session_tool)/keys" 2>/dev/null)"
+_new_sid
+_run "$EXT_POST" claude "$(_payload "wrap -- ls" "x")"
+_assert_eq "API: a command that starts no checks fails" "PASS-RC=1 ANY=" "$(_pass_line)"
+_new_sid
+_run "$EXT_POST" claude "$(_payload "wrap -- git push --dry-run" "" 0 "$_summary")"
+_assert_eq "API: a dry run starts no checks" "PASS-RC=1 ANY=" "$(_pass_line)"
+_new_sid
+_seed_key o_r_12 1000 o_r
+_run "$EXT_POST" claude "$(_bg_payload "wrap -- git push")"
+_assert_eq "API: a backgrounded wrapped push re-arms all" 1 "$([ "$(_key_epoch o_r_12)" != 1000 ] && echo 1)"
+
+# Explicit status and background override the payload.
+_new_sid
+WATCH_ENV=(WRAP_STATUS=1)
+_run "$EXT_POST" claude "$(_payload "wrap -- gh pr create --fill" "$URL")"
+_assert_eq "API: explicit status 1 over a successful payload records nothing" "" "$(ls "$(_session_tool)/keys" 2>/dev/null)"
+_assert_eq "API: explicit status 1: no reminder" "PASS-RC=0 LABELS= REMINDED= ANY=" "$(_pass_line)"
+_new_sid
+WATCH_ENV=(WRAP_STATUS=0)
+_run "$EXT_POST" claude "$(_payload "wrap -- gh pr create --fill" "$URL" 1)"
+_assert_file_exists "API: explicit status 0 over a failing payload records" "$(_session_tool)/keys/owner_repo_12"
+_assert_eq "API: explicit status 0: the labelled reminder" "PASS-RC=0 LABELS=$URL REMINDED=1 ANY=1" "$(_pass_line)"
+_new_sid
+WATCH_ENV=(WRAP_BG=1)
+_run "$EXT_POST" claude "$(_payload "wrap -- gh pr create --fill" "$URL")"
+_assert_eq "API: explicit background 1 over a foreground payload records nothing" "" "$(ls "$(_session_tool)/keys" 2>/dev/null)"
+_assert_eq "API: explicit background 1: the general reminder" "PASS-RC=0 LABELS= REMINDED=1 ANY=1" "$(_pass_line)"
+_new_sid
+WATCH_ENV=(WRAP_BG=0)
+_run "$EXT_POST" claude "$(_bg_payload "wrap -- gh pr create --fill" "$URL")"
+_assert_file_exists "API: explicit background 0 over a background payload records" "$(_session_tool)/keys/owner_repo_12"
+_assert_eq "API: explicit background 0: the labelled reminder" "PASS-RC=0 LABELS=$URL REMINDED=1 ANY=1" "$(_pass_line)"
+WATCH_ENV=()
+
+# A watch command the extension names is recommended even without
+# git-pr-watch on PATH (nothing can be recorded then).
+_new_sid
+RUN_PATH="$NO_WATCH_PATH" _run "$EXT_POST" claude "$(_payload "wrap -- git push" "" 0 "")"
+_assert_contains "API: no git-pr-watch: the general reminder names the extension's watcher" "\`wrap watch <pr>\`" "$(_context)"
+
+# Exactly one PR checks reminder per command, wrapped or direct: post-bash's
+# output-evidence reminder runs after extensions and yields to the pass.
+_new_sid
+_run "$EXT_POST" claude "$(_payload "wrap -- git push" "" 0 "$_summary")"
+_assert_eq "one reminder: wrapped push, nothing recorded" 1 "$(_gates)"
+_assert_contains "one reminder: wrapped push, nothing recorded: the pass's, naming its watcher" "\`wrap watch <pr>\`" "$(_context)"
+_assert_eq "one reminder: wrapped push, nothing recorded: the pass reminded" "PASS-RC=0 LABELS= REMINDED=1 ANY=1" "$(_pass_line)"
+_new_sid
+_seed_key o_r_12 1000 o_r https://github.com/o/r/pull/12
+_run "$EXT_POST" claude "$(_payload "wrap -- git push" "" 0 $'To github.com:o/r.git\n   1111111..2222222  main -> main')"
+_assert_eq "one reminder: wrapped push after a record" 1 "$(_gates)"
+_assert_contains "one reminder: wrapped push after a record: the labelled one" "started checks on https://github.com/o/r/pull/12" "$(_context)"
+_new_sid
+_run "$EXT_POST" claude "$(_payload "git push" "" 0 "$_summary")"
+_assert_eq "one reminder: direct push" 1 "$(_gates)"
+_new_sid
+_run "$EXT_POST" claude "$(_payload "cat /tmp/push.log" "" 0 "$_summary")"
+_assert_eq "one reminder: direct cat of a push log" 1 "$(_gates)"
+_run "$EXT_POST" claude "$(_payload "cat /tmp/push.log" "" 0 "$_summary")"
+_assert_eq "direct cat of a push log again in the prompt: no reminder" 0 "$(_gates)"
+_new_sid
+_run "$EXT_POST" claude "$(_payload "git push" "" 0 "$_summary")"
+_run "$EXT_POST" claude "$(_payload "git push" "" 0 "$_summary")"
+_assert_eq "direct push again in the prompt: no reminder" 0 "$(_gates)"
+_new_sid
+_run "$EXT_POST" claude "$(_payload "wrap -- git push" "" 0 "$_summary")"
+_assert_eq "same wrapped push twice in a prompt: one reminder first" 1 "$(_gates)"
+_run "$EXT_POST" claude "$(_payload "wrap -- git push" "" 0 "$_summary")"
+_assert_eq "same wrapped push twice in a prompt: then none" 0 "$(_gates)"
+_assert_eq "same wrapped push twice in a prompt: handled, but the pass did not remind" \
+  "PASS-RC=0 LABELS= REMINDED= ANY=1" "$(_pass_line)"
+_new_sid
+_run "$EXT_POST" claude "$(_payload "wrap2 -- two pushes" "" 0 "")"
+_assert_eq "two passes in one hook process: one reminder" 1 "$(_gates)"
+_assert_contains "two passes in one hook process: the first reminded" "PASS2-FIRST REMINDED=1" "$HOOK_STDERR"
+_assert_contains "two passes in one hook process: the second yielded" "PASS2-SECOND REMINDED= ANY=1" "$HOOK_STDERR"
+_new_sid
+_seed_key o_r_12 1000 o_r
+_run "$POST_BASH" claude "$(_payload "sudo git push" "" 0 $'To github.com:o/r.git\n   1111111..2222222  main -> main')"
+_assert_eq "prefilter: a push behind sudo re-arms" 1 "$([ "$(_key_epoch o_r_12)" != 1000 ] && echo 1)"
+
+echo ""
+echo "=== AGENTGUARD_PR_WATCH_HINT: the <labels> token ==="
+
+WATCH_ENV=("AGENTGUARD_PR_WATCH_HINT=Run team-watch <labels> in the background.")
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr create --fill" "$URL")"
+_assert_contains "hint token: labelled reminder fills in the labels" "Run team-watch $URL in the background." "$(_context)"
+_new_sid
+RUN_PATH="$NO_WATCH_PATH" _run "$POST_BASH" claude "$(_payload "./ship.sh" "" 0 "$_summary")"
+_assert_contains "hint token: general reminder says <pr>" "Run team-watch <pr> in the background." "$(_context)"
+WATCH_ENV=("AGENTGUARD_PR_WATCH_HINT=Run team-watch <labels>; rerun team-watch <labels> after each exit.")
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr create --fill" "$URL")"
+_assert_contains "hint with two tokens: labelled reminder fills both" \
+  "Run team-watch $URL; rerun team-watch $URL after each exit." "$(_context)"
+_new_sid
+RUN_PATH="$NO_WATCH_PATH" _run "$POST_BASH" claude "$(_payload "./ship.sh" "" 0 "$_summary")"
+_assert_contains "hint with two tokens: general reminder fills both with <pr>" \
+  "Run team-watch <pr>; rerun team-watch <pr> after each exit." "$(_context)"
+WATCH_ENV=()
 
 echo ""
 echo "=== post-bash: per-runtime payloads ==="
@@ -334,7 +520,7 @@ _producer_reset
 _new_sid
 _run "$POST_BASH" claude "$(_payload "gh pr ready https://github.com/o/r/pull/12")"
 _assert_eq "no recorded keys: gh pr ready creates no watch state" "" "$(ls "$STATE_ROOT/$SID/watch" 2>/dev/null)"
-_assert_contains "no recorded keys: today's reminder" "gh pr checks <pr>" "$(_context)"
+_assert_contains "no recorded keys: the general reminder, naming git pr-watch" "git pr-watch --wait <pr>" "$(_context)"
 
 echo ""
 echo "=== post-bash: push re-arms ==="
