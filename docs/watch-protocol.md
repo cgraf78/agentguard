@@ -282,7 +282,7 @@ clean; all but the classifier-based ones (marked Bash 4) run under Bash 3.2.
 | `_hook_watch_launch <option>[\|<option>...] <command> [<subcommand>]` | pre-bash only (needs the command classifier): whether the command runs a watcher with one of the options; sets `_HOOK_WATCH_DETACHED` |
 | `_hook_gh_pr_key_scope <url>` | prints `<key> <scope>` for a pull-request URL and sets `_HOOK_GH_PR_KEY`, `_HOOK_GH_PR_SCOPE`, `_HOOK_GH_PR_NUMBER` |
 | `_hook_gh_watch_pass <command-text> <output> <status\|-> <background\|-> [<watch-command>]` | Bash 4. The post-bash watch pass, the same code post-bash runs on the agent's own command: judges `<command-text>` (lines of shell) and, for a successful command, records created pull requests from the bare URL lines in `<output>`, re-arms after `gh pr ready\|reopen\|update-branch` and pushes (a push is also parsed with the hook payload's stderr), and reminds as described above. `<status>` and `<background>` (`1` or `0`) may be `-` to read them from the hook payload. `<watch-command>` (default `git pr-watch --wait`) is what the reminders and the stored hint recommend; recording still needs `git-pr-watch` on `PATH`. Fails, doing nothing, when the text runs no command that starts checks. Skips the general reminder when `_HOOK_GH_WATCH_REMINDED` is already set. Sets `_HOOK_GH_WATCH_LABELS` (labels recorded or re-armed), `_HOOK_GH_WATCH_PASS_REMINDED` (this call reminded; reset at entry), and, after any reminder, `_HOOK_GH_WATCH_REMINDED` |
-| `_hook_gh_checks_reminder [<watch-command>]` | the general reminder alone (hint, else the watch command when it can run, else `gh pr checks`); sets `_HOOK_GH_WATCH_REMINDED`; callers de-duplicate |
+| `_hook_gh_checks_reminder [<watch-command>]` | the general reminder alone (hint, else the watch command when it can run, else `gh pr checks`); sets `_HOOK_GH_WATCH_REMINDED`; callers de-duplicate (see the contract below) |
 | `_hook_gh_push_scopes <output> <command>` | prints the recorded scopes a successful push re-arms, `ALL`, or nothing. `<command>` decides two things: a dry-run, delete, `--no-push`, or help word means nothing re-arms, and only a command with a `push` word re-arms `ALL` when it printed output but no `To` block (blank output re-arms `ALL` for any command). Its words are split on whitespace without honoring quotes, so `-o 'x -n'` reads as `-n` |
 
 An extension that runs pull-request commands through a wrapper should hand
@@ -294,12 +294,25 @@ _hook_load_gh_helpers &&
   _hook_gh_watch_pass "$unwrapped" "$_stdout" - - "wrapper watch"
 ```
 
-The pass gives no general reminder when post-bash (or an earlier pass) in
-the same hook process already gave one, for example for the push summary a
-wrapper printed: `_HOOK_GH_WATCH_REMINDED` is set after any PR checks
-reminder. The labelled reminder after a record or re-arm always fires.
-`_HOOK_GH_WATCH_PASS_REMINDED` says whether this call reminded at all, and
-`_HOOK_GH_WATCH_LABELS` which pull requests it recorded or re-armed.
+The contract with an extension:
+
+- The pass emits its own reminders (the labelled one after a record or
+  re-arm, every time; otherwise the general one, once per prompt per
+  command text), so the extension adds none of its own for those commands.
+- post-bash judges the agent's own command before extensions run, and its
+  output-evidence reminder (a push summary or pull-request URL in an
+  indirect command's output, which a wrapper prints) runs after them, and
+  only when no PR checks reminder was given yet in the hook process: a
+  wrapped push gets one reminder, the pass's.
+- `_HOOK_GH_WATCH_REMINDED` is set by every PR checks reminder, the base's
+  and the pass's, and never reset within the hook process; the pass skips
+  its general reminder when it is set. `_HOOK_GH_WATCH_PASS_REMINDED` says
+  whether the last call reminded (reset at entry), and
+  `_HOOK_GH_WATCH_LABELS` which pull requests it recorded or re-armed.
+- A caller of `_hook_gh_checks_reminder` de-duplicates it itself, as post-bash
+  does: `_hook_once_per_prompt "pr-checks-<cksum of a stable key>"`, the key
+  being `command:<text>` for a command and `output:<evidence lines>` for
+  output.
 
 The lower-level helpers remain for other cases. An extension that records
 by itself uses `_hook_gh_pr_key_scope` plus:

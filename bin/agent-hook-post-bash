@@ -152,6 +152,7 @@ _pr_checks_output_evidence() {
 # The agent's own command first, through the watch pass hook extensions
 # share (_hook_gh_watch_pass in watch-github.sh). The builtin prefilter keeps
 # every other command from loading the library or the classifier.
+_pr_checks_output_pending=''
 if _hook_gh_watch_prefilter "$AGENTGUARD_CMD_TRIMMED" && _hook_load_gh_helpers &&
   _hook_gh_watch_pass "$AGENTGUARD_CMD_TRIMMED" "$_stdout" - -; then
   :
@@ -159,6 +160,20 @@ if _hook_gh_watch_prefilter "$AGENTGUARD_CMD_TRIMMED" && _hook_load_gh_helpers &
 # gh calls are skipped: their bare URLs come from reading or editing a pull
 # request, and a real `gh pr create` was already judged above.
 elif ! [[ "$AGENTGUARD_CMD_TRIMMED" =~ (^|[[:space:];\&\|\(])gh[[:space:]] ]]; then
+  _pr_checks_output_pending=1
+fi
+
+# Let `hm` decide whether this completed tool event changes memory context.
+# The bash hook only passes the observed status/path facts.
+_hook_hm_tool_complete
+_hook_source_extensions
+
+# The output-evidence reminder comes after extensions: an extension that
+# unwraps a wrapper's push runs the watch pass itself, and its reminder (the
+# labelled one after a record or re-arm, or the general one) covers the push
+# summary the wrapper printed. One that already reminded sets
+# _HOOK_GH_WATCH_REMINDED, and the general reminder is not repeated.
+if [ -n "$_pr_checks_output_pending" ] && [ -z "${_HOOK_GH_WATCH_REMINDED:-}" ]; then
   _pr_checks_text="$_stdout"
   # git push writes its summary to stderr; read it only when the raw payload
   # could hold one. A combined Codex or Muse string already carries it, so
@@ -183,9 +198,4 @@ elif ! [[ "$AGENTGUARD_CMD_TRIMMED" =~ (^|[[:space:];\&\|\(])gh[[:space:]] ]]; t
       ;;
   esac
 fi
-
-# Let `hm` decide whether this completed tool event changes memory context.
-# The bash hook only passes the observed status/path facts.
-_hook_hm_tool_complete
-_hook_source_extensions
 _hook_finish
