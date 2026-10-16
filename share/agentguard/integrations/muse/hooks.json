@@ -124,6 +124,15 @@
       {
         "hooks": [
           {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-compact",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
             "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=muse AGENTGUARD_SESSION_ID=\"${MUSE_SESSION_ID:-$PPID}\" agent-hook-telemetry",
             "timeout": 10,
             "type": "command"
