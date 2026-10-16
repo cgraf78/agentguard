@@ -2,25 +2,115 @@
 
 ![Tests](https://github.com/cgraf78/agentguard/actions/workflows/test.yml/badge.svg?branch=main)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Bash Version](https://img.shields.io/badge/bash-%3E%3D4.2-blue.svg)](https://www.gnu.org/software/bash/)
+[![Bash Version](https://img.shields.io/badge/bash-%3E%3D4-blue.svg)](https://www.gnu.org/software/bash/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL-lightgrey.svg)](#)
 
-`agentguard` owns shared helper code and reusable entry points for
-`agent-hook-*` scripts. `shdeps` installs the executable files in `bin/` as
-PATH-visible symlinks.
-The hooks are agent-agnostic and work with Claude Code, Codex, Gemini CLI,
-Grok, Muse, OpenCode, or another tool that follows the same hook protocol.
+**Guardrails and an audit trail for AI coding agents.**
+
+AgentGuard is a set of hook scripts that sit between your coding agent and
+your machine. One implementation covers Claude Code, Codex, Gemini CLI, Grok,
+Muse, and OpenCode, so every agent you run gets the same policy.
+
+- **Before a tool call runs**, it blocks the classic footguns: `rm -rf ~`,
+  `git push --force`, `git reset --hard`, `sudo`, `chmod 777`, edits to `.env`
+  files or SSH keys, and interactive commands that would hang the agent. Each
+  block tells the agent why, and usually what to do instead.
+- **After a tool call**, it warns when command output looks like a leaked
+  credential, and it formats and lints edited files through
+  [sley](https://github.com/cgraf78/sley), so the agent sees findings while it
+  is still working on the file.
+- **Throughout**, it records every prompt, tool call, and guard decision in a
+  local, owner-only audit log that you can replay with
+  `agentguard-telemetry show`.
+
+AgentGuard never edits your agent's configuration. It ships hook fragments
+that you merge yourself; the [quickstart](#quickstart-claude-code) shows how.
+
+This is a personal project, tuned to its author's workflow. The default policy
+is opinionated, so read it before you install.
+
+## Default Policy
+
+| Action | What triggers it |
+| --- | --- |
+| **Block** | `rm -rf` on `/`, `~`, `$HOME`, its parent, `.`, or `..`; `sudo` and `doas`; `git reset --hard`; `git clean -f`; `git push --force` (`--force-with-lease` stays allowed), `--mirror`, and `--prune`; `chmod 777`; `kill` of PID 1, 0, or -1; interactive commands such as editors, `man`, `top`-style monitors, debuggers, and `watch`; edits to `.env`, SSH keys, `*.pem`, `.netrc`, and credential files |
+| **Block (opinionated)** | `grep -r` (use `rg`), tree-walking `find` (use `fd`), and raw `git absorb` (use [`git absorb-and-rebase`](https://github.com/cgraf78/git-tools)) |
+| **Warn** | other `rm -rf`, `kill -9`, `killall`, `pkill`, world-writable `chmod`, a foreground `sleep` of 60 seconds or more (suggests `wait-until`), credentials in command output, and repeated edits to one file (blocked after 10) |
+| **Remind** | review the diff before committing; commit-message format and public-repo leak checks on `git commit`; after a push or `gh pr create`, the pull request is not done until its checks pass (suggests [`git pr-watch`](https://github.com/cgraf78/git-tools) when it is installed) |
+| **After edits** | format and lint edited files with sley and return findings to the agent (`AGENTGUARD_POST_EDIT_LINT=0` turns lint off) |
+| **Record** | every hook event in the [audit log](#audit-telemetry) (`AGENTGUARD_TELEMETRY=0` turns it off) |
+
+[Base Hook Policy](#base-hook-policy) has the full rules. Your own policy goes
+in hook extensions beside the installed hooks; see [`examples/`](examples/).
 
 ## Install
 
+Requirements:
+
+- Bash 4 or newer at a standard path (`/bin/bash`, `/usr/bin/bash`,
+  `/usr/local/bin/bash`, `/opt/homebrew/bin/bash`, or Termux's). Without one,
+  `agent-hook-pre-bash` blocks every shell command; macOS's `/bin/bash` 3.2 is
+  too old, so install Homebrew Bash there. See [Dependencies](#dependencies)
+  for why the path is fixed.
+- `jq`.
+- For post-edit formatting and lint, which are on by default:
+  [sley](https://github.com/cgraf78/sley) and
+  [checkrun](https://github.com/cgraf78/checkrun), plus checkrun's own
+  requirements, [`yq`](https://github.com/mikefarah/yq) and Python 3.11 or
+  newer. Without sley, every edit returns a blocking `sley command missing`
+  error. Without `yq`, every edit reports `autolint: yq is required` as a lint
+  finding.
+
+Install AgentGuard and its post-edit chain, then install `jq` and `yq` with
+your package manager:
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/cgraf78/agentguard/main/install.sh | bash
+for repo in agentguard sley checkrun; do
+  curl -fsSL "https://raw.githubusercontent.com/cgraf78/$repo/main/install.sh" | bash
+done
 ```
 
-This keeps a durable managed checkout under `$XDG_DATA_HOME` when that path is
-absolute, or under `$HOME/.local/share` otherwise, and publishes links to its
-commands and manual pages. Rerunning the curl command safely updates the clean
-managed checkout before republishing the links.
+### Quickstart: Claude Code
+
+The installer puts the hooks on disk but wires them into no agent. This
+merges AgentGuard's Claude Code fragment into `~/.claude/settings.json`,
+keeping your existing settings and hooks and backing up the old file first.
+`AG` is the curl installer's checkout; point it at your own checkout if you
+manage one:
+
+```bash
+AG=${XDG_DATA_HOME:-$HOME/.local/share}/cgraf78/checkouts/agentguard
+INT=$AG/share/agentguard/integrations
+mkdir -p ~/.claude
+[ -f ~/.claude/settings.json ] || echo '{}' > ~/.claude/settings.json
+cp ~/.claude/settings.json ~/.claude/settings.json.bak
+jq -n --arg agent claude \
+  --slurpfile d ~/.claude/settings.json \
+  --slurpfile s "$INT/claude/hooks.json" \
+  -f "$INT/_shared/reconcile-hooks.jq" > ~/.claude/settings.json.new &&
+  mv ~/.claude/settings.json.new ~/.claude/settings.json
+```
+
+Rerun the same commands after each update; reconciliation replaces the
+previous AgentGuard hooks and leaves yours alone. The fragment calls the hooks
+by bare name, so `~/.local/bin` (or your `BIN_DIR`) must be on the `PATH` that
+Claude Code starts with. Start a new session; when the agent tries
+`git push --force`, the hook refuses and tells it why:
+
+```text
+BLOCKED: git push --force rewrites remote history without a lease. Use --force-with-lease for reviewed restacks.
+```
+
+Other runtimes have their own fragments under
+`share/agentguard/integrations/<runtime>/`, each with a README on how to
+consume it; see [Native Agent Integrations](#native-agent-integrations).
+
+### Installer details
+
+The curl installer keeps a durable managed checkout under `$XDG_DATA_HOME`
+when that path is absolute, or under `$HOME/.local/share` otherwise, and
+publishes links to its commands and manual pages. Rerunning the curl command
+safely updates the clean managed checkout before republishing the links.
 
 To choose and manage the checkout yourself instead, keep it at a stable path
 and run:
@@ -39,8 +129,9 @@ Moving or deleting the checkout breaks the installed links.
 The direct command links preserve AgentGuard's secure-launcher boundary and
 allow consumer hook extensions to remain adjacent to the invoked links. The
 installer deliberately leaves `lib/agentguard/` and `share/agentguard/` in the
-checkout and creates no completion tree. Continue to resolve those non-binary
-assets through shdeps, or use their absolute paths in this checkout.
+checkout and creates no completion tree. Use their absolute paths in this
+checkout, or resolve them through [shdeps](https://github.com/cgraf78/shdeps)
+if you use it.
 
 ## Public API
 
@@ -109,8 +200,9 @@ assets through shdeps, or use their absolute paths in this checkout.
   paths without a `--` separator, and `git add -u` is allowed because it
   restages tracked files only.
 
-Source non-binary assets through shdeps so install locations stay under the
-dependency manager's contract:
+Source non-binary assets by their path in the checkout. If you manage
+AgentGuard with [shdeps](https://github.com/cgraf78/shdeps), resolve them
+through it so install locations stay under its contract:
 
 ```bash
 . "$(shdeps dep-file cgraf78/agentguard lib/agentguard/agentguard.sh)"
@@ -233,7 +325,9 @@ filter, compare its output, and prove a second reconciliation is unchanged.
   adapter uses Python 3 and `ps` when available to sweep an entire timed-out
   process session. Python runs in isolated mode from a neutral directory;
   direct process-group cleanup remains the fallback.
-- `cgraf78/sley` is a hard runtime dependency for hooks that format files.
+- [`cgraf78/sley`](https://github.com/cgraf78/sley), which runs
+  [`cgraf78/checkrun`](https://github.com/cgraf78/checkrun), is a hard runtime
+  dependency for hooks that format files.
   `agent-hook-post-edit` invokes the PATH-visible `sley hook format --stdin`
   batch CLI (falling back to `sley hook format-file` per file on older
   sley installs without the batch entry), then `sley hook lint --stdin` on
@@ -310,7 +404,8 @@ Extension scripts are sourced, not executed:
 - `-<agent>` files (for example `-claude`, `-codex`, `-gemini`, `-grok`,
   `-muse`, or `-opencode`) are selected by appending the detected agent name to
   the hook's filename, so any runtime identity can have its own extension.
-- `-work` files are environment-specific overlays.
+- `-work` files are a second, site-local extension slot, for example for an
+  employer's policy.
 
 Each hook emits one JSON response through `_hook_finish`.
 
@@ -524,14 +619,18 @@ To add a new managed agent runtime:
   `agent-hook-notification` plays notifications for host attention events such
   as permission requests.
 
-Hive Memory integration is deliberately centralized behind `hm hook <event>`.
+[Hive Memory](https://github.com/cgraf78/hive-memory) integration is
+deliberately centralized behind `hm hook <event>`.
 The shell hooks pass only event facts: agent id, session id, and the best
 available active path. Store affinity, project resolution, context freshness,
 and refresh policy live in `hm`, so agent-specific or local extension files
-do not need to duplicate memory policy. Normal `hm remember` and `hm note`
-commands run through the dotfiles launcher, which adds active agent/session
-environment so `hm` can write receipts and later clear pending-memory reminders
-after a successful tool event.
+do not need to duplicate memory policy. Clearing a pending-memory reminder
+needs one more piece that AgentGuard does not ship: a launcher or wrapper that
+exports `HIVE_MEMORY_AGENT_ID` and `HIVE_MEMORY_SESSION_ID` into the agent's
+tool shell, matching the agent name and session key the hooks pass to
+`hm hook`. With them, `hm remember` and `hm note` write receipts that clear the
+reminder after the next successful tool event. Without them, the memory is
+still written, but the reminder can repeat.
 When an agent session is launched from `$HOME`, AgentGuard treats that as "no
 active project" rather than passing home as a project hint. Explicit file paths
 under `$HOME` still pass through, so one long-lived session can work across many
