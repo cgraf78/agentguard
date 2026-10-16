@@ -539,10 +539,11 @@ model can still see, for example when a session moves back to a project it
 already received context for. This is safe only because every way these hosts
 lose context is reported:
 
-- `agent-hook-compact` (PreCompact, Claude Code and Codex) and SessionStart
-  with `source` `compact`, `clear`, or `resume` start a new context epoch, and
-  SessionStart re-injects. Muse compaction keeps session-start context and
-  Muse prompt context never outlives its turn, so Muse needs no reset there.
+- `agent-hook-compact` (PreCompact: Claude Code, Codex, and Muse) and
+  SessionStart with `source` `compact`, `clear`, or `resume` start a new
+  context epoch, and SessionStart re-injects. Muse compaction keeps
+  session-start context and Muse prompt context never outlives its turn,
+  so Muse keeps its epoch there.
 - A reset that fails leaves a marker so the next prompt resets first.
 - AgentGuard passes each host's context lifetime (Muse drops prompt context
   every turn) and size limit (Claude shows at most 10,000 characters of hook
