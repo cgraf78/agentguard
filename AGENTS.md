@@ -26,7 +26,7 @@ protocol). AgentGuard never mutates an agent's configuration.
   edits, run `support/sync-hook-bootstrap`; the test runner's `--check`
   rejects stale copies.
 - README is user-facing; contracts live in `docs/telemetry.md` and
-  `docs/watch-protocol.md`. No plan or spec scratch under `docs/`.
+  `docs/watch-protocol.md`. Don't add plan or spec scratch under `docs/`.
 
 ## Invariants
 

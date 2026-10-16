@@ -35,7 +35,7 @@ is opinionated, so read it before you install.
 | --- | --- |
 | **Block** | `rm -rf` on `/`, `~`, `$HOME`, its parent, `.`, or `..`; `sudo` and `doas`; `git reset --hard`; `git clean -f`; `git push --force` (`--force-with-lease` stays allowed), `--mirror`, and `--prune`; `chmod 777`; `kill` of PID 1, 0, or -1; interactive commands such as editors, `man`, `top`-style monitors, debuggers, and `watch`; edits to `.env`, SSH keys, `*.pem`, `.netrc`, and credential files |
 | **Block (opinionated)** | `grep -r` (use `rg`), tree-walking `find` (use `fd`), and raw `git absorb` (use [`git absorb-and-rebase`](https://github.com/cgraf78/git-tools)) |
-| **Warn** | other `rm -rf`, `kill -9`, `killall`, `pkill`, world-writable `chmod`, a foreground `sleep` of 60 seconds or more (suggests `wait-until`), credentials in command output, and repeated edits to one file (blocked after 10) |
+| **Warn** | other `rm -rf`, `kill -9`, `killall`, `pkill`, world-writable `chmod`, a foreground `sleep` of 60 seconds or more (suggests `wait-until`, which ships with AgentGuard), credentials in command output, and repeated edits to one file (blocked after 10) |
 | **Remind** | review the diff before committing; commit-message format and public-repo leak checks on `git commit`; after a push or `gh pr create`, the pull request is not done until its checks pass (suggests [`git pr-watch`](https://github.com/cgraf78/git-tools) when it is installed) |
 | **After edits** | format and lint edited files with sley and return findings to the agent (`AGENTGUARD_POST_EDIT_LINT=0` turns lint off) |
 | **Record** | every hook event in the [audit log](#audit-telemetry) (`AGENTGUARD_TELEMETRY=0` turns it off) |
@@ -53,8 +53,8 @@ Requirements:
   too old, so install Homebrew Bash there. See [Dependencies](#dependencies)
   for why the path is fixed.
 - `jq`.
-- For post-edit formatting and lint, which are on by default:
-  [sley](https://github.com/cgraf78/sley) and
+- For post-edit formatting, which is always on, and lint, which is on by
+  default: [sley](https://github.com/cgraf78/sley) and
   [checkrun](https://github.com/cgraf78/checkrun), plus checkrun's own
   requirements, [`yq`](https://github.com/mikefarah/yq) and Python 3.11 or
   newer. Without sley, every edit returns a blocking `sley command missing`
@@ -74,7 +74,8 @@ done
 
 The installer puts the hooks on disk but wires them into no agent. This
 merges AgentGuard's Claude Code fragment into `~/.claude/settings.json`,
-keeping your existing settings and hooks and backing up the old file first.
+keeping your existing settings and hooks and backing up the original file
+the first time.
 `AG` is the curl installer's checkout; point it at your own checkout if you
 manage one:
 
@@ -83,7 +84,7 @@ AG=${XDG_DATA_HOME:-$HOME/.local/share}/cgraf78/checkouts/agentguard
 INT=$AG/share/agentguard/integrations
 mkdir -p ~/.claude
 [ -f ~/.claude/settings.json ] || echo '{}' > ~/.claude/settings.json
-cp ~/.claude/settings.json ~/.claude/settings.json.bak
+[ -e ~/.claude/settings.json.bak ] || cp ~/.claude/settings.json ~/.claude/settings.json.bak
 jq -n --arg agent claude \
   --slurpfile d ~/.claude/settings.json \
   --slurpfile s "$INT/claude/hooks.json" \
