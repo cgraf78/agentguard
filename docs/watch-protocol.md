@@ -254,14 +254,20 @@ missed one, and the producer's push-race guard covers an early check).
   recommends `git pr-watch --wait <labels>`, one command per repository
   because the command accepts only pull requests of the checkout it runs in
   (or `AGENTGUARD_PR_WATCH_HINT` instead), every time: each record or re-arm
-  is new work. Otherwise the general PR checks reminder is unchanged,
-  including its once-per-prompt de-duplication.
+  is new work. Otherwise (nothing recorded or re-armed, or only a push
+  summary or URL in the output of an indirect command) the general reminder
+  fires once per prompt per command or output: it names
+  `AGENTGUARD_PR_WATCH_HINT` when set, else `git pr-watch --wait <pr>` with
+  the runtime's background advice when `git-pr-watch` is on `PATH`, else
+  `gh pr checks <pr> --repo <owner/repo> --watch --fail-fast`.
 
 ## API for hook extensions
 
-Load the helpers with `_hook_load_watch` (engine) or `_hook_load_watch_github`
-(engine plus GitHub helpers) from `hook-helpers.sh`. All functions return
-instead of exiting, run under Bash 3.2, and are `set -u` clean.
+Load the helpers with `_hook_load_watch` (engine), `_hook_load_watch_github`
+(engine plus GitHub helpers), or `_hook_load_gh_helpers` (GitHub helpers
+alone; `_hook_gh_watch_pass` loads the engine when it needs it) from
+`hook-helpers.sh`. All functions return instead of exiting and are `set -u`
+clean; all but the classifier-based ones (marked Bash 4) run under Bash 3.2.
 
 | Function | Purpose |
 | --- | --- |
@@ -273,10 +279,21 @@ instead of exiting, run under Bash 3.2, and are `set -u` clean.
 | `_hook_watch_claim_block <tool-dir> <key>` | claims the one Stop block per record or re-arm |
 | `_hook_watch_launch <option>[\|<option>...] <command> [<subcommand>]` | pre-bash only (needs the command classifier): whether the command runs a watcher with one of the options; sets `_HOOK_WATCH_DETACHED` |
 | `_hook_gh_pr_key_scope <url>` | prints `<key> <scope>` for a pull-request URL and sets `_HOOK_GH_PR_KEY`, `_HOOK_GH_PR_SCOPE`, `_HOOK_GH_PR_NUMBER` |
+| `_hook_gh_watch_pass <command-text> <output> <status\|-> <background\|-> [<watch-command>]` | Bash 4. The post-bash watch pass, the same code post-bash runs on the agent's own command: judges `<command-text>` (lines of shell) and, for a successful command, records created pull requests from the bare URL lines in `<output>`, re-arms after `gh pr ready\|reopen\|update-branch` and pushes (a push is also parsed with the hook payload's stderr), and reminds as described above. `<status>` and `<background>` (`1` or `0`) may be `-` to read them from the hook payload. `<watch-command>` (default `git pr-watch --wait`) is what the reminders and the stored hint recommend; recording still needs `git-pr-watch` on `PATH`. Fails, doing nothing, when the text runs no command that starts checks. Sets `_HOOK_GH_WATCH_LABELS` (labels recorded or re-armed) and, after any reminder, `_HOOK_GH_WATCH_REMINDED` |
+| `_hook_gh_checks_reminder [<watch-command>]` | the general reminder alone (hint, else the watch command when it can run, else `gh pr checks`); sets `_HOOK_GH_WATCH_REMINDED`; callers de-duplicate |
 | `_hook_gh_push_scopes <output> <command>` | prints the recorded scopes a successful push re-arms, `ALL`, or nothing. `<command>` decides two things: a dry-run, delete, `--no-push`, or help word means nothing re-arms, and only a command with a `push` word re-arms `ALL` when it printed output but no `To` block (blank output re-arms `ALL` for any command). Its words are split on whitespace without honoring quotes, so `-o 'x -n'` reads as `-n` |
 
-An extension that wraps pull-request creation records with
-`_hook_gh_pr_key_scope` plus:
+An extension that runs pull-request commands through a wrapper should hand
+the unwrapped commands to the watch pass, which keeps it in step with
+post-bash:
+
+```bash
+_hook_load_gh_helpers &&
+  _hook_gh_watch_pass "$unwrapped" "$_stdout" - - "wrapper watch"
+```
+
+The lower-level helpers remain for other cases. An extension that records
+by itself uses `_hook_gh_pr_key_scope` plus:
 
 ```bash
 _hook_watch_record "$_HOOK_GH_PR_TOOL_DIR" "$_HOOK_GH_PR_KEY" \

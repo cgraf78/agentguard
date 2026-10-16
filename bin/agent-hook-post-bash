@@ -137,320 +137,24 @@ fi
 # re-arms recorded ones, so the Stop hook can tell when nobody watches them.
 # docs/watch-protocol.md describes the rules.
 
-# Whether a git push fragment updates remote refs: dry runs, deletions
-# (`--delete`, `-d`, clustered short flags, `:ref` refspecs), and usage
-# requests do not.
-_pr_checks_git_push_updates() {
-  local fragment="$1" word index
-  local -a words=()
-  _fragment_token_words "$fragment" words
-  _git_subcommand_index "$fragment" push index || return 1
-  for ((index++; index < ${#words[@]}; index++)); do
-    _clean_command_word "${words[$index]}" word
-    case "$word" in
-      --) break ;;
-      --dry-run | --delete | --help | -h | :?*) return 1 ;;
-      --*) ;;
-      -*n* | -*d*) return 1 ;;
-    esac
-  done
-  return 0
-}
-
-# Whether a gh fragment runs a pull-request subcommand that pushes or opens a
-# pull request for review: create (or its alias new), ready, reopen, or
-# update-branch, judged by the word in subcommand position rather than
-# anywhere in the text. Stores that subcommand in _PR_CHECKS_GH_SUB.
-_pr_checks_gh_pr_starts_checks() {
-  local fragment="$1" word index
-  local -a words=()
-  _PR_CHECKS_GH_SUB=''
-  _fragment_token_words "$fragment" words
-  _command_subcommand_index "$fragment" gh pr index || return 1
-  for ((index++; index < ${#words[@]}; index++)); do
-    _clean_command_word "${words[$index]}" word
-    case "$word" in
-      -R | --repo) ((index++)) ;;
-      -*) ;;
-      create | new)
-        _command_subcommand_has_option "$fragment" gh pr --dry-run && return 1
-        _PR_CHECKS_GH_SUB=create
-        return 0
-        ;;
-      ready)
-        _command_subcommand_has_option "$fragment" gh pr --undo && return 1
-        _PR_CHECKS_GH_SUB=ready
-        return 0
-        ;;
-      reopen | update-branch)
-        _PR_CHECKS_GH_SUB="$word"
-        return 0
-        ;;
-      *) return 1 ;;
-    esac
-  done
-  return 1
-}
-
-# Store the target of a `gh pr ready|reopen|update-branch` fragment as
-# "<repo> <arg>" in _PR_CHECKS_GH_TARGET: the `-R`/`--repo` value anywhere
-# after gh (or `-`) and the first positional after the subcommand (or `-`).
-_pr_checks_gh_target() {
-  local fragment="$1" word index sub_seen=0 repo=- arg=-
-  local -a words=()
-  _fragment_token_words "$fragment" words
-  _fragment_command_index "$fragment" index || return 1
-  for ((index++; index < ${#words[@]}; index++)); do
-    _clean_command_word "${words[$index]}" word
-    case "$word" in
-      --) break ;;
-      -R | --repo)
-        ((index++))
-        _clean_command_word "${words[$index]:-}" repo
-        ;;
-      -R?*) repo="${word#-R}" ;;
-      --repo=*) repo="${word#--repo=}" ;;
-      # `gh pr reopen --comment <text>`: the text is not the target.
-      -c | --comment) ((index++)) ;;
-      -*) ;;
-      pr) [ "$sub_seen" -gt 0 ] || sub_seen=1 ;;
-      *)
-        if [ "$sub_seen" = 1 ]; then
-          sub_seen=2
-        elif [ "$sub_seen" = 2 ] && [ "$arg" = - ]; then
-          arg="$word"
-        fi
-        ;;
-    esac
-  done
-  _PR_CHECKS_GH_TARGET="${repo:--} ${arg:--}"
-}
-
-# Whether a git fragment runs subcommand $2 for real: not a dry run, not
-# `--no-push`, and not a usage request.
-_pr_checks_git_runs() {
-  local fragment="$1" sub="$2" word index
-  local -a words=()
-  _fragment_token_words "$fragment" words
-  if ! _git_subcommand_index "$fragment" "$sub" index; then
-    _fragment_command_index "$fragment" index || return 1
-    _clean_command_word "${words[$index]}" word
-    [ "${word##*/}" = "git-$sub" ] || return 1
-  fi
-  for ((index++; index < ${#words[@]}; index++)); do
-    _clean_command_word "${words[$index]}" word
-    case "$word" in
-      --) break ;;
-      -n | --dry-run | --no-push | -h | --help) return 1 ;;
-    esac
-  done
-  return 0
-}
-
-# Classifies the command's fragments. Sets _pr_checks_creates (a pull request
-# was created: `gh pr create`, `git pr-open`, `git pr-submit`), _pr_checks_push
-# (a push: `git push`, `git pr-restack`, `git pr-sync-stack`, keeping its
-# fragment in _pr_checks_push_fragment), and _pr_checks_gh_targets (one
-# "<repo> <arg>" per `gh pr ready|reopen|update-branch`). Succeeds when any
-# of them started checks.
-_pr_checks_command_pushed() {
-  local fragment found=1
-  _hook_load_command_classifier || return 1
-  while IFS= read -r fragment; do
-    if _git_subcommand_is "$fragment" push; then
-      if _pr_checks_git_push_updates "$fragment"; then
-        _pr_checks_push=1
-        _pr_checks_push_fragment="${_pr_checks_push_fragment:-$fragment}"
-        found=0
-      fi
-    elif _command_subcommand_is "$fragment" gh pr; then
-      _pr_checks_gh_pr_starts_checks "$fragment" || continue
-      found=0
-      if [ "$_PR_CHECKS_GH_SUB" = create ]; then
-        _pr_checks_creates=1
-      elif _pr_checks_gh_target "$fragment"; then
-        _pr_checks_gh_targets+=("$_PR_CHECKS_GH_TARGET")
-      fi
-    else
-      # A builtin match first: tokenizing every other fragment four more
-      # times would slow long scripts that end in a push.
-      case "$fragment" in
-        *pr-open* | *pr-submit*)
-          if _pr_checks_git_runs "$fragment" pr-open || _pr_checks_git_runs "$fragment" pr-submit; then
-            _pr_checks_creates=1
-            found=0
-          fi
-          ;;
-        *pr-restack* | *pr-sync-stack*)
-          if _pr_checks_git_runs "$fragment" pr-restack || _pr_checks_git_runs "$fragment" pr-sync-stack; then
-            _pr_checks_push=1
-            _pr_checks_push_fragment="${_pr_checks_push_fragment:-$fragment}"
-            found=0
-          fi
-          ;;
-      esac
-    fi
-  done < <(_hook_executable_fragments "$AGENTGUARD_CMD_TRIMMED")
-  return "$found"
-}
-
 # Prints the push evidence in `$1`: a bare pull-request URL line (any host),
 # or the ref-update lines of a push summary (`To <remote>` followed by `*
 # [new branch] HEAD -> x`, `abc..def main -> main`, or a forced `+` update).
 # Rejected, up-to-date, and deleted refs carry no `->` update and print nothing.
 _pr_checks_output_evidence() {
   printf '%s\n' "$1" |
-    grep -E "^$_pr_checks_url_re"
+    grep -E "^$_HOOK_GH_PR_URL_RE"
   printf '%s\n' "$1" | grep -qE '^To [^[:space:]]+[[:space:]]*$' &&
     printf '%s\n' "$1" |
     grep -E '^[[:space:]]+([*+]|[0-9a-f]{7,}\.\.\.?[0-9a-f]{7,})[[:space:]].* -> [^[:space:]]+'
 }
 
-# Records each pull request whose bare URL line the command printed and
-# appends its label to _pr_checks_labels. Only with `git pr-watch` installed:
-# without a watcher the obligation could never be met.
-_pr_checks_record() {
-  local line
-  command -v "$_HOOK_GH_PR_WATCH_ARGV" >/dev/null 2>&1 || return 0
-  while IFS= read -r line; do
-    [[ "$line" =~ ^$_pr_checks_url_re ]] || continue
-    line="${line%%[[:space:]]*}"
-    _hook_gh_pr_key_scope "$line" >/dev/null || continue
-    _hook_watch_record "$_HOOK_GH_PR_TOOL_DIR" "$_HOOK_GH_PR_KEY" "$_HOOK_GH_PR_SCOPE" \
-      "$_HOOK_GH_PR_WATCH_ARGV" "$line" "$_pr_checks_hint" &&
-      _pr_checks_labels="$_pr_checks_labels $line"
-  done <<<"$_stdout"
-}
-
-# Stores in _pr_checks_commands one `git pr-watch --wait` command per
-# repository for the labels in _pr_checks_labels: the command accepts only
-# pull requests of the checkout it runs in, so labels from two repositories
-# need two commands (each run from a checkout of its repository).
-_pr_checks_watch_commands() {
-  local label scope index map=' ' commands='' i
-  local -a labels=() group_labels=()
-  read -r -a labels <<<"$_pr_checks_labels"
-  # One pass: each label's scope is computed once, and " <scope>=<index> "
-  # entries in map find its group by a builtin match.
-  for label in ${labels[@]+"${labels[@]}"}; do
-    scope=-
-    _hook_gh_pr_key_scope "$label" >/dev/null && scope="$_HOOK_GH_PR_SCOPE"
-    case "$map" in
-      *" $scope="*)
-        index="${map#* "$scope"=}"
-        index="${index%% *}"
-        group_labels[index]="${group_labels[index]} $label"
-        ;;
-      *)
-        index="${#group_labels[@]}"
-        group_labels[index]=" $label"
-        map="$map$scope=$index "
-        ;;
-    esac
-  done
-  for ((i = 0; i < ${#group_labels[@]}; i++)); do
-    commands="$commands${commands:+ and }\`git pr-watch --wait${group_labels[i]}\`"
-  done
-  [ "${#group_labels[@]}" -le 1 ] || commands="$commands, each from a checkout of its repository"
-  _pr_checks_commands="$commands"
-}
-
-# Appends the labels a re-arm printed (one per line) to _pr_checks_labels.
-_pr_checks_add_labels() {
-  local label
-  while IFS= read -r label; do
-    [ -n "$label" ] || continue
-    case " $_pr_checks_labels " in
-      *" $label "*) ;;
-      *) _pr_checks_labels="$_pr_checks_labels $label" ;;
-    esac
-  done <<<"$1"
-}
-
-# Re-arms recorded pull requests a `gh pr ready|reopen|update-branch` named:
-# a URL, or `-R owner/repo` (or host/owner/repo) plus a number, names one
-# key; a bare number names every recorded key of that number (how a closed
-# pull request is revived on reopen); a branch or no argument re-arms all.
-_pr_checks_rearm_gh() {
-  local target repo arg key owner name
-  for target in ${_pr_checks_gh_targets[@]+"${_pr_checks_gh_targets[@]}"}; do
-    repo="${target%% *}"
-    arg="${target#* }"
-    arg="${arg#\#}"
-    if _hook_gh_pr_key_scope "$arg" >/dev/null; then
-      _pr_checks_add_labels "$(_hook_watch_rearm_key "$_HOOK_GH_PR_TOOL_DIR" "$_HOOK_GH_PR_KEY")"
-    elif [[ "$arg" =~ ^[1-9][0-9]*$ ]]; then
-      if [ "$repo" != - ]; then
-        name="${repo##*/}"
-        owner="${repo%/*}"
-        owner="${owner##*/}"
-        if ! _hook_gh_owner_repo_ok "$owner" "$name"; then
-          continue
-        fi
-        _hook_gh_lower key "${owner}_${name}_$arg"
-        _pr_checks_add_labels "$(_hook_watch_rearm_key "$_HOOK_GH_PR_TOOL_DIR" "$key")"
-      else
-        while read -r key _; do
-          [[ "$key" == *"_$arg" ]] || continue
-          _pr_checks_add_labels "$(_hook_watch_rearm_key "$_HOOK_GH_PR_TOOL_DIR" "$key")"
-        done < <(_hook_watch_list "$_HOOK_GH_PR_TOOL_DIR")
-      fi
-    else
-      _pr_checks_add_labels "$(_hook_watch_rearm "$_HOOK_GH_PR_TOOL_DIR" ALL)"
-    fi
-  done
-}
-
-# Re-arms recorded pull requests a successful push updated (see
-# _hook_gh_push_scopes). Push summaries go to stderr, so read both streams; a
-# combined Codex or Muse string already holds them.
-_pr_checks_rearm_push() {
-  local text="$_stdout" scope scopes=()
-  # stderr: the same setlocale warning as the credential prefilter.
-  _hook_tool_response_is_string 2>/dev/null || text="$text"$'\n'"$(_hook_tool_stderr)"
-  while IFS= read -r scope; do
-    [ -n "$scope" ] && scopes+=("$scope")
-  done < <(_hook_gh_push_scopes "$text" "$_pr_checks_push_fragment")
-  [ "${#scopes[@]}" -gt 0 ] || return 0
-  _pr_checks_add_labels "$(_hook_watch_rearm "$_HOOK_GH_PR_TOOL_DIR" "${scopes[@]}")"
-}
-
-_pr_checks_key=''
-_pr_checks_creates=''
-_pr_checks_push=''
-_pr_checks_push_fragment=''
-_pr_checks_gh_targets=()
-_pr_checks_labels=''
-# A bare pull-request URL line from any GitHub host. Host, owner, and
-# repository are limited to name characters: a recorded URL is echoed into a
-# suggested command.
-_pr_checks_url_re='https://[A-Za-z0-9.-]+/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/[0-9]+[[:space:]]*$'
-# In-process prefilters keep every other command free of extra subprocesses:
-# only `git ... push`, `git ... pr-open|pr-submit|pr-restack|pr-sync-stack`
-# (or its dashed `git-pr-*` form), or `gh ... pr` in command position (line
-# start or after a shell separator or quote, optionally behind assignments or
-# common wrappers) loads the classifier, so long text that merely mentions
-# the words stays cheap.
-_pr_checks_separators=$';&|(`"\'\n'
-_pr_checks_wrappers='[[:alpha:]_][[:alnum:]_]*=[^[:space:]]*|sudo|env|command|nohup|exec|xargs|timeout[[:blank:]]+[^[:space:]]+'
-_pr_checks_lead="(^|[${_pr_checks_separators}]|\\\$\\()[[:blank:]]*((${_pr_checks_wrappers})[[:blank:]]+)*"
-_pr_checks_git_push="${_pr_checks_lead}git([[:blank:]]+[^[:space:]]+)*[[:blank:]]+push([[:space:]]|$)"
-_pr_checks_git_pr="${_pr_checks_lead}(git([[:blank:]]+[^[:space:]]+)*[[:blank:]]+|([^[:space:]]*/)?git-)pr-(open|submit|restack|sync-stack)([[:space:]]|$)"
-_pr_checks_gh_pr="${_pr_checks_lead}gh([[:blank:]]+[^[:space:]]+)*[[:blank:]]+pr[[:space:]]"
-# Whether the command runs a `git pr-*` stack command in command position. A
-# builtin substring match first: the position regex costs milliseconds on a
-# long command, and almost no command names these.
-_pr_checks_mentions_git_pr() {
-  case "$AGENTGUARD_CMD_TRIMMED" in
-    *pr-open* | *pr-submit* | *pr-restack* | *pr-sync-stack*) ;;
-    *) return 1 ;;
-  esac
-  [[ "$AGENTGUARD_CMD_TRIMMED" =~ $_pr_checks_git_pr ]]
-}
-if { [[ "$AGENTGUARD_CMD_TRIMMED" =~ $_pr_checks_git_push ]] || _pr_checks_mentions_git_pr ||
-  [[ "$AGENTGUARD_CMD_TRIMMED" =~ $_pr_checks_gh_pr ]]; } &&
-  _pr_checks_command_pushed; then
-  _pr_checks_key="command:$AGENTGUARD_CMD_TRIMMED"
+# The agent's own command first, through the watch pass hook extensions
+# share (_hook_gh_watch_pass in watch-github.sh). The builtin prefilter keeps
+# every other command from loading the library or the classifier.
+if _hook_gh_watch_prefilter "$AGENTGUARD_CMD_TRIMMED" && _hook_load_gh_helpers &&
+  _hook_gh_watch_pass "$AGENTGUARD_CMD_TRIMMED" "$_stdout" - -; then
+  :
 # Output evidence covers pushes run indirectly. Commands that are themselves
 # gh calls are skipped: their bare URLs come from reading or editing a pull
 # request, and a real `gh pr create` was already judged above.
@@ -469,66 +173,15 @@ elif ! [[ "$AGENTGUARD_CMD_TRIMMED" =~ (^|[[:space:];\&\|\(])gh[[:space:]] ]]; t
   case "$_pr_checks_text" in
     */pull/* | *" -> "*)
       _pr_checks_evidence=$(_pr_checks_output_evidence "$_pr_checks_text")
-      [ -n "$_pr_checks_evidence" ] && _pr_checks_key="output:$_pr_checks_evidence"
+      # Remind once per prompt for the same push: re-reading a captured pane
+      # or log while monitoring must not repeat the reminder.
+      if [ -n "$_pr_checks_evidence" ] && [ "$(_hook_hm_tool_status)" = "0" ] &&
+        _hook_once_per_prompt "pr-checks-$(printf '%s' "output:$_pr_checks_evidence" | cksum | tr -d ' ')" &&
+        _hook_load_gh_helpers; then
+        _hook_gh_checks_reminder
+      fi
       ;;
   esac
-fi
-if [ -n "$_pr_checks_key" ] && [ "$(_hook_hm_tool_status)" = "0" ]; then
-  # Only a successful command-position create, push, or gh re-arm feeds the
-  # watch obligations; AGENTGUARD_WATCH=0 turns them off. Push parsing runs
-  # only once this session has recorded something to re-arm.
-  # A call the host runs in the background (Claude Code run_in_background,
-  # a Muse background shell) reports here before the command has done
-  # anything: it records nothing (no URL yet), and a push re-arms every
-  # recorded pull request rather than none, since a nuisance re-arm beats a
-  # missed one and the producer's push-race guard covers an early check.
-  if [ "${_pr_checks_key%%:*}" = command ] && ! _hook_flag_disabled "${AGENTGUARD_WATCH:-}" &&
-    { [ -n "$_pr_checks_creates" ] || [ "${#_pr_checks_gh_targets[@]}" -gt 0 ] ||
-      { [ -n "$_pr_checks_push" ] && [ -d "$_HOOK_STATE_DIR/watch" ]; }; } &&
-    _hook_load_watch_github; then
-    _pr_checks_background=''
-    if _hook_tool_runs_in_background; then
-      _pr_checks_background=1
-      _pr_checks_creates=''
-      _pr_checks_gh_targets=()
-    fi
-    # The hint is free text the Stop hook repeats: how to start a watcher.
-    # shellcheck disable=SC2016 # Backticks are literal Markdown for the agent.
-    # A `<labels>` token in it is replaced by the pull requests a message names.
-    _pr_checks_hint="${AGENTGUARD_PR_WATCH_HINT:-Run \`git pr-watch --wait <labels>\` in the background (one run per repository, from its checkout) and act on its result when it exits.}"
-    [ -z "$_pr_checks_creates" ] || _pr_checks_record
-    [ -d "$_HOOK_STATE_DIR/watch" ] || _pr_checks_gh_targets=()
-    _pr_checks_rearm_gh
-    if [ -n "$_pr_checks_push" ] && [ -d "$_HOOK_STATE_DIR/watch" ]; then
-      if [ -n "$_pr_checks_background" ]; then
-        _pr_checks_add_labels "$(_hook_watch_rearm "$_HOOK_GH_PR_TOOL_DIR" ALL)"
-      else
-        _pr_checks_rearm_push
-      fi
-    fi
-  fi
-  if [ -n "$_pr_checks_labels" ]; then
-    # Every record or re-arm is new work, so it always reminds, even when the
-    # same command ran earlier in the prompt.
-    _pr_checks_labels="${_pr_checks_labels# }"
-    if [ -n "${AGENTGUARD_PR_WATCH_HINT:-}" ]; then
-      _hook_remind "PR checks gate: this started checks on $_pr_checks_labels, which is not done or green until they pass on the pushed commit. $AGENTGUARD_PR_WATCH_HINT"
-    else
-      _pr_checks_watch_commands
-      _pr_checks_agent=''
-      _hook_agent_name _pr_checks_agent
-      if [ "$_pr_checks_agent" = claude ]; then
-        _pr_checks_background_advice='Claude Code: run_in_background: true'
-      else
-        _pr_checks_background_advice="your shell tool's background or yield option"
-      fi
-      _hook_remind "PR checks gate: this started checks on $_pr_checks_labels, which is not done or green until they pass on the pushed commit. Watch them in the background with $_pr_checks_commands ($_pr_checks_background_advice; never \`&\`, nohup, setsid, or disown) and act on its result when it exits; report pending or failing checks instead of calling it green. Restart it after every exit until it reports done, unless it reports a stall (report that instead); a foreground run is killed at the tool timeout and silently stops watching."
-    fi
-  # Otherwise remind once per prompt for the same push: re-reading a captured
-  # pane or log while monitoring must not repeat the reminder.
-  elif _hook_once_per_prompt "pr-checks-$(printf '%s' "$_pr_checks_key" | cksum | tr -d ' ')"; then
-    _hook_remind "PR checks gate: if this pushed or opened a GitHub pull request, it is not done or green until its checks pass on the pushed commit. Watch them in the background (\`gh pr checks <pr> --repo <owner/repo> --watch --fail-fast\`) and report pending or failing checks instead of calling it green."
-  fi
 fi
 
 # Let `hm` decide whether this completed tool event changes memory context.

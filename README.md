@@ -449,8 +449,12 @@ To add a new managed agent runtime:
   GitHub host. When `git pr-watch` is installed, creating a pull request
   records it as a watch obligation for the session, a later push or
   `gh pr ready|reopen|update-branch` re-arms it, and the reminder recommends
-  `git pr-watch --wait <pull requests>` (`AGENTGUARD_PR_WATCH_HINT` replaces
-  that advice; `AGENTGUARD_WATCH=0` turns obligations off). See
+  `git pr-watch --wait <pull requests>`; with nothing recorded, the general
+  reminder recommends `git pr-watch --wait <pr>` too, falling back to
+  `gh pr checks --watch` only without `git pr-watch`
+  (`AGENTGUARD_PR_WATCH_HINT` replaces that advice everywhere;
+  `AGENTGUARD_WATCH=0` turns obligations off). Hook extensions that unwrap
+  commands run the same pass through `_hook_gh_watch_pass`. See
   [`docs/watch-protocol.md`](docs/watch-protocol.md). Output extraction is
   centralized so agent-specific payload names do not leak into the base hook:
   it reads Claude-style output objects, Codex's combined output string, and

@@ -1667,11 +1667,51 @@ _hook_load_watch() {
 }
 
 _hook_load_watch_github() {
+  _hook_load_watch && _hook_load_gh_helpers
+}
+
+# The GitHub helpers alone: post-bash's watch pass loads the engine itself
+# only once a command really pushed or opened a pull request, so a
+# prefilter match that turns out to be `gh pr view` parses less.
+_hook_load_gh_helpers() {
   declare -F _hook_gh_pr_key_scope >/dev/null && return 0
-  _hook_load_watch || return 1
   # shellcheck source=watch-github.sh
   # shellcheck disable=SC1091 # sibling module resolved from this file's dir.
   source "$_AGENTGUARD_LIB_DIR/watch-github.sh"
+}
+
+# Pull-request checks prefilters, shared by post-bash and the watch pass in
+# watch-github.sh (_hook_gh_watch_pass). They live here, outside the lazily
+# loaded library, so a command that matches none of them never loads it:
+# only `git ... push`, `git ... pr-open|pr-submit|pr-restack|pr-sync-stack`
+# (or its dashed `git-pr-*` form), or `gh ... pr` in command position (line
+# start or after a shell separator or quote, optionally behind assignments
+# or common wrappers) goes on to the command classifier, so long text that
+# merely mentions the words stays cheap.
+# A bare pull-request URL line from any GitHub host. Host, owner, and
+# repository are limited to name characters: a recorded URL is echoed into a
+# suggested command.
+_HOOK_GH_PR_URL_RE='https://[A-Za-z0-9.-]+/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/pull/[0-9]+[[:space:]]*$'
+_hook_gh_prefilter_separators=$';&|(`"\'\n'
+_hook_gh_prefilter_wrappers='[[:alpha:]_][[:alnum:]_]*=[^[:space:]]*|sudo|env|command|nohup|exec|xargs|timeout[[:blank:]]+[^[:space:]]+'
+_hook_gh_prefilter_lead="(^|[${_hook_gh_prefilter_separators}]|\\\$\\()[[:blank:]]*((${_hook_gh_prefilter_wrappers})[[:blank:]]+)*"
+_HOOK_GH_PREFILTER_GIT_PUSH="${_hook_gh_prefilter_lead}git([[:blank:]]+[^[:space:]]+)*[[:blank:]]+push([[:space:]]|$)"
+_HOOK_GH_PREFILTER_GIT_PR="${_hook_gh_prefilter_lead}(git([[:blank:]]+[^[:space:]]+)*[[:blank:]]+|([^[:space:]]*/)?git-)pr-(open|submit|restack|sync-stack)([[:space:]]|$)"
+_HOOK_GH_PREFILTER_GH_PR="${_hook_gh_prefilter_lead}gh([[:blank:]]+[^[:space:]]+)*[[:blank:]]+pr[[:space:]]"
+unset _hook_gh_prefilter_separators _hook_gh_prefilter_wrappers _hook_gh_prefilter_lead
+
+# Whether command text $1 may run a command that starts pull-request checks
+# (builtin regexes only; the classifier decides). The `git pr-*` regex sits
+# behind a substring match: it costs milliseconds on a long command, and
+# almost no command names these.
+_hook_gh_watch_prefilter() {
+  [[ "$1" =~ $_HOOK_GH_PREFILTER_GIT_PUSH ]] && return 0
+  case "$1" in
+    *pr-open* | *pr-submit* | *pr-restack* | *pr-sync-stack*)
+      [[ "$1" =~ $_HOOK_GH_PREFILTER_GIT_PR ]] && return 0
+      ;;
+  esac
+  [[ "$1" =~ $_HOOK_GH_PREFILTER_GH_PR ]]
 }
 
 # Uses the command classifier to change into a leading `cd` target. Used by
