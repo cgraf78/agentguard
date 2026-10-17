@@ -58,8 +58,8 @@ Requirements:
   [checkrun](https://github.com/cgraf78/checkrun), plus checkrun's own
   requirements, [`yq`](https://github.com/mikefarah/yq) and Python 3.11 or
   newer. Without sley, every edit returns a blocking `sley command missing`
-  error. Without `yq`, every edit reports `autolint: yq is required` as a lint
-  finding.
+  error. Without `yq`, edit-time lint is skipped; the commit gate still
+  reports it.
 
 Install AgentGuard and its post-edit chain, then install `jq` and `yq` with
 your package manager:
