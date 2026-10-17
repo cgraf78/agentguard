@@ -1,9 +1,9 @@
 # agentguard
 
-![Tests](https://github.com/cgraf78/agentguard/actions/workflows/test.yml/badge.svg?branch=main)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Bash Version](https://img.shields.io/badge/bash-%3E%3D4-blue.svg)](https://www.gnu.org/software/bash/)
-[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL-lightgrey.svg)](#)
+[![Tests](https://github.com/cgraf78/agentguard/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/cgraf78/agentguard/actions/workflows/test.yml?query=branch%3Amain)
+[![License](https://img.shields.io/badge/license-MIT-67ac09)](LICENSE)
+[![Bash](https://img.shields.io/badge/bash-%3E%3D4.0-blue)](#dependencies)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL%20%7C%20Termux-lightgrey)](#dependencies)
 
 **Guardrails and an audit trail for AI coding agents.**
 
