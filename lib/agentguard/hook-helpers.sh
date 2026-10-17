@@ -897,7 +897,7 @@ _hook_busy_tracked() {
 }
 
 # Set or clear the busy mark on the agent's tmux pane, so the terminal can show
-# which agents are working. cmdblocks' term-pane-mark owns the mark and finds
+# which agents are working. tmux-tools' term-pane-mark owns the mark and finds
 # the hook's pane even when an agent strips the tmux variables. --owner names
 # the agent process that runs this hook, and term-pane-mark changes the mark
 # only while that process is the pane terminal's foreground program: an agent
