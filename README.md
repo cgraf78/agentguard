@@ -345,7 +345,8 @@ status context; `term-notify-sound` plays the `agent-hook-stop` and
 `agent-hook-notification` terminal notifications; `term-pane-mark` marks the
 agent's tmux pane busy from a submitted prompt until the turn ends, changed
 only by the pane terminal's foreground agent so agents it launches cannot
-clear it early; and
+clear it early (both commands come from
+[tmux-tools](https://github.com/cgraf78/tmux-tools)); and
 `claude-templates` enables a Claude-specific maintenance hook when that
 command is installed.
 
