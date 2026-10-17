@@ -1130,7 +1130,7 @@ _hook_agent_shell_state_dir() {
 
 _hook_require_sley() {
   if ! command -v sley >/dev/null 2>&1; then
-    _hook_block "sley command missing; install cgraf78/sley with shdeps"
+    _hook_block "sley command missing; install it: https://github.com/cgraf78/sley#installation"
     return 2
   fi
 }
