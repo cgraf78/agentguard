@@ -59,11 +59,4 @@ _run_hook_gemini "$POST_MCP" '{"tool_name":"mcp__gsrv__tool","tool_result_is_err
 _run_hook_gemini "$PRE_MCP" '{"tool_name":"mcp__gsrv__tool","tool_input":{}}'
 _assert_eq "gemini: circuit breaker resets after success" "0" "$HOOK_EXIT"
 
-# knowledge_load warn-once works under Gemini env
-rm -rf "$TEST_TMPDIR/agentguard/hook-state/gemini-$$"
-_run_hook_gemini "$PRE_MCP" '{"tool_name":"mcp__gsrv__knowledge_load","tool_input":{"url":"https://example.com"}}'
-_assert_contains "gemini: knowledge_load first call warns" "WARNING" "$HOOK_STDERR"
-_run_hook_gemini "$PRE_MCP" '{"tool_name":"mcp__gsrv__knowledge_load","tool_input":{"url":"https://other.com"}}'
-_assert_not_contains "gemini: knowledge_load second call silent" "WARNING" "$HOOK_STDERR"
-
 _test_summary

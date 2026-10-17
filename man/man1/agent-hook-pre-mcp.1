@@ -6,14 +6,8 @@ agent-hook-pre-mcp \- guard agent MCP tool calls before execution
 .SH DESCRIPTION
 .B agent-hook-pre-mcp
 reads an MCP hook JSON payload from standard input. It blocks MCP servers after
-repeated failures, warns on expensive or under-scoped MCP calls, and then lets
-local extensions add environment-specific MCP policy.
-.PP
-The base policy warns on exact
-.B search_files
-leaf-tool calls without a path filter and warns once on exact
-.B knowledge_load
-leaf-tool calls because large documents can consume significant context.
+repeated failures, then lets local extensions add environment-specific MCP
+policy.
 .SH EXIT STATUS
 .TP
 .B 0

@@ -580,9 +580,7 @@ To add a new managed agent runtime:
   runs, and the commit gate still lints. Like the churn knobs, an `export` in
   an agent tool shell cannot reach hook processes.
 - `agent-hook-pre-mcp` guards MCP calls: it blocks a server after repeated
-  failures, warns on exact `search_files` leaf-tool calls without a path
-  filter, and warns once on exact `knowledge_load` leaf-tool calls because
-  large docs can consume significant context.
+  failures, then lets local extensions add environment-specific MCP policy.
 - `agent-hook-post-mcp` tracks MCP failure streaks for that circuit breaker.
 - `agent-hook-session-start` detects repo type in `sl`, `git`, then `jj` order,
   reports uncommitted changes, warns on high disk usage, and injects Hive Memory

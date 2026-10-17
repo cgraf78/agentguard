@@ -58,7 +58,7 @@ echo "=== pre-mcp: server name extraction ==="
 _reset_state
 mkdir -p "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID"
 echo 3 >"$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-plugin_mux_alpha"
-_run_hook "$PRE_MCP" '{"tool_name":"mcp__plugin_mux_alpha__search_files","tool_input":{}}'
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__plugin_mux_alpha__lookup","tool_input":{}}'
 _assert_eq "multi-segment server: blocked" "2" "$HOOK_EXIT"
 
 # Single-segment server name
@@ -107,77 +107,6 @@ mkdir -p "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID"
 echo 3 >"$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-realserver"
 _run_hook "$PRE_MCP" '{"tool_name":"mcp__evil\u0000server__tool","tool_input":{},"mcp_context":{"server_name":"realserver","tool_name":"realtool"}}'
 _assert_eq "NUL tool_name: real server blocked" "2" "$HOOK_EXIT"
-
-# ---------------------------------------------------------------------------
-# Tests: agent-hook-pre-mcp — search_files warning
-# ---------------------------------------------------------------------------
-
-echo ""
-echo "=== pre-mcp: search_files warning ==="
-
-_reset_state
-
-# No path filter → warns
-_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__search_files","tool_input":{"query":"test"}}'
-_assert_eq "no path: exit 0" "0" "$HOOK_EXIT"
-_assert_contains "no path: warns" "WARNING" "$HOOK_STDERR"
-_assert_contains "no path: warning reaches hook context" "search_files called without a path filter" "$HOOK_STDOUT"
-
-# target_directories present → no warning
-_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__search_files","tool_input":{"target_directories":["src/"],"query":"test"}}'
-_assert_eq "with target_dirs: exit 0" "0" "$HOOK_EXIT"
-_assert_not_contains "with target_dirs: no warning" "WARNING" "$HOOK_STDERR"
-
-# Empty target_directories array → warns
-_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__search_files","tool_input":{"target_directories":[],"query":"test"}}'
-_assert_contains "empty array: warns" "WARNING" "$HOOK_STDERR"
-
-# Fallback field "path" → no warning
-_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__search_files","tool_input":{"path":"src/","query":"test"}}'
-_assert_not_contains "with path: no warning" "WARNING" "$HOOK_STDERR"
-
-# Non-search_files tool → no warning
-_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__knowledge_filtered_search","tool_input":{"query":"test"}}'
-_assert_not_contains "non-search tool: no search warning" "search_files" "$HOOK_STDERR"
-
-# Only the leaf MCP tool name should trigger this guard. Server names and other
-# tool names that merely contain the same text are unrelated machine values.
-_run_hook "$PRE_MCP" '{"tool_name":"mcp__search_files_proxy__lookup","tool_input":{"query":"test"}}'
-_assert_not_contains "server-name search_files substring: no warning" "search_files called without a path filter" "$HOOK_STDERR"
-
-_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__not_search_files","tool_input":{"query":"test"}}'
-_assert_not_contains "leaf suffix search_files substring: no warning" "search_files called without a path filter" "$HOOK_STDERR"
-
-# ---------------------------------------------------------------------------
-# Tests: agent-hook-pre-mcp — knowledge_load warn-once
-# ---------------------------------------------------------------------------
-
-echo ""
-echo "=== pre-mcp: knowledge_load warn-once ==="
-
-_reset_state
-
-# First call → warns
-_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__knowledge_load","tool_input":{"url":"https://example.com"}}'
-_assert_contains "first call: warns" "WARNING" "$HOOK_STDERR"
-_assert_contains "first call: mentions knowledge_load" "knowledge_load" "$HOOK_STDERR"
-_assert_contains "first call: warning reaches hook context" "knowledge_load can consume" "$HOOK_STDOUT"
-
-# Second call → silent
-_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__knowledge_load","tool_input":{"url":"https://other.com"}}'
-_assert_not_contains "second call: no warning" "WARNING" "$HOOK_STDERR"
-
-# Flag file exists
-if [ -f "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/knowledge-load-warned" ]; then
-  _pass "warn-once: flag file created"
-else
-  _fail "warn-once: flag file created"
-fi
-
-# Server names that contain knowledge_load are not the expensive load tool.
-_reset_state
-_run_hook "$PRE_MCP" '{"tool_name":"mcp__knowledge_load_cache__lookup","tool_input":{"url":"https://example.com"}}'
-_assert_not_contains "server-name knowledge_load substring: no warning" "knowledge_load can consume" "$HOOK_STDERR"
 
 # ---------------------------------------------------------------------------
 # Tests: agent-hook-pre-mcp — local `-work` variant delegation
