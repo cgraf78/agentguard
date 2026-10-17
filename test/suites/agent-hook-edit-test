@@ -475,6 +475,8 @@ HOOK_STDERR=$(cat "$err_file")
 rm -f "$out_file" "$err_file"
 _assert_exit "post-edit missing sley: exits broken" 2 "$HOOK_EXIT"
 _assert_contains "post-edit missing sley: reports install issue" "sley command missing" "$HOOK_STDERR"
+_assert_contains "post-edit missing sley: links install docs" \
+  "https://github.com/cgraf78/sley#installation" "$HOOK_STDERR"
 
 echo "=== post-edit: lints edited files like the commit gate ==="
 
