@@ -731,9 +731,10 @@ _hook_gh_drop_label() {
 #           gh merges the number in whatever repository it runs in, so a
 #           forget by number is a guess, and one that guessed wrong would
 #           hide another pull request's checks: an ambiguous number forgets
-#           nothing. Its label leaves _HOOK_GH_W_LABELS: `create && merge`
-#           has nothing left to remind about, while a later re-arm in the
-#           same command (`close && reopen`) adds it back.
+#           nothing. Its label leaves _HOOK_GH_W_LABELS, so no labelled
+#           reminder names a pull request the command ended (`create &&
+#           merge` can still get the general one), while a later re-arm in
+#           the same command (`close && reopen`) adds it back.
 _hook_gh_apply_targets() {
   local forget="$1" target op repo arg key owner name state count open
   for target in ${_HOOK_GH_W_TARGETS[@]+"${_HOOK_GH_W_TARGETS[@]}"}; do
