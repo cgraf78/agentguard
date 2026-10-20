@@ -1705,7 +1705,8 @@ unset _hook_gh_prefilter_separators _hook_gh_prefilter_wrappers _hook_gh_prefilt
 _HOOK_GH_WATCH_REMINDED=''
 
 # Whether command text $1 may run a command that starts pull-request checks
-# (builtin regexes only; the classifier decides). The `git pr-*` regex sits
+# or ends a pull request (builtin regexes only; the classifier
+# decides). The `git pr-*` regex sits
 # behind a substring match: it costs milliseconds on a long command, and
 # almost no command names these.
 _hook_gh_watch_prefilter() {
@@ -1831,13 +1832,16 @@ _hook_hm_prompt_text() {
   ' 2>/dev/null
 }
 
-_hook_hm_tool_status() {
+# Print the tool call's exit status as the payload reports it (Muse's
+# envelope, then the usual exit-code and status fields), or nothing when it
+# reports none, or none that reads as a status.
+_hook_tool_status_field() {
+  local _status_agent _status_muse=''
   _hook_hm_read_input
-  local status _status_agent _status_muse=''
   _hook_agent_name _status_agent
   [ "$_status_agent" != muse ] ||
     _status_muse="(.tool_response? | strings | $_HOOK_MUSE_ENVELOPE_JQ | $_HOOK_MUSE_STATUS_JQ) //"
-  status=$(printf '%s' "${_HOOK_INPUT:-}" | jq -r '
+  printf '%s' "${_HOOK_INPUT:-}" | jq -r '
     # A negative code (a signal number reported as -N) is still a failure.
     def status_code(v):
       if v == null then empty
@@ -1862,10 +1866,16 @@ _hook_hm_tool_status() {
     // .toolResult.status?
     // .tool_result_is_error
     // .status
-    // 0
-    | status_code(.) // 0
-  ' 2>/dev/null) || status=''
+    | status_code(.)
+  ' 2>/dev/null
+}
 
+# Print the tool call's exit status, or 0 when the payload reports none
+# (_hook_tool_status_known tells those apart).
+_hook_hm_tool_status() {
+  local status
+  _hook_hm_read_input
+  status=$(_hook_tool_status_field) || status=''
   case "$status" in
     '' | *[!0-9]*)
       printf '0\n'
@@ -1874,6 +1884,37 @@ _hook_hm_tool_status() {
       printf '%s\n' "$status"
       ;;
   esac
+}
+
+# Store in the variable named by $1 the tool call's exit status when the
+# hook knows it, or nothing when 0 would only be a guess: the payload's own
+# status (_hook_tool_status_field), else 0 for a Claude Code PostToolUse,
+# since Claude Code sends a failed shell command to PostToolUseFailure
+# (which post-bash does not handle) and reports no status on success. Not
+# when it marks the call interrupted or reinterpreted a non-zero exit as
+# success (`returnCodeInterpretation`, given for commands such as grep whose
+# status 1 means "no match"). Other hosts without a status (Codex, Gemini, a
+# Muse call cancelled before its envelope) read as unknown. For decisions a
+# failed command must never trigger.
+_hook_tool_status_known() {
+  local _sk_status _sk_agent _sk_flags=''
+  _hook_hm_read_input
+  _sk_status=$(_hook_tool_status_field) || _sk_status=''
+  case "$_sk_status" in
+    *[!0-9]*) _sk_status='' ;;
+  esac
+  if [ -z "$_sk_status" ] && [ "${_HOOK_INPUT_EVENT:-}" != PostToolUseFailure ]; then
+    _hook_agent_name _sk_agent
+    if [ "$_sk_agent" = claude ]; then
+      # `plain` only when jq read the payload and found neither marker.
+      _sk_flags=$(printf '%s' "${_HOOK_INPUT:-}" | jq -r '
+        if (.tool_response.interrupted? == true)
+          or ((.tool_response.returnCodeInterpretation? // "") != "")
+        then "marked" else "plain" end' 2>/dev/null) || _sk_flags=''
+      [ "$_sk_flags" != plain ] || _sk_status=0
+    fi
+  fi
+  printf -v "$1" '%s' "$_sk_status"
 }
 
 _hook_hm_apply_response() {

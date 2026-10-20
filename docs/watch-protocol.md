@@ -124,7 +124,11 @@ watch/<tool-id>/          tool-id = tool dir with "/" replaced by "+"
   tool                    tool dir, watcher argv basename, hint (one line each)
   keys/<key>              "<epoch> <scope>" then the label
   blocked/<key>           the last Stop block for <key> (its mtime)
+  forgotten/<key>         a forgotten key's record, as in keys/
 ```
+
+A key in both `keys/` and `forgotten/` (a re-arm racing a forget) counts as
+recorded.
 
 Names never contain `+`, so two tool dirs never share an id.
 
@@ -141,6 +145,14 @@ turn ends; a subagent's own Stop enforces nothing.
   the watchers follow, so matching recorded keys get a new epoch. Keys whose
   newest `done/` says `merged` or `closed` are skipped; only a per-key re-arm
   (`_hook_watch_rearm_key`) revives them (a reopened pull request).
+- **Forget** (`_hook_watch_forget`): the item ended with nobody watching (a
+  pull request merged or closed), so the key moves to `forgotten/` and its
+  `blocked/` marker goes. Stop, collect, and scope or `ALL` re-arms read
+  only `keys/`, so a forgotten key needs no watcher and a push does not
+  revive it; a per-key re-arm does (a reopened pull request), with a new
+  epoch, so earlier producer records do not satisfy it. AgentGuard never
+  writes producer state to the same end: forgetting is the session's
+  bookkeeping, not a result.
 - **Satisfied**: a live watcher, a matching live pending file (an unscoped
   one matches every key; a scoped one matches keys recorded with exactly that
   scope, so never a key recorded with scope `-`), a `done/` record (green,
@@ -207,7 +219,7 @@ Read from the hook environment, which an agent's tool shell cannot change:
 
 | Variable | Effect |
 | --- | --- |
-| `AGENTGUARD_WATCH=0` | turns recording, re-arming, Stop checks, and launch advice off |
+| `AGENTGUARD_WATCH=0` | turns recording, re-arming, forgetting, Stop checks, and launch advice off |
 | `AGENTGUARD_WATCH_BLOCK=1` | Stop blocks once per record, re-arm, or non-stall watcher exit (Claude Code), and launch advice blocks |
 | `AGENTGUARD_PR_WATCH_HINT` | replaces the pull-request watching advice in the post-bash reminder and the Stop message |
 
@@ -226,10 +238,44 @@ missed one, and the producer's push-race guard covers an early check).
   `-n`, `--dry-run`, or `--help`), when the command printed a bare
   `https://<host>/<owner>/<repo>/pull/<n>` line (any host) and
   `git-pr-watch` is on `PATH`. The label is the URL.
-- **`gh pr ready|reopen|update-branch`**: a URL argument, or `-R`/`--repo`
-  `owner/repo` (or `host/owner/repo`) plus a number, re-arms that key; a bare
-  number (a leading `#` is ignored) re-arms every recorded key ending in
-  `_<n>`; a branch or no argument re-arms everything.
+- **`gh pr ready|reopen|update-branch`** (not `--help`, nor `ready
+  --undo`): a URL argument, or `-R`/`--repo` `owner/repo` (or
+  `host/owner/repo`) plus a number, re-arms that key, reviving it when
+  forgotten; a bare number (a leading `#` is ignored) re-arms every recorded
+  key ending in `_<n>`; a branch or no argument re-arms everything.
+  `gh pr reopen` also revives forgotten keys: those ending in `_<n>` for a
+  bare number, and all of them for a branch or no argument.
+- **Forget**: `gh pr close`, or `gh pr merge` with `--merge`, `--squash`, or
+  `--rebase` and without `--auto` or `--disable-auto` (neither with
+  `--help`), forgets the pull request it names by URL or by `-R` plus a
+  number. gh resolves a bare number in whatever repository it runs in, so a
+  bare number forgets only when exactly one key of the session, recorded
+  (open or terminal) or forgotten, ends in `_<n>` and it is open, and the
+  command does not mention `GH_REPO` and the hook environment does not set
+  it. A forget in error would hide checks
+  nobody watches, so it also needs:
+  - a call that did not run in the background;
+  - a known exit status of 0: the payload's own status, or else a Claude
+    Code PostToolUse that marks the call neither interrupted nor as a
+    non-zero exit read as success (`returnCodeInterpretation`); Claude Code
+    sends failed shell commands to PostToolUseFailure, which post-bash does
+    not handle. A host that reports no status (Codex, Gemini, Grok, a Muse
+    call cancelled before its envelope) never forgets;
+  - a status that is every command's: commands joined only by `&&`, with no
+    pipe, `;`, `||`, `&`, newline, parentheses, backquote, or command
+    substitution anywhere in the command text, quoted or not (a quoted `;`
+    may be a `bash -c` script), and no `!` that starts the text or stands
+    alone as a word; redirections such as `2>&1` are fine.
+
+  Targets apply in command order, so `gh pr close 12 && gh pr reopen 12`
+  leaves the key recorded, and a pull request the same command recorded or
+  re-armed and then ended is left out of the labelled reminder (a command
+  that also started checks, such as `gh pr create && gh pr merge`, may
+  still get the general one once per prompt). A command that only merges
+  or closes never reminds. Without a terminal, gh refuses a merge
+  that names no method (`--admin` alone included) unless it merely joins a
+  merge queue or finds the pull request queued or merged already, so only a
+  merge method counts.
 - **Push re-arm**: `git push` (not a dry run, a deletion, or `--help`, and
   not the other non-updating forms the reminder already ignores),
   `git pr-restack`, or `git pr-sync-stack` (not `-n`, `--dry-run`,
@@ -275,13 +321,14 @@ clean; all but the classifier-based ones (marked Bash 4) run under Bash 3.2.
 | --- | --- |
 | `_hook_watch_record <tool-dir> <key> <scope\|-> <argv-basename> <label> <hint>` | record new work; `<hint>` is free text telling the agent how to start a watcher, with an optional `<labels>` token |
 | `_hook_watch_rearm <tool-dir> <scope>... \| ALL` | re-arm by scope; prints the labels it re-armed |
-| `_hook_watch_rearm_key <tool-dir> <key>` | re-arm one key, reviving a terminal one; prints its label |
-| `_hook_watch_list <tool-dir>` | prints `<key> <scope> <terminal\|open>` per recorded key |
+| `_hook_watch_rearm_key <tool-dir> <key>` | re-arm one key, reviving a terminal or forgotten one; prints its label |
+| `_hook_watch_forget <tool-dir> <key>` | forget a recorded key whose item ended unwatched; succeeds when it did, with its label in `_HOOK_WATCH_KEY_LABEL` (meaningful only then); a key not recorded, or a failed move, stays as it was |
+| `_hook_watch_list <tool-dir> [forgotten]` | prints `<key> <scope> <terminal\|open>` per recorded key; with `forgotten`, also `<key> <scope> forgotten` per forgotten key not recorded again |
 | `_hook_watch_collect` | fills `_HOOK_WATCH_UNMET` with `<tool-id> <key>` entries |
 | `_hook_watch_claim_block <tool-dir> <key>` | claims the one Stop block per record or re-arm |
 | `_hook_watch_launch <option>[\|<option>...] <command> [<subcommand>]` | pre-bash only (needs the command classifier): whether the command runs a watcher with one of the options; sets `_HOOK_WATCH_DETACHED` |
 | `_hook_gh_pr_key_scope <url>` | prints `<key> <scope>` for a pull-request URL and sets `_HOOK_GH_PR_KEY`, `_HOOK_GH_PR_SCOPE`, `_HOOK_GH_PR_NUMBER` |
-| `_hook_gh_watch_pass <command-text> <output> <status\|-> <background\|-> [<watch-command>]` | Bash 4. The post-bash watch pass, the same code post-bash runs on the agent's own command: judges `<command-text>` (lines of shell) and, for a successful command, records created pull requests from the bare URL lines in `<output>`, re-arms after `gh pr ready\|reopen\|update-branch` and pushes (a push is also parsed with the hook payload's stderr), and reminds as described above. `<status>` and `<background>` (`1` or `0`) may be `-` to read them from the hook payload. `<watch-command>` (default `git pr-watch --wait`) is what the reminders and the stored hint recommend; recording still needs `git-pr-watch` on `PATH`. Fails, doing nothing, when the text runs no command that starts checks. Skips the general reminder when `_HOOK_GH_WATCH_REMINDED` is already set. Sets `_HOOK_GH_WATCH_LABELS` (labels recorded or re-armed), `_HOOK_GH_WATCH_PASS_REMINDED` (this call reminded; reset at entry), and, after any reminder, `_HOOK_GH_WATCH_REMINDED` |
+| `_hook_gh_watch_pass <command-text> <output> <status\|-> <background\|-> [<watch-command>]` | Bash 4. The post-bash watch pass, the same code post-bash runs on the agent's own command: judges `<command-text>` (lines of shell) and, for a successful command, records created pull requests from the bare URL lines in `<output>`, re-arms after `gh pr ready\|reopen\|update-branch` and pushes (a push is also parsed with the hook payload's stderr), forgets after `gh pr merge\|close` under the conditions above (`AGENTGUARD_CMD_TRIMMED` must pass the same command-text check as `<command-text>`), and reminds as described above. `<status>` and `<background>` (`1` or `0`) may be `-` to read them from the hook payload. A `<status>` the caller passes counts as known, so a `0` lets a merge or close forget: pass `-` unless you know the unwrapped command's own exit status. `<watch-command>` (default `git pr-watch --wait`) is what the reminders and the stored hint recommend; recording still needs `git-pr-watch` on `PATH`. Fails, doing nothing, when the text runs no command that starts checks and none that ends a pull request it names (see Forget); such a merge or close alone succeeds without reminding. Skips the general reminder when `_HOOK_GH_WATCH_REMINDED` is already set. Sets `_HOOK_GH_WATCH_LABELS` (labels recorded or re-armed), `_HOOK_GH_WATCH_PASS_REMINDED` (this call reminded; reset at entry), and, after any reminder, `_HOOK_GH_WATCH_REMINDED` |
 | `_hook_gh_watch_chain <variable>` | pre-bash only (needs the command classifier): stores in the named variable the first command in the hook's command that records or re-arms a pull request (`git push`, `git pr-open\|pr-submit\|pr-restack\|pr-sync-stack`, `gh pr create\|new\|ready\|reopen\|update-branch`) and succeeds; fails when there is none. Lets an extension advise against chaining a watcher behind such a command |
 | `_hook_gh_checks_reminder [<watch-command>]` | the general reminder alone (hint, else the watch command when it can run, else `gh pr checks`); sets `_HOOK_GH_WATCH_REMINDED`; callers de-duplicate (see the contract below) |
 | `_hook_gh_push_scopes <output> <command>` | prints the recorded scopes a successful push re-arms, `ALL`, or nothing. `<command>` decides two things: a dry-run, delete, `--no-push`, or help word means nothing re-arms, and only a command with a `push` word re-arms `ALL` when it printed output but no `To` block (blank output re-arms `ALL` for any command). Its words are split on whitespace without honoring quotes, so `-o 'x -n'` reads as `-n` |
@@ -395,7 +442,27 @@ watcher basename.
 - Codex payloads carry no exit status, and a cancelled Muse call with empty
   output reads as status 0, so either can re-arm everything on a quiet push
   or revive a terminal key after a failed `gh pr reopen` (nuisance re-arms,
-  never missed ones).
+  never missed ones). Neither forgets on a merge or close.
+- A merge or close by branch or with no argument (the current branch's pull
+  request), with an ambiguous bare number, through a script or another tool,
+  or chained other than by `&&` forgets nothing: the gate stays until a
+  watcher reports the pull request merged or closed.
+- A bare number names a pull request of whatever repository gh runs in. A
+  merge or close of another repository's pull request (one this session
+  never recorded) whose number matches the session's one open key of that
+  number forgets that key.
+- `gh pr merge --delete-branch` can merge and then fail to delete the local
+  branch (in a linked worktree, checking out the base branch fails while
+  another worktree has it); the non-zero exit forgets nothing.
+- On a branch with a merge queue, `gh pr merge` with a merge method and
+  without `--admin` (which bypasses the queue) or `--delete-branch` (which
+  gh refuses there) only adds
+  the pull request to the queue, or enables auto-merge while its checks run,
+  and a merge of a pull request already in a queue exits 0 whatever its
+  options (`--admin` and `--delete-branch` included). Neither says so unless
+  gh writes to a terminal. Both are forgotten anyway, so a queue that later
+  rejects the pull request reminds nobody. Telling them apart would take
+  parsing gh's display text or asking GitHub; AgentGuard does neither.
 - Localized git translates `[new tag]`, so a localized tag-only push counts as
   a branch update and re-arms (a nuisance re-arm).
 - Truncated output (`| head -1`, `| tail -n 3`) can lose the `To` block and

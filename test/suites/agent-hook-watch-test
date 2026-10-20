@@ -289,6 +289,13 @@ case "$AGENTGUARD_CMD_TRIMMED" in
       printf 'PASS-RC=1 ANY=%s\n' "$_HOOK_GH_WATCH_REMINDED" >&2
     fi
     ;;
+  "wrapq "*)
+    # Only the first command of `wrapq <command>; <more>` reaches the pass,
+    # so the pass sees clean text while the agent's command has a `;`.
+    _hook_load_gh_helpers || return 0
+    _wrapq="${AGENTGUARD_CMD_TRIMMED#wrapq }"
+    _hook_gh_watch_pass "${_wrapq%%;*}" "$_stdout" - - "wrap watch" || true
+    ;;
   "wrap2 -- "*)
     # Two unwrapped commands in one hook process (distinct texts, so the
     # once-per-prompt keys differ): the second pass must yield.
@@ -500,6 +507,10 @@ for _case in \
   "gh pr reopen -c 'a reason' https://github.com/o/r/pull/12|o_r_12 " \
   "gh pr ready 12 -R x/y|x_y_12 " \
   "gh pr ready 12 --undo|" \
+  "gh pr ready 12 --help|" \
+  "gh pr reopen -h 12|" \
+  "gh pr update-branch --help|" \
+  "gh pr reopen -- 12|o_r_12 x_y_12 " \
   "gh pr ready 99 -R o/r|" \
   "gh pr view 12|"; do
   _cmd="${_case%%|*}"
@@ -517,10 +528,323 @@ _assert_eq "terminal key: reopen with a comment first revives it" "o_r_12 " \
 _assert_eq "terminal key: quiet push (ALL) skips it" "o_r_13 x_y_12 " "$(_rearmed_by "git push" "")"
 _producer_reset
 
+# Usage prints no pull request; an option value that reads like a flag is
+# still a value, as gh parses it.
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr create --help" "$URL")"
+_assert_eq "gh pr create --help records nothing" "" "$(ls "$(_session_tool)/keys" 2>/dev/null)"
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr create --title --dry-run --fill" "$URL")"
+_assert_file_exists "gh pr create --title --dry-run is a real create" "$(_session_tool)/keys/owner_repo_12"
+
 _new_sid
 _run "$POST_BASH" claude "$(_payload "gh pr ready https://github.com/o/r/pull/12")"
 _assert_eq "no recorded keys: gh pr ready creates no watch state" "" "$(ls "$STATE_ROOT/$SID/watch" 2>/dev/null)"
 _assert_contains "no recorded keys: the general reminder, naming git pr-watch" "git pr-watch --wait <pr>" "$(_context)"
+
+echo ""
+echo "=== post-bash: gh pr merge and close forget ==="
+
+_producer_reset
+# Seeds o_r_12, o_r_13, and x_y_12 with an old epoch and a Stop block marker
+# on each, runs payload $1 for agent ${2:-claude}, and prints the keys it
+# forgot (moved from keys/ to forgotten/), sorted; a key gone from both
+# prints as lost-<key>.
+_forgotten_by_payload() {
+  local key dir
+  _new_sid
+  _seed_key o_r_12 1000 o_r https://github.com/o/r/pull/12
+  _seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+  _seed_key x_y_12 1000 x_y https://github.com/x/y/pull/12
+  dir=$(_session_tool)
+  mkdir -p "$dir/blocked"
+  for key in o_r_12 o_r_13 x_y_12; do printf '1\n' >"$dir/blocked/$key"; done
+  _run "$POST_BASH" "${2:-claude}" "$1"
+  [ "$HOOK_EXIT" = 0 ] || printf 'hook-exit-%s ' "$HOOK_EXIT"
+  for key in o_r_12 o_r_13 x_y_12; do
+    [ ! -e "$dir/keys/$key" ] || continue
+    if [ -f "$dir/forgotten/$key" ]; then printf '%s ' "$key"; else printf 'lost-%s ' "$key"; fi
+  done
+}
+# The same for command $1 with exit status ${2:-0}.
+_forgotten_by() { _forgotten_by_payload "$(_payload "$1" "" "${2:-0}")"; }
+for _case in \
+  "gh pr merge https://github.com/O/R/pull/12 --squash|o_r_12 " \
+  "gh pr merge https://github.example.com/o/r/pull/12/files -s|o_r_12 " \
+  "gh pr merge 12 --squash -R o/r|o_r_12 " \
+  "gh pr merge 12 -m --repo=O/R|o_r_12 " \
+  "gh pr merge -R github.example.com/o/r --rebase 13|o_r_13 " \
+  "gh pr merge -Rx/y 12 --merge|x_y_12 " \
+  "gh pr merge 12 --admin --squash -R x/y|x_y_12 " \
+  "gh pr merge 13 --squash --auto=false|o_r_13 " \
+  "GH_REPO=o/r gh pr merge https://github.com/o/r/pull/13 --squash|o_r_13 " \
+  "gh pr merge 13 --squash|o_r_13 " \
+  "gh pr merge '#13' -s|o_r_13 " \
+  "gh pr merge -sd 13|o_r_13 " \
+  "gh pr merge -ds 13|o_r_13 " \
+  "gh pr merge -s -- 13|o_r_13 " \
+  "gh pr merge --squash -b 'closes 13' https://github.com/o/r/pull/12|o_r_12 " \
+  "gh pr merge -s -b 13 12 -R o/r|o_r_12 " \
+  "gh pr merge -st 13 12 -R o/r|o_r_12 " \
+  "gh pr merge -s --body=13 -R o/r 12|o_r_12 " \
+  "gh pr merge --squash --match-head-commit 1234567 https://github.com/o/r/pull/13|o_r_13 " \
+  "gh pr close https://github.com/o/r/pull/12|o_r_12 " \
+  "gh pr close 13 --comment 12|o_r_13 " \
+  "gh pr close -c 12 13 -R o/r|o_r_13 " \
+  "gh pr close 13 -d|o_r_13 " \
+  "cd /tmp && gh pr merge 13 --squash 2>&1|o_r_13 " \
+  "gh pr merge 13 --squash >/dev/null 2>&1|o_r_13 " \
+  "timeout 60 gh pr merge 13 --squash|o_r_13 " \
+  "gh pr merge 13 --squash && gh pr view 13|o_r_13 " \
+  "gh pr merge 13 -s && gh pr close https://github.com/x/y/pull/12|o_r_13 x_y_12 " \
+  "gh pr reopen 13 && gh pr close 13|o_r_13 "; do
+  # The expected keys follow the last `|`: commands may hold pipes.
+  _cmd="${_case%|*}"
+  _assert_eq "'$_cmd' forgets" "${_case##*|}" "$(_forgotten_by "$_cmd")"
+done
+# Commands that must forget nothing, each with a control (after the last
+# `|`) that differs only in what makes it unsafe and does forget.
+for _case in \
+  "gh pr merge 12 --squash|gh pr merge 13 --squash" \
+  "gh pr merge 99 --squash -R o/r|gh pr merge 13 --squash -R o/r" \
+  "gh pr merge 13 --auto --squash|gh pr merge 13 --squash" \
+  "gh pr merge 13 --squash --auto=true|gh pr merge 13 --squash" \
+  "gh pr merge 13 --disable-auto|gh pr merge 13 --squash" \
+  "gh pr merge 13 --admin|gh pr merge 13 --admin --squash" \
+  "gh pr merge 13 --squash=false|gh pr merge 13 --squash" \
+  "GH_REPO=a/b gh pr merge 13 --squash|gh pr merge 13 --squash" \
+  "gh pr merge 13 --squash=0|gh pr merge 13 --squash" \
+  "gh pr merge 13|gh pr merge 13 --squash" \
+  "gh pr merge 13 -d|gh pr merge 13 -d --squash" \
+  "gh pr merge feature/x --squash|gh pr merge 13 --squash" \
+  "gh pr merge --squash|gh pr merge 13 --squash" \
+  "gh pr merge 13 --squash --help|gh pr merge 13 --squash" \
+  "gh pr close 13 -h|gh pr close 13" \
+  "gh pr merge 13 --squash | tail -3|gh pr merge 13 --squash" \
+  "gh pr merge 13 --squash; echo done|gh pr merge 13 --squash" \
+  "gh pr merge 13 --squash || true|gh pr merge 13 --squash" \
+  "gh pr merge 13 --squash &|gh pr merge 13 --squash" \
+  "bash -c 'gh pr merge 13 --squash; true'|gh pr merge 13 --squash" \
+  "echo \$(gh pr merge 13 --squash)|gh pr merge 13 --squash" \
+  "! gh pr merge 13 --squash|gh pr merge 13 --squash" \
+  "gh pr view 13|gh pr close 13" \
+  "gh pr checks 13|gh pr close 13" \
+  "gh pr edit 13 --title merge|gh pr close 13" \
+  "gh pr comment 13 -b close|gh pr close 13"; do
+  _cmd="${_case%|*}"
+  _assert_eq "'$_cmd' forgets nothing" "/o_r_13 " \
+    "$(_forgotten_by "$_cmd")/$(_forgotten_by "${_case##*|}")"
+done
+# Each "forgets nothing" below is paired with its forgetting control, as
+# "<case>/<control>".
+_merge13="gh pr merge 13 --squash"
+_assert_eq "a merge spanning two lines forgets nothing" "/o_r_13 " \
+  "$(_forgotten_by $'gh pr merge 13 --squash\necho done')/$(_forgotten_by "$_merge13")"
+_assert_eq "a failed merge forgets nothing" "/o_r_13 " \
+  "$(_forgotten_by "$_merge13" 1)/$(_forgotten_by "$_merge13" 0)"
+_assert_eq "a failed close forgets nothing" "/o_r_13 " \
+  "$(_forgotten_by "gh pr close 13" 1)/$(_forgotten_by "gh pr close 13" 0)"
+# A Claude PostToolUse carries no exit status: failures arrive as
+# PostToolUseFailure, which post-bash does not handle.
+_assert_eq "claude payload without a status forgets" "o_r_13 " \
+  "$(_forgotten_by_payload "$(jq -nc '{tool_input:{command:"gh pr merge 13 --squash"},tool_response:{stdout:"",stderr:""}}')")"
+_assert_eq "codex without a status forgets nothing; with one, forgets" "/o_r_13 " \
+  "$(_forgotten_by_payload "$(_string_payload "$_merge13" "")" codex)/$(_forgotten_by_payload "$(_payload "$_merge13")" codex)"
+_bare=$(jq -nc --arg cmd "$_merge13" '{tool_input:{command:$cmd},tool_response:{stdout:"",stderr:""}}')
+for _agent in gemini grok; do
+  _assert_eq "$_agent payload without a status forgets nothing (claude's does)" "/o_r_13 " \
+    "$(_forgotten_by_payload "$_bare" "$_agent")/$(_forgotten_by_payload "$_bare" claude)"
+done
+# Claude Code marks an interrupted call, and one whose non-zero exit it read
+# as success (grep's "no match"), so neither proves the merge succeeded; a
+# PostToolUseFailure never does.
+for _case in \
+  '.tool_response.interrupted = true' \
+  '.tool_response.returnCodeInterpretation = "No matches found"' \
+  '.hook_event_name = "PostToolUseFailure"'; do
+  _assert_eq "claude payload with $_case forgets nothing" "/o_r_13 " \
+    "$(_forgotten_by_payload "$(jq -c "$_case" <<<"$_bare")")/$(_forgotten_by_payload "$(jq -c '.tool_response.interrupted = false' <<<"$_bare")")"
+done
+_assert_eq "muse call without an envelope forgets nothing; exit code 0 forgets" "/o_r_13 " \
+  "$(_forgotten_by_payload "$(_string_payload "$_merge13" "")" muse)/$(_forgotten_by_payload "$(_string_payload "$_merge13" "$(_muse_envelope "" "$_ok")")" muse)"
+_assert_eq "a merge run in the background forgets nothing" "/o_r_13 " \
+  "$(_forgotten_by_payload "$(_bg_payload "$_merge13")")/$(_forgotten_by "$_merge13")"
+_assert_eq "GH_REPO in the hook environment: a bare number forgets nothing" "/o_r_13 " "$(
+  WATCH_ENV=(GH_REPO=a/b)
+  _forgotten_by "$_merge13"
+)/$(_forgotten_by "$_merge13")"
+_assert_eq "GH_REPO in the hook environment: a URL still forgets" "o_r_13 " "$(
+  WATCH_ENV=(GH_REPO=a/b)
+  _forgotten_by "gh pr merge https://github.com/o/r/pull/13 --squash"
+)"
+_assert_eq "AGENTGUARD_WATCH=0 forgets nothing" "/o_r_13 " "$(
+  WATCH_ENV=(AGENTGUARD_WATCH=0)
+  _forgotten_by "$_merge13"
+)/$(_forgotten_by "$_merge13")"
+
+# A bare number counts only when no other key of the session, terminal or
+# forgotten, shares it: re-running a merge of x/y#13 there (gh says it was
+# merged already and exits 0) must not forget o/r#13.
+_bare_after() {
+  _new_sid
+  _seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+  if [ -n "$1" ]; then
+    _seed_key x_y_13 1000 x_y https://github.com/x/y/pull/13
+    case "$1" in
+      forgotten) _run "$POST_BASH" claude "$(_payload "gh pr merge https://github.com/x/y/pull/13 --squash")" ;;
+      terminal) printf '%s merged 2000\n' "$(printf 'c%.0s' {1..40})" >"$PRODUCER/done/x_y_13" ;;
+    esac
+  fi
+  _run "$POST_BASH" claude "$(_payload "gh pr merge 13 --squash")"
+  [ -f "$(_session_tool)/keys/o_r_13" ] && printf kept || printf forgot
+  rm -f "$PRODUCER/done/x_y_13"
+}
+_assert_eq "bare number shared with a forgotten key forgets nothing" "kept/forgot" "$(_bare_after forgotten)/$(_bare_after '')"
+_assert_eq "bare number shared with a terminal key forgets nothing" "kept/forgot" "$(_bare_after terminal)/$(_bare_after '')"
+
+# The wrapped-command API forgets like post-bash, honoring an explicit status.
+_new_sid
+_seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+_run "$EXT_POST" claude "$(_payload "wrap -- gh pr merge https://github.com/o/r/pull/13 --squash")"
+_assert_eq "API: a wrapped merge succeeds without a reminder" "PASS-RC=0 LABELS= REMINDED= ANY=" "$(_pass_line)"
+_assert_file_exists "API: a wrapped merge forgets" "$(_session_tool)/forgotten/o_r_13"
+_new_sid
+_seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+_run "$EXT_POST" claude "$(_payload "wrap -- gh pr merge https://github.com/o/r/pull/13 --squash | tail -1")"
+_assert_file_exists "API: a wrapped merge piped on keeps the key" "$(_session_tool)/keys/o_r_13"
+_new_sid
+_seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+_run "$EXT_POST" claude "$(_payload "wrapq gh pr merge https://github.com/o/r/pull/13 --squash; true")"
+_assert_file_exists "API: clean pass text, but a ';' in the agent's command, keeps the key" "$(_session_tool)/keys/o_r_13"
+_new_sid
+_seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+_run "$EXT_POST" claude "$(_payload "wrapq gh pr merge https://github.com/o/r/pull/13 --squash")"
+_assert_file_exists "API: the same without the ';' forgets" "$(_session_tool)/forgotten/o_r_13"
+_new_sid
+_seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+WATCH_ENV=(WRAP_STATUS=0)
+_run "$EXT_POST" codex "$(_string_payload "wrap -- gh pr merge https://github.com/o/r/pull/13 --squash" "")"
+WATCH_ENV=()
+_assert_file_exists "API: codex with an explicit status 0 forgets" "$(_session_tool)/forgotten/o_r_13"
+_new_sid
+_seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+_run "$EXT_POST" codex "$(_string_payload "wrap -- gh pr merge https://github.com/o/r/pull/13 --squash" "")"
+_assert_file_exists "API: codex without a status keeps the key" "$(_session_tool)/keys/o_r_13"
+
+# The forgotten key's Stop block marker goes; the others stay.
+_forgotten_by "gh pr merge https://github.com/o/r/pull/12 --squash" >/dev/null
+_assert_eq "forget removes only that key's block marker" "o_r_13 x_y_12" \
+  "$(cd "$(_session_tool)/blocked" && echo *)"
+_assert_eq "forgotten record keeps epoch, scope, and label" \
+  "1000 o_r|https://github.com/o/r/pull/12" "$(tr '\n' '|' <"$(_session_tool)/forgotten/o_r_12" | sed 's/|$//')"
+
+# A merge or close alone never gives a PR checks reminder, whatever it did.
+for _case in \
+  "forgot|$(_payload "gh pr merge 13 --squash")" \
+  "ambiguous number|$(_payload "gh pr merge 12 --squash")" \
+  "failed|$(_payload "gh pr merge 13 --squash" "" 1)" \
+  "background|$(_bg_payload "gh pr merge 13 --squash")" \
+  "close|$(_payload "gh pr close 13")"; do
+  _forgotten_by_payload "${_case#*|}" >/dev/null
+  _assert_eq "merge or close alone (${_case%%|*}): no reminder" 0 "$(_gates)"
+done
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr merge 13 --squash")"
+_assert_eq "merge without watch state: no reminder" 0 "$(_gates)"
+_assert_eq "merge without watch state: creates none" "" "$(ls "$STATE_ROOT/$SID/watch" 2>/dev/null)"
+_assert_eq "AGENTGUARD_WATCH=0 merge: no reminder" 0 "$(
+  WATCH_ENV=(AGENTGUARD_WATCH=0)
+  _forgotten_by "gh pr merge 13 --squash" >/dev/null
+  _gates
+)"
+# Dropping labels keeps the list well formed: one left names exactly it,
+# none left reminds about nothing.
+_xy12=https://github.com/x/y/pull/12
+_forgotten_by "gh pr reopen 13 && gh pr reopen $_xy12 && gh pr close 13" >/dev/null
+_assert_contains "re-arm two, close one: the reminder names the other alone" \
+  "started checks on $_xy12, which" "$(_context)"
+_forgotten_by "gh pr reopen 13 && gh pr reopen $_xy12 && gh pr close 13 && gh pr close $_xy12" >/dev/null
+_assert_not_contains "re-arm two, close both: no labelled reminder" "started checks on" "$(_context)"
+# A record or re-arm the same command then ended names nothing.
+_new_sid
+_run "$POST_BASH" claude "$(_payload "gh pr create --fill && gh pr merge --squash $URL" "$URL")"
+_assert_not_contains "create then merge: the reminder names no merged pull request" "started checks on" "$(_context)"
+_assert_eq "create then merge: the key is forgotten" "owner_repo_12" "$(ls "$(_session_tool)/forgotten" 2>/dev/null)"
+_assert_eq "reopen then close: the reminder names nothing" "0" "$(
+  _forgotten_by "gh pr reopen 13 && gh pr close 13" >/dev/null
+  _context | grep -c 'started checks on'
+)"
+
+# Command order: a close followed by a reopen leaves the pull request
+# recorded, with a new epoch (the close alone forgets it).
+_revived() {
+  [ -f "$(_session_tool)/keys/$1" ] && [ ! -e "$(_session_tool)/forgotten/$1" ] &&
+    [ "$(_key_epoch "$1")" != 1000 ] && printf revived
+}
+_assert_eq "close then reopen: recorded again with a new epoch" "revived/o_r_13 " \
+  "$(
+    _forgotten_by "gh pr close 13 && gh pr reopen 13" >/dev/null
+    _revived o_r_13
+  )/$(_forgotten_by "gh pr close 13")"
+
+# A later reopen revives a forgotten key (URL, -R plus number, or a bare
+# number) with a new epoch, and it reminds again.
+for _case in \
+  "gh pr reopen https://github.com/o/r/pull/13" \
+  "gh pr reopen 13 -R o/r" \
+  "gh pr reopen 13"; do
+  # Redirected, not captured: the session id must survive in this shell.
+  _forgotten_by "gh pr close https://github.com/o/r/pull/13" >"$TEST_TMPDIR/forgotten"
+  _run "$POST_BASH" claude "$(_payload "$_case")"
+  _assert_eq "'$_case' after a close revives the key" "o_r_13 revived" \
+    "$(cat "$TEST_TMPDIR/forgotten")$(_revived o_r_13)"
+  _assert_contains "'$_case' after a close reminds with its label" \
+    "started checks on https://github.com/o/r/pull/13" "$(_context)"
+done
+# A reopen by branch or with no argument revives every forgotten key; a
+# bare-number `gh pr ready` or `update-branch` revives none.
+for _case in "gh pr reopen fix/x|o_r_13 revived" "gh pr reopen|o_r_13 revived" \
+  "gh pr ready 13|o_r_13 " "gh pr update-branch 13|o_r_13 "; do
+  _forgotten_by "gh pr close https://github.com/o/r/pull/13" >"$TEST_TMPDIR/forgotten"
+  _run "$POST_BASH" claude "$(_payload "${_case%%|*}")"
+  _assert_eq "'${_case%%|*}' after a close" "${_case#*|}" "$(cat "$TEST_TMPDIR/forgotten")$(_revived o_r_13)"
+done
+# A push, or a branch or bare `gh pr ready`, after a merge does not revive it.
+_or_push=$'To github.com:o/r.git\n   1111111..2222222  main -> main'
+for _case in \
+  "git push|$_or_push" \
+  "git push -q|" \
+  "gh pr ready|"; do
+  _forgotten_by "gh pr merge https://github.com/o/r/pull/13 --squash" >/dev/null
+  _run "$POST_BASH" claude "$(_payload "${_case%%|*}" "" 0 "${_case#*|}")"
+  _assert_eq "'${_case%%|*}' after a merge leaves it forgotten" "1" \
+    "$([ ! -e "$(_session_tool)/keys/o_r_13" ] && [ -f "$(_session_tool)/forgotten/o_r_13" ] && echo 1)"
+done
+# A forgotten scope still counts as recorded for the push fork fallback: a
+# push to alice/x after alice_x_12 merged re-arms nothing, not bob_x_5.
+_assert_eq "push to a forgotten key's repository re-arms no same-named fork" "" "$(
+  _new_sid
+  _seed_key alice_x_12 1000 alice_x https://github.com/alice/x/pull/12
+  _seed_key bob_x_5 1000 bob_x https://github.com/bob/x/pull/5
+  _run "$POST_BASH" claude "$(_payload "gh pr merge https://github.com/alice/x/pull/12 --squash")"
+  _run "$POST_BASH" claude "$(_payload "git push" "" 0 $'To github.com:alice/x.git\n   1111111..2222222  main -> main')"
+  for key in alice_x_12 bob_x_5; do
+    [ ! -f "$(_session_tool)/keys/$key" ] || [ "$(_key_epoch "$key")" = 1000 ] || printf '%s ' "$key"
+  done
+)"
+# End to end: the Stop gate no longer blocks for a merged or closed pull
+# request nobody watched.
+for _case in "gh pr merge https://github.com/o/r/pull/12 --squash" "gh pr close 12 -R o/r"; do
+  _new_sid
+  _seed_key o_r_12 1000 o_r https://github.com/o/r/pull/12
+  _run "$POST_BASH" claude "$(_payload "$_case")"
+  WATCH_ENV=(AGENTGUARD_WATCH_BLOCK=1)
+  _run "$STOP" claude '{}'
+  WATCH_ENV=()
+  _assert_eq "'$_case': Stop does not block" 0 "$HOOK_EXIT"
+  _assert_not_contains "'$_case': Stop names nothing" "pull/12" "$HOOK_STDERR"
+done
+_producer_reset
 
 echo ""
 echo "=== post-bash: push re-arms ==="
@@ -1177,6 +1501,18 @@ _engine_cases() {
   _assert_eq "$tag: rearm ALL skips terminal" "" "$(_engine "$shell" "_hook_watch_rearm '$tool' ALL")"
   _assert_eq "$tag: rearm_key revives terminal" "$label" "$(_engine "$shell" "_hook_watch_rearm_key '$tool' '$key'")"
   _assert_eq "$tag: rearm_key of an unknown key" "" "$(_engine "$shell" "_hook_watch_rearm_key '$tool' never-recorded")"
+  _assert_eq "$tag: forget sets the label" "0 $label" \
+    "$(_engine "$shell" "_hook_watch_forget '$tool' '$key'; echo \$? \$_HOOK_WATCH_KEY_LABEL")"
+  _assert_eq "$tag: list omits a forgotten key" "" "$(_engine "$shell" "_hook_watch_list '$tool'")"
+  _assert_eq "$tag: list forgotten names it" "$key $scope forgotten" "$(_engine "$shell" "_hook_watch_list '$tool' forgotten")"
+  _assert_eq "$tag: collect skips a forgotten key" "0" \
+    "$(_engine "$shell" '_hook_watch_collect; echo ${#_HOOK_WATCH_UNMET[@]}')"
+  _assert_eq "$tag: rearm ALL skips a forgotten key" "" "$(_engine "$shell" "_hook_watch_rearm '$tool' ALL")"
+  _assert_eq "$tag: forget of a key not recorded fails" 1 "$(_engine "$shell" "_hook_watch_forget '$tool' '$key'; echo \$?")"
+  _assert_eq "$tag: forget of an unsafe key fails" 1 "$(_engine "$shell" "_hook_watch_forget '$tool' ../x; echo \$?")"
+  _assert_eq "$tag: rearm_key revives a forgotten key" "$label" "$(_engine "$shell" "_hook_watch_rearm_key '$tool' '$key'")"
+  _assert_eq "$tag: revived key is recorded, not forgotten" "$key $scope terminal" \
+    "$(_engine "$shell" "_hook_watch_list '$tool' forgotten")"
   _assert_eq "$tag: claim block once" "0 1" "$(_engine "$shell" "_hook_watch_claim_block '$tool' '$key'; a=\$?; _hook_watch_claim_block '$tool' '$key'; echo \$a \$?")"
   _assert_contains "$tag: stop names the custom label and hint" "label-$key. Run the watcher." \
     "$(_engine "$shell" "_hook_watch_stop 2>&1")"
@@ -1354,6 +1690,12 @@ if [ "$(id -u)" != 0 ] && [ "$(bash -c 'echo ${BASH_VERSINFO[0]}')" -ge 4 ]; the
   _assert_eq "Stop without watch state: exact shell count" 10 "$(_hook_shells "$STOP" claude '{}')"
   _assert_eq "post-bash, non-matching: exact shell count" 9 \
     "$(_hook_shells "$POST_BASH" claude "$(_payload ls "a b")")"
+  # A read-only gh call and a merge without obligations take the gh prefilter
+  # and the classifier, and nothing more.
+  _assert_eq "post-bash, gh pr view: exact shell count" 14 \
+    "$(_hook_shells "$POST_BASH" claude "$(_payload "gh pr view 12" "")")"
+  _assert_eq "post-bash, gh pr merge without watch state: exact shell count" 14 \
+    "$(_hook_shells "$POST_BASH" claude "$(_payload "gh pr merge 12 --squash" "")")"
 else
   echo "  SKIP: hook shell counts (root ignores PS4, or no BASHPID)"
 fi
