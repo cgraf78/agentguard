@@ -269,8 +269,10 @@ missed one, and the producer's push-race guard covers an early check).
 
   Targets apply in command order, so `gh pr close 12 && gh pr reopen 12`
   leaves the key recorded, and a pull request the same command recorded or
-  re-armed and then ended is left out of the reminder. A command that only
-  merges or closes never reminds. Without a terminal, gh refuses a merge
+  re-armed and then ended is left out of the labelled reminder (a command
+  that also started checks, such as `gh pr create && gh pr merge`, may
+  still get the general one once per prompt). A command that only merges
+  or closes never reminds. Without a terminal, gh refuses a merge
   that names no method (`--admin` alone included) unless it merely joins a
   merge queue or finds the pull request queued or merged already, so only a
   merge method counts.
