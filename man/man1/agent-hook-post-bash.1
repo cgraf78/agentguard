@@ -46,9 +46,17 @@ or
 .B gh pr ready|reopen|update-branch
 re-arms recorded ones; the reminder then recommends
 .B git pr-watch \-\-wait
-with their URLs.
+with their URLs. A successful
+.B gh pr close
+or
+.B gh pr merge
+(with a merge method and without
+.BR \-\-auto )
+that names a recorded pull request by URL or number forgets it, so nothing
+waits for a watcher; a later reopen revives it.
 .BR agent-hook-stop (1)
-checks the obligations. The rules are in
+checks the obligations. The rules, including when a merge or close forgets
+and the gaps, are in
 .I docs/watch-protocol.md
 in the AgentGuard checkout.
 .PP
@@ -69,7 +77,7 @@ counts as a failure.
 .B AGENTGUARD_WATCH
 Set to
 .B 0
-to stop recording and re-arming watch obligations.
+to stop recording, re-arming, and forgetting watch obligations.
 .TP
 .B AGENTGUARD_PR_WATCH_HINT
 Replaces the advice on how to watch recorded pull requests, here and in the

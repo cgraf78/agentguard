@@ -29,6 +29,8 @@
 #   tool            three lines: tool dir, watcher argv basename, hint
 #   keys/<key>      "<epoch> <scope>" then the label, one file per key
 #   blocked/<key>   written when a Stop blocked for that key
+#   forgotten/<key> a forgotten key's record (_hook_watch_forget); keys/<key>
+#                   wins when both exist
 
 # Keys from the latest collect that need a watcher, as "<tool-id> <key>".
 _HOOK_WATCH_UNMET=()
@@ -412,6 +414,32 @@ _hook_watch_record() {
   _hook_watch_write_key "$base" "$key" "$now" "$scope" "$label"
 }
 
+# _hook_watch_forget <tool-dir> <key>
+#
+# Stop requiring a watcher for one recorded key because its item ended with
+# nobody watching (a pull request merged or closed). The record moves to
+# forgotten/<key>, which only _hook_watch_rearm_key and `_hook_watch_list
+# <tool-dir> forgotten` read, so a later reopen can revive it while Stop,
+# collect, and scope or ALL re-arms (a push) ignore it; the key's Stop block
+# marker goes with it. Sets _HOOK_WATCH_KEY_LABEL and succeeds when it
+# forgot. A key this session never recorded, or a move that fails, is left
+# as it was: a key that stays only costs a reminder, a lost one a missed
+# watch. A re-arm racing the move can write keys/<key> again; keys/ then
+# wins, which errs toward the reminder.
+_hook_watch_forget() {
+  local tool_dir="$1" key="$2" id base
+  _hook_watch_tool_id "$tool_dir" id || return 1
+  _hook_watch_name_ok "$key" || return 1
+  _hook_watch_session_dir base || return 1
+  base="$base/$id"
+  _hook_watch_read_key "$base/keys/$key" || return 1
+  [ -d "$base/forgotten" ] || _hook_mkstate "$base/forgotten" || return 1
+  mv -f -- "$base/keys/$key" "$base/forgotten/$key" 2>/dev/null || return 1
+  # A builtin test first: most keys never blocked, so this rarely forks.
+  [ ! -e "$base/blocked/$key" ] || rm -f -- "$base/blocked/$key" 2>/dev/null
+  return 0
+}
+
 # _hook_watch_rearm <tool-dir> <scope>... | ALL
 #
 # Re-open this session's recorded keys of the tool whose scope is one of the
@@ -455,41 +483,58 @@ _hook_watch_rearm() {
 # _hook_watch_rearm_key <tool-dir> <key>
 #
 # Re-open one recorded key even when its producer recorded it merged or
-# closed (a reopened pull request, say). Prints its label when it re-armed;
-# a key this session never recorded is left alone.
+# closed, or this session forgot it (_hook_watch_forget): a reopened pull
+# request, say. Prints its label when it re-armed; a key this session never
+# recorded is left alone. A revived key's record is written to keys/ before
+# its forgotten copy goes, so an interruption leaves both and keys/ wins.
 _hook_watch_rearm_key() {
-  local tool_dir="$1" key="$2" id base now
+  local tool_dir="$1" key="$2" id base now revive=0
   _hook_watch_tool_id "$tool_dir" id || return 1
   _hook_watch_name_ok "$key" || return 1
   _hook_watch_session_dir base || return 1
   base="$base/$id"
-  _hook_watch_read_key "$base/keys/$key" || return 0
+  if ! _hook_watch_read_key "$base/keys/$key"; then
+    _hook_watch_read_key "$base/forgotten/$key" || return 0
+    revive=1
+  fi
   _hook_watch_now now || return 1
   _hook_watch_write_key "$base" "$key" "$now" "$_HOOK_WATCH_KEY_SCOPE" \
-    "$_HOOK_WATCH_KEY_LABEL" &&
-    printf '%s\n' "$_HOOK_WATCH_KEY_LABEL"
+    "$_HOOK_WATCH_KEY_LABEL" || return 0
+  [ "$revive" = 0 ] || rm -f -- "$base/forgotten/$key" 2>/dev/null
+  printf '%s\n' "$_HOOK_WATCH_KEY_LABEL"
   return 0
 }
 
-# _hook_watch_list <tool-dir>
+# _hook_watch_list <tool-dir> [forgotten]
 #
 # Print one "<key> <scope> <terminal|open>" line per key this session
 # recorded for the tool, uninterpreted. Recognizers use it to map their own
-# vocabulary (a repository, a number) onto recorded keys.
+# vocabulary (a repository, a number) onto recorded keys. With `forgotten`,
+# also print "<key> <scope> forgotten" per forgotten key (see
+# _hook_watch_forget) not recorded again.
 _hook_watch_list() {
   local tool_dir="$1" id base file key state
   _hook_watch_tool_id "$tool_dir" id || return 1
   _hook_watch_session_dir base || return 1
   base="$base/$id"
-  [ -d "$base/keys" ] || return 0
-  _hook_watch_roots "$tool_dir" || _HOOK_WATCH_DIRS=()
-  for file in "$base/keys"/*; do
+  if [ -d "$base/keys" ]; then
+    _hook_watch_roots "$tool_dir" || _HOOK_WATCH_DIRS=()
+    for file in "$base/keys"/*; do
+      key="${file##*/}"
+      _hook_watch_name_ok "$key" || continue
+      _hook_watch_read_key "$file" || continue
+      state=open
+      _hook_watch_terminal "$key" && state=terminal
+      printf '%s %s %s\n' "$key" "$_HOOK_WATCH_KEY_SCOPE" "$state"
+    done
+  fi
+  [ "${2:-}" = forgotten ] && [ -d "$base/forgotten" ] || return 0
+  for file in "$base/forgotten"/*; do
     key="${file##*/}"
     _hook_watch_name_ok "$key" || continue
+    [ ! -e "$base/keys/$key" ] || continue
     _hook_watch_read_key "$file" || continue
-    state=open
-    _hook_watch_terminal "$key" && state=terminal
-    printf '%s %s %s\n' "$key" "$_HOOK_WATCH_KEY_SCOPE" "$state"
+    printf '%s %s forgotten\n' "$key" "$_HOOK_WATCH_KEY_SCOPE"
   done
   return 0
 }

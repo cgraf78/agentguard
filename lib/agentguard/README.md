@@ -37,9 +37,9 @@ and no `suppressOutput` (see `_hook_strict_output_agent`).
   schema are documented in `docs/telemetry.md`.
 - `watch.sh` (the watch-obligation engine) and `watch-github.sh` (its
   pull-request vocabulary) are loaded lazily through `_hook_load_watch` and
-  `_hook_load_watch_github`. Extensions use their documented helpers to record
-  and re-arm work a watcher should follow; `docs/watch-protocol.md` documents
-  the layout and rules.
+  `_hook_load_watch_github`. Extensions use their documented helpers to record,
+  re-arm, and forget work a watcher should follow; `docs/watch-protocol.md`
+  documents the layout and rules.
 - `detect.sh` is internal to those public entry points.
 - Native hook fragments and runtime adapters are public assets under
   `share/agentguard/integrations/`. Consumers own activation and configuration

@@ -133,8 +133,9 @@ fi
 #
 # When `git pr-watch` (git-tools) is installed, recognized commands also feed
 # the session's watch obligations (lib/agentguard/watch.sh): creating a pull
-# request records it, and a push or `gh pr ready|reopen|update-branch`
-# re-arms recorded ones, so the Stop hook can tell when nobody watches them.
+# request records it, a push or `gh pr ready|reopen|update-branch` re-arms
+# recorded ones, and a `gh pr merge|close` that ended one forgets it, so the
+# Stop hook can tell when nobody watches them.
 # docs/watch-protocol.md describes the rules.
 
 # Prints the push evidence in `$1`: a bare pull-request URL line (any host),

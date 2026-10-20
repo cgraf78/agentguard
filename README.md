@@ -545,7 +545,10 @@ To add a new managed agent runtime:
   `git pr-sync-stack` count as pushes too, and so do pull-request URLs from any
   GitHub host. When `git pr-watch` is installed, creating a pull request
   records it as a watch obligation for the session, a later push or
-  `gh pr ready|reopen|update-branch` re-arms it, and the reminder recommends
+  `gh pr ready|reopen|update-branch` re-arms it, a successful `gh pr close`
+  or `gh pr merge` (with a merge method, without `--auto`) naming it
+  forgets it (a reopen revives it; see the watch protocol's gaps), and the
+  reminder recommends
   `git pr-watch --wait <pull requests>`; with nothing recorded, the general
   reminder recommends `git pr-watch --wait <pr>` too, falling back to
   `gh pr checks --watch` only without `git pr-watch`

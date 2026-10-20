@@ -11,8 +11,9 @@
 # fallback below is the one documented exception.
 #
 # A documented API: post-bash calls it for commands it recognizes, and hook
-# extensions call it for wrapped commands that create pull requests or push
-# (then _hook_watch_record / _hook_watch_rearm from watch.sh). Loaded lazily
+# extensions call it for wrapped commands that create, push, merge, or close
+# pull requests (then _hook_watch_record / _hook_watch_rearm /
+# _hook_watch_forget from watch.sh). Loaded lazily
 # (_hook_load_watch_github); Bash 3.2 compatible, `set -u` clean, never exits.
 
 # The producer's state dir relative to a state root, its watcher program, and
@@ -267,11 +268,14 @@ _hook_gh_push_scopes() {
     return 0
   fi
   [ -n "$pushed" ] || return 0
-  # Recorded scopes, each once.
+  # Recorded scopes, each once. A forgotten key's scope counts too: it is
+  # still this session's repository, so a push to it must not fall back to
+  # re-arming another repository of the same name (it re-arms nothing
+  # forgotten, as _hook_watch_rearm reads only recorded keys).
   while read -r _ rscope _; do
     [ -n "$rscope" ] && [ "$rscope" != - ] || continue
     case "$recorded" in *" $rscope "*) ;; *) recorded="$recorded $rscope " ;; esac
-  done < <(_hook_watch_list "$_HOOK_GH_PR_TOOL_DIR")
+  done < <(_hook_watch_list "$_HOOK_GH_PR_TOOL_DIR" forgotten)
   for rscope in $recorded; do
     for pair in $pushed; do
       scope="${pair%/*}"
@@ -381,11 +385,13 @@ _hook_gh_push_updates() {
   return 0
 }
 
-# Whether gh fragment $1 runs a pull-request subcommand that pushes or opens
-# a pull request for review: create (or its alias new), ready, reopen, or
-# update-branch, judged by the word in subcommand position rather than
-# anywhere in the text. Stores that subcommand in _HOOK_GH_W_SUB.
-_hook_gh_pr_starts_checks() {
+# Whether gh fragment $1 runs a pull-request subcommand the watch pass
+# reads, judged by the word in subcommand position rather than anywhere in
+# the text: create (or its alias new), ready, reopen, or update-branch, which
+# push or open a pull request for review, or merge or close, which may end
+# one. Stores that subcommand (`create` for new) in _HOOK_GH_W_SUB; options
+# such as `--dry-run` are judged later, from _hook_gh_pr_target.
+_hook_gh_pr_watch_sub() {
   local fragment="$1" word index
   local -a words=()
   _HOOK_GH_W_SUB=''
@@ -397,16 +403,10 @@ _hook_gh_pr_starts_checks() {
       -R | --repo) ((index++)) ;;
       -*) ;;
       create | new)
-        _command_subcommand_has_option "$fragment" gh pr --dry-run && return 1
         _HOOK_GH_W_SUB=create
         return 0
         ;;
-      ready)
-        _command_subcommand_has_option "$fragment" gh pr --undo && return 1
-        _HOOK_GH_W_SUB=ready
-        return 0
-        ;;
-      reopen | update-branch)
+      ready | reopen | update-branch | merge | close)
         _HOOK_GH_W_SUB="$word"
         return 0
         ;;
@@ -416,31 +416,113 @@ _hook_gh_pr_starts_checks() {
   return 1
 }
 
-# Store the target of `gh pr ready|reopen|update-branch` fragment $1 as
-# "<repo> <arg>" in _HOOK_GH_W_TARGET: the `-R`/`--repo` value anywhere after
-# gh (or `-`) and the first positional after the subcommand (or `-`).
+# Store in _HOOK_GH_W_SHORT_VALUES and _HOOK_GH_W_LONG_VALUES (space-led and
+# space-separated) the short letters and long names of the options of `gh pr
+# <subcommand>` $1 that take a value (gh 2.x), `-R`/`--repo` aside.
+_hook_gh_pr_value_options() {
+  case "$1" in
+    merge)
+      _HOOK_GH_W_SHORT_VALUES='bFtA'
+      _HOOK_GH_W_LONG_VALUES=' body body-file subject author-email match-head-commit '
+      ;;
+    close | reopen)
+      _HOOK_GH_W_SHORT_VALUES='c'
+      _HOOK_GH_W_LONG_VALUES=' comment '
+      ;;
+    create | new)
+      _HOOK_GH_W_SHORT_VALUES='tbFBHlarmpT'
+      _HOOK_GH_W_LONG_VALUES=' title body body-file base head label assignee reviewer milestone project template recover '
+      ;;
+    *)
+      _HOOK_GH_W_SHORT_VALUES=''
+      _HOOK_GH_W_LONG_VALUES=' '
+      ;;
+  esac
+}
+
+# Store the target of `gh pr <subcommand>` fragment $1 as "<repo> <arg>" in
+# _HOOK_GH_W_TARGET: the `-R`/`--repo` value anywhere after gh (or `-`) and
+# the first positional after the subcommand (or `-`; after `--`, the next
+# word). Also stores in _HOOK_GH_W_OPTS the other options given, space-led
+# and space-separated: long names without their dashes or value, short
+# letters from any cluster as the long names the watch pass reads (`-sd`
+# gives ` squash delete-branch `) and as `-<letter>` otherwise. An option
+# that takes a value (_hook_gh_pr_value_options) skips it, separate or
+# attached, so a body or title is never read as the target or an option.
 _hook_gh_pr_target() {
-  local fragment="$1" word index sub_seen=0 repo=- arg=-
+  local fragment="$1" word index sub_seen=0 repo=- arg=- opts=' ' letters letter
   local -a words=()
+  _hook_gh_pr_value_options ''
   _fragment_token_words "$fragment" words
   _fragment_command_index "$fragment" index || return 1
   for ((index++; index < ${#words[@]}; index++)); do
     _clean_command_word "${words[$index]}" word
+    if [ "$sub_seen" = 3 ]; then
+      arg="$word"
+      break
+    fi
     case "$word" in
-      --) break ;;
+      --)
+        [ "$sub_seen" = 2 ] && [ "$arg" = - ] || break
+        sub_seen=3
+        ;;
       -R | --repo)
         ((index++))
         _clean_command_word "${words[$index]:-}" repo
         ;;
-      -R?*) repo="${word#-R}" ;;
       --repo=*) repo="${word#--repo=}" ;;
-      # `gh pr reopen --comment <text>`: the text is not the target.
-      -c | --comment) ((index++)) ;;
-      -*) ;;
-      pr) [ "$sub_seen" -gt 0 ] || sub_seen=1 ;;
+      --?*)
+        word="${word#--}"
+        case "$word" in
+          # `--auto=false` turns the option off (any false spelling gh's
+          # flag parser accepts).
+          *=false | *=0 | *=f | *=F | *=FALSE | *=False) ;;
+          *=*) opts="$opts${word%%=*} " ;;
+          *)
+            case "$_HOOK_GH_W_LONG_VALUES" in
+              *" $word "*) ((index++)) ;;
+              *) opts="$opts$word " ;;
+            esac
+            ;;
+        esac
+        ;;
+      -?*)
+        letters="${word#-}"
+        while [ -n "$letters" ]; do
+          letter="${letters:0:1}"
+          letters="${letters:1}"
+          if [ "$letter" = R ]; then
+            if [ -n "$letters" ]; then
+              repo="$letters"
+            else
+              ((index++))
+              _clean_command_word "${words[$index]:-}" repo
+            fi
+            break
+          fi
+          case "$_HOOK_GH_W_SHORT_VALUES" in
+            *"$letter"*)
+              # The rest of the cluster is the value, or else the next word.
+              [ -n "$letters" ] || ((index++))
+              break
+              ;;
+          esac
+          case "$letter" in
+            d) opts="${opts}delete-branch " ;;
+            h) opts="${opts}help " ;;
+            m) opts="${opts}merge " ;;
+            r) opts="${opts}rebase " ;;
+            s) opts="${opts}squash " ;;
+            *) opts="$opts-$letter " ;;
+          esac
+        done
+        ;;
       *)
-        if [ "$sub_seen" = 1 ]; then
+        if [ "$sub_seen" = 0 ] && [ "$word" = pr ]; then
+          sub_seen=1
+        elif [ "$sub_seen" = 1 ]; then
           sub_seen=2
+          _hook_gh_pr_value_options "$word"
         elif [ "$sub_seen" = 2 ] && [ "$arg" = - ]; then
           arg="$word"
         fi
@@ -448,6 +530,52 @@ _hook_gh_pr_target() {
     esac
   done
   _HOOK_GH_W_TARGET="${repo:--} ${arg:--}"
+  _HOOK_GH_W_OPTS="$opts"
+}
+
+# Whether `gh pr merge|close` fragment $1 (its subcommand in _HOOK_GH_W_SUB)
+# ends a pull request it names by URL or number (_HOOK_GH_W_TARGET) for sure
+# once it exits 0. Not with `--help`. A merge needs a merge method
+# (`--merge`, `--squash`, `--rebase`) and neither `--auto` nor
+# `--disable-auto`: with auto-merge it only queues, and without a terminal
+# gh refuses a merge that names no method (`--admin` included) unless it
+# merely adds the pull request to a merge queue or finds it queued or merged
+# already. A merge method on a merge-queue branch, or a pull request already
+# in a queue, still exits 0 unmerged: a documented gap. A branch or no
+# argument names no recorded pull request this can tell apart, so neither
+# counts.
+_hook_gh_pr_ends() {
+  local arg
+  _hook_gh_pr_target "$1" || return 1
+  case "$_HOOK_GH_W_OPTS" in *" help "*) return 1 ;; esac
+  if [ "$_HOOK_GH_W_SUB" = merge ]; then
+    case "$_HOOK_GH_W_OPTS" in *" auto "* | *" disable-auto "*) return 1 ;; esac
+    case "$_HOOK_GH_W_OPTS" in
+      *" merge "* | *" squash "* | *" rebase "*) ;;
+      *) return 1 ;;
+    esac
+  fi
+  arg="${_HOOK_GH_W_TARGET#* }"
+  arg="${arg#\#}"
+  [[ "$arg" =~ ^[1-9][0-9]*$ ]] || _hook_gh_pr_key_scope "$arg" >/dev/null
+}
+
+# Whether the exit status of command text $1 is that of every command in it,
+# so that 0 proves each succeeded: commands joined only by `&&`, with no
+# pipe, `;`, `||`, `&`, newline, negation, subshell, or command substitution
+# anywhere in the text, quoted or not (a quoted `;` may be a `bash -c`
+# script). Redirections such as `2>&1` stay. Conservative by design: what
+# fails this keeps a key a forget would drop.
+_hook_gh_status_attributable() {
+  local text="$1"
+  text="${text//'&&'/}"
+  text="${text//'>&'/}"
+  text="${text//'<&'/}"
+  text="${text//'&>'/}"
+  case "$text" in
+    *[\|\;\&\`\(\)]* | *$'\n'* | '!'* | *[[:space:]]'!'[[:space:]]*) return 1 ;;
+  esac
+  return 0
 }
 
 # Whether git fragment $1 runs subcommand $2 (or its dashed `git-$2` form)
@@ -475,28 +603,49 @@ _hook_gh_git_runs() {
 # _HOOK_GH_W_CREATES (a pull request was created: `gh pr create|new`, `git
 # pr-open`, `git pr-submit`), _HOOK_GH_W_PUSH (a push: `git push`, `git
 # pr-restack`, `git pr-sync-stack`, its fragment in _HOOK_GH_W_PUSH_FRAGMENT),
-# and _HOOK_GH_W_TARGETS (one "<repo> <arg>" per `gh pr
-# ready|reopen|update-branch`). Succeeds when any of them started checks.
+# _HOOK_GH_W_TARGETS (in command order, "rearm <repo> <arg>" per `gh pr
+# ready|update-branch`, "revive <repo> <arg>" per `gh pr reopen`, and
+# "forget <repo> <arg>" per `gh pr merge|close` that ends a pull request,
+# see _hook_gh_pr_ends), _HOOK_GH_W_ENDS when a forget was found, and
+# _HOOK_GH_W_STARTS when anything else was. Succeeds when any of them was.
 _hook_gh_classify() {
   local fragment found=1
   _HOOK_GH_W_CREATES='' _HOOK_GH_W_PUSH='' _HOOK_GH_W_PUSH_FRAGMENT=''
+  _HOOK_GH_W_STARTS='' _HOOK_GH_W_ENDS=''
   _HOOK_GH_W_TARGETS=()
   _hook_load_command_classifier || return 1
   while IFS= read -r fragment; do
     if _git_subcommand_is "$fragment" push; then
       if _hook_gh_push_updates "$fragment"; then
         _HOOK_GH_W_PUSH=1
+        _HOOK_GH_W_STARTS=1
         _HOOK_GH_W_PUSH_FRAGMENT="${_HOOK_GH_W_PUSH_FRAGMENT:-$fragment}"
         found=0
       fi
     elif _command_subcommand_is "$fragment" gh pr; then
-      _hook_gh_pr_starts_checks "$fragment" || continue
+      _hook_gh_pr_watch_sub "$fragment" || continue
+      case "$_HOOK_GH_W_SUB" in
+        merge | close)
+          _hook_gh_pr_ends "$fragment" || continue
+          _HOOK_GH_W_TARGETS+=("forget $_HOOK_GH_W_TARGET")
+          _HOOK_GH_W_ENDS=1
+          found=0
+          continue
+          ;;
+      esac
+      _hook_gh_pr_target "$fragment" || continue
+      # Usage, a dry run, and `ready --undo` change nothing.
+      case "$_HOOK_GH_W_OPTS" in *" help "*) continue ;; esac
+      case "$_HOOK_GH_W_SUB:$_HOOK_GH_W_OPTS" in
+        create:*" dry-run "* | ready:*" undo "*) continue ;;
+      esac
       found=0
-      if [ "$_HOOK_GH_W_SUB" = create ]; then
-        _HOOK_GH_W_CREATES=1
-      elif _hook_gh_pr_target "$fragment"; then
-        _HOOK_GH_W_TARGETS+=("$_HOOK_GH_W_TARGET")
-      fi
+      _HOOK_GH_W_STARTS=1
+      case "$_HOOK_GH_W_SUB" in
+        create) _HOOK_GH_W_CREATES=1 ;;
+        reopen) _HOOK_GH_W_TARGETS+=("revive $_HOOK_GH_W_TARGET") ;;
+        *) _HOOK_GH_W_TARGETS+=("rearm $_HOOK_GH_W_TARGET") ;;
+      esac
     else
       # A builtin match first: tokenizing every other fragment four more
       # times would slow long scripts that end in a push.
@@ -504,12 +653,14 @@ _hook_gh_classify() {
         *pr-open* | *pr-submit*)
           if _hook_gh_git_runs "$fragment" pr-open || _hook_gh_git_runs "$fragment" pr-submit; then
             _HOOK_GH_W_CREATES=1
+            _HOOK_GH_W_STARTS=1
             found=0
           fi
           ;;
         *pr-restack* | *pr-sync-stack*)
           if _hook_gh_git_runs "$fragment" pr-restack || _hook_gh_git_runs "$fragment" pr-sync-stack; then
             _HOOK_GH_W_PUSH=1
+            _HOOK_GH_W_STARTS=1
             _HOOK_GH_W_PUSH_FRAGMENT="${_HOOK_GH_W_PUSH_FRAGMENT:-$fragment}"
             found=0
           fi
@@ -549,19 +700,52 @@ _hook_gh_record_output() {
   done <<<"$1"
 }
 
-# Re-arm recorded pull requests the `gh pr ready|reopen|update-branch`
-# targets in _HOOK_GH_W_TARGETS named: a URL, or `-R owner/repo` (or
-# host/owner/repo) plus a number, names one key; a bare number names every
-# recorded key of that number (how a closed pull request is revived on
-# reopen); a branch or no argument re-arms all.
-_hook_gh_rearm_targets() {
-  local target repo arg key owner name
+# Remove label $1 from _HOOK_GH_W_LABELS (space-led, space-separated),
+# keeping that shape. `read -a` splits without pathname expansion: labels are
+# URLs, which may hold `?`.
+_hook_gh_drop_label() {
+  local label out=''
+  local -a labels=()
+  read -r -a labels <<<"$_HOOK_GH_W_LABELS"
+  for label in ${labels[@]+"${labels[@]}"}; do
+    [ "$label" = "$1" ] || out="$out $label"
+  done
+  _HOOK_GH_W_LABELS="$out"
+}
+
+# Apply _HOOK_GH_W_TARGETS in command order.
+#   rearm   re-arms the recorded pull requests `gh pr ready|update-branch`
+#           named: a URL, or `-R owner/repo` (or host/owner/repo) plus a
+#           number, names one key; a bare number (a leading `#` ignored)
+#           names every recorded key of that number; a branch or no argument
+#           re-arms all.
+#   revive  the same for `gh pr reopen`, which also revives forgotten keys
+#           (_hook_watch_rearm_key revives the one key a URL or `-R` names;
+#           a bare number revives every forgotten key of that number, and a
+#           branch or no argument every forgotten key): a reopened pull
+#           request runs its checks again.
+#   forget  forgets the one key a merge or close named, when $1 allows it:
+#           1 for a URL or `-R` plus a number, 2 also for a bare number,
+#           which counts only when exactly one key of the session, recorded
+#           (open or terminal) or forgotten, has that number and it is open.
+#           gh merges the number in whatever repository it runs in, so a
+#           forget by number is a guess, and one that guessed wrong would
+#           hide another pull request's checks: an ambiguous number forgets
+#           nothing. Its label leaves _HOOK_GH_W_LABELS: `create && merge`
+#           has nothing left to remind about, while a later re-arm in the
+#           same command (`close && reopen`) adds it back.
+_hook_gh_apply_targets() {
+  local forget="$1" target op repo arg key owner name state count open
   for target in ${_HOOK_GH_W_TARGETS[@]+"${_HOOK_GH_W_TARGETS[@]}"}; do
+    op="${target%% *}"
+    target="${target#* }"
     repo="${target%% *}"
     arg="${target#* }"
     arg="${arg#\#}"
+    [ "$op" != forget ] || [ "$forget" -ge 1 ] || continue
+    key=''
     if _hook_gh_pr_key_scope "$arg" >/dev/null; then
-      _hook_gh_add_labels "$(_hook_watch_rearm_key "$_HOOK_GH_PR_TOOL_DIR" "$_HOOK_GH_PR_KEY")"
+      key="$_HOOK_GH_PR_KEY"
     elif [[ "$arg" =~ ^[1-9][0-9]*$ ]]; then
       if [ "$repo" != - ]; then
         name="${repo##*/}"
@@ -571,15 +755,39 @@ _hook_gh_rearm_targets() {
           continue
         fi
         _hook_gh_lower key "${owner}_${name}_$arg"
-        _hook_gh_add_labels "$(_hook_watch_rearm_key "$_HOOK_GH_PR_TOOL_DIR" "$key")"
+      elif [ "$op" = forget ]; then
+        [ "$forget" -ge 2 ] || continue
+        count=0 open=''
+        while read -r name _ state; do
+          [[ "$name" == *"_$arg" ]] || continue
+          count=$((count + 1))
+          [ "$state" != open ] || open="$name"
+        done < <(_hook_watch_list "$_HOOK_GH_PR_TOOL_DIR" forgotten)
+        [ "$count" = 1 ] && [ -n "$open" ] || continue
+        key="$open"
       else
-        while read -r key _; do
+        while read -r key _ state; do
           [[ "$key" == *"_$arg" ]] || continue
+          [ "$state" != forgotten ] || [ "$op" = revive ] || continue
           _hook_gh_add_labels "$(_hook_watch_rearm_key "$_HOOK_GH_PR_TOOL_DIR" "$key")"
-        done < <(_hook_watch_list "$_HOOK_GH_PR_TOOL_DIR")
+        done < <(_hook_watch_list "$_HOOK_GH_PR_TOOL_DIR" forgotten)
+        continue
       fi
+    elif [ "$op" = forget ]; then
+      continue
+    fi
+    if [ "$op" = forget ]; then
+      _hook_watch_forget "$_HOOK_GH_PR_TOOL_DIR" "$key" &&
+        _hook_gh_drop_label "$_HOOK_WATCH_KEY_LABEL"
+    elif [ -n "$key" ]; then
+      _hook_gh_add_labels "$(_hook_watch_rearm_key "$_HOOK_GH_PR_TOOL_DIR" "$key")"
     else
       _hook_gh_add_labels "$(_hook_watch_rearm "$_HOOK_GH_PR_TOOL_DIR" ALL)"
+      [ "$op" = revive ] || continue
+      while read -r key _ state; do
+        [ "$state" = forgotten ] || continue
+        _hook_gh_add_labels "$(_hook_watch_rearm_key "$_HOOK_GH_PR_TOOL_DIR" "$key")"
+      done < <(_hook_watch_list "$_HOOK_GH_PR_TOOL_DIR" forgotten)
     fi
   done
 }
@@ -706,17 +914,23 @@ _hook_gh_checks_reminder() {
 #   <watch-command>  the watcher to recommend, default `git pr-watch --wait`
 #                    (a wrapper may name its own; recording still needs
 #                    `git-pr-watch` on PATH).
-# Fails, doing nothing, when the text runs no command that starts checks (a
-# caller may then fall back to output evidence). Otherwise it succeeds, and
-# for a successful command it records created pull requests, re-arms after
-# `gh pr ready|reopen|update-branch` and pushes (a background call records
-# nothing and a pushing one re-arms all), and reminds: after a record or
-# re-arm, every time, with the watch commands; otherwise once per prompt per
-# command text, with _hook_gh_checks_reminder, and not at all when this
-# hook process already gave a PR checks reminder (_HOOK_GH_WATCH_REMINDED,
-# say post-bash's own for a wrapped push's printed summary), so a wrapped
-# command gets one general reminder, not two. AGENTGUARD_WATCH=0 turns
-# recording and re-arming off; AGENTGUARD_PR_WATCH_HINT replaces the advice,
+# Fails, doing nothing, when the text runs no command that starts checks
+# and none that merges or closes a pull request (a caller may then fall
+# back to output evidence). Otherwise it succeeds, and for a successful
+# command it records created pull requests, re-arms after `gh pr
+# ready|reopen|update-branch` and pushes (a background call records nothing
+# and a pushing one re-arms all), forgets pull requests `gh pr merge|close`
+# ended (_hook_gh_pr_ends; only in a foreground call whose status the
+# payload proves, _hook_tool_status_known, and is that of every command in
+# it, _hook_gh_status_attributable, since a forget in error hides checks
+# nobody watches), and reminds: after a record or re-arm, every time, with
+# the watch commands; otherwise once per prompt per command text, with
+# _hook_gh_checks_reminder, and not at all when this hook process already
+# gave a PR checks reminder (_HOOK_GH_WATCH_REMINDED, say post-bash's own
+# for a wrapped push's printed summary), so a wrapped command gets one
+# general reminder, not two. A command that only merges or closes never
+# reminds. AGENTGUARD_WATCH=0 turns recording, re-arming, and forgetting
+# off; AGENTGUARD_PR_WATCH_HINT replaces the advice,
 # its `<labels>` token filled in. Needs Bash 4 (the command classifier).
 # Sets _HOOK_GH_WATCH_LABELS (the labels recorded or re-armed),
 # _HOOK_GH_WATCH_PASS_REMINDED (1 when this call reminded, reset at entry),
@@ -724,16 +938,33 @@ _hook_gh_checks_reminder() {
 # or skipped as a repeat within the prompt.
 _hook_gh_watch_pass() {
   local text="$1" output="$2" status="$3" background="$4" watch="${5:-}"
-  local hint command advice key
+  local hint command advice key known forget=0
   _HOOK_GH_W_LABELS=''
   _HOOK_GH_WATCH_LABELS=''
   _HOOK_GH_WATCH_PASS_REMINDED=''
   _hook_gh_watch_prefilter "$text" || return 1
   _hook_gh_classify "$text" || return 1
-  [ "$status" != - ] || status=$(_hook_hm_tool_status)
+  # Only merges or closes: nothing to remind about, and without obligations
+  # to forget, no reason to read the status.
+  if [ -z "$_HOOK_GH_W_STARTS" ]; then
+    ! _hook_flag_disabled "${AGENTGUARD_WATCH:-}" && [ -d "$_HOOK_STATE_DIR/watch" ] || return 0
+  fi
+  # Only a forget needs to know the status rather than assume 0 when the
+  # payload reports none; finding that out costs another jq on Claude Code.
+  if [ "$status" != - ]; then
+    known="$status"
+  elif [ -n "$_HOOK_GH_W_ENDS" ]; then
+    _hook_tool_status_known known
+    status="${known:-0}"
+  else
+    known=''
+    status=$(_hook_tool_status_field) || status=''
+    case "$status" in '' | *[!0-9]*) status=0 ;; esac
+  fi
   [ "$status" = 0 ] || return 0
-  # Only a successful create, push, or gh re-arm feeds the obligations, and
-  # push parsing runs only once this session recorded something to re-arm.
+  # Only a successful create, push, gh re-arm, or forget feeds the
+  # obligations, and push parsing runs only once this session recorded
+  # something to re-arm.
   if ! _hook_flag_disabled "${AGENTGUARD_WATCH:-}" &&
     { [ -n "$_HOOK_GH_W_CREATES" ] || [ "${#_HOOK_GH_W_TARGETS[@]}" -gt 0 ] ||
       { [ -n "$_HOOK_GH_W_PUSH" ] && [ -d "$_HOOK_STATE_DIR/watch" ]; }; } &&
@@ -757,7 +988,16 @@ _hook_gh_watch_pass() {
     hint="${AGENTGUARD_PR_WATCH_HINT:-Run \`${watch:-git pr-watch --wait} <labels>\` in the background (one run per repository, from its checkout) and act on its result when it exits.}"
     [ -z "$_HOOK_GH_W_CREATES" ] || _hook_gh_record_output "$output" "$hint"
     [ -d "$_HOOK_STATE_DIR/watch" ] || _HOOK_GH_W_TARGETS=()
-    _hook_gh_rearm_targets
+    if [ -n "$known" ] && _hook_gh_status_attributable "$text" &&
+      _hook_gh_status_attributable "${AGENTGUARD_CMD_TRIMMED:-$text}"; then
+      forget=2
+      # GH_REPO (set in the command or inherited) points gh at another
+      # repository than the checkout's, so a bare number says even less
+      # about which pull request ended.
+      [ -z "${GH_REPO:-}" ] || forget=1
+      case "$text ${AGENTGUARD_CMD_TRIMMED:-}" in *GH_REPO*) forget=1 ;; esac
+    fi
+    _hook_gh_apply_targets "$forget"
     if [ -n "$_HOOK_GH_W_PUSH" ] && [ -d "$_HOOK_STATE_DIR/watch" ]; then
       if [ "$background" = 1 ]; then
         _hook_gh_add_labels "$(_hook_watch_rearm "$_HOOK_GH_PR_TOOL_DIR" ALL)"
@@ -767,6 +1007,7 @@ _hook_gh_watch_pass() {
     fi
   fi
   _HOOK_GH_WATCH_LABELS="${_HOOK_GH_W_LABELS# }"
+  [ -n "$_HOOK_GH_W_STARTS" ] || return 0
   if [ -n "$_HOOK_GH_WATCH_LABELS" ]; then
     # Every record or re-arm is new work, so it always reminds, even when the
     # same command ran earlier in the prompt.
