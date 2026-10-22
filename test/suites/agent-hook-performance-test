@@ -5,6 +5,44 @@
 AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
 . "$AGENTGUARD_TEST_HELPERS"
 
+# A single batch median is a noisy estimate on a hosted runner: one
+# contention window inflates every sample in the batch, however fast the
+# hook is. A median-only breach therefore collects two more batches and
+# judges the median of the three batch medians: passing requires at
+# least two of the three batch medians under the budget. The original
+# batch stays in the vote, so this is a failure-triggered majority
+# vote, not a rerun-until-pass: slowness that persists across the
+# whole sampling window fails at least two batches and still fails,
+# while a one-batch contention window cannot fail the suite alone.
+# The trade-off is symmetric: an intermittent regression confined to
+# one batch would be outvoted just as one-batch contention is —
+# timing alone cannot tell them apart. Where a per-sample cap is set
+# (the compound family), it is re-checked over every pooled sample;
+# the cheap-path assertions set no cap, so for them the majority vote
+# is the only guard. A breach of the per-sample cap is not
+# median-only and fails at once, as does a hook error or timeout
+# (exit 2 from the harness below).
+#
+# Confirmation only decorrelates contention that varies within its
+# window: the batches run back-to-back, seconds apart, so a host that
+# stays slow across all three batches — the common slow-runner draw,
+# and what the 2026-10-22 incident's job-wide elevation resembled —
+# still fails. That is the conservative direction, but it means this
+# mechanism does not by itself rescue a job-long slow runner. Where
+# a cap is set, re-checking it over 27 samples instead of 9 is a
+# stricter test than the original (more chances to sample a tail
+# event); warmup runs are excluded from both the medians and the
+# pooled maximum, as they always were.
+#
+# Cost bound: a breached assertion runs 3 batches of (2 warmups +
+# `iterations` samples), each run capped by the per-run timeout, so one
+# assertion costs at most 3 * (2 + iterations) * timeout (~66s at the
+# defaults of 9 samples and a 2s timeout, ~11 minutes if all ten timed
+# assertions breach). Never call this from a backgrounded or parallel
+# context: a wall-clock median is only meaningful when the suite owns
+# the host, which is why `test/agentguard-test` runs this suite
+# exclusively, ahead of the parallel pool and last among the exclusive
+# suites.
 _assert_hook_median_under() {
   local desc="$1" hook="$2" input="$3"
   local max_ms="${4:-${AGENTGUARD_PERF_MAX_MEDIAN_MS:-250}}"
@@ -24,6 +62,13 @@ max_ms = float(max_ms_arg)
 max_sample_limit_ms = float(max_sample_ms_arg)
 iterations = int(os.environ.get("AGENTGUARD_PERF_ITERATIONS", "9"))
 timeout = float(os.environ.get("AGENTGUARD_PERF_TIMEOUT_SEC", "2"))
+if iterations < 1 or timeout <= 0:
+    print(
+        "invalid perf overrides: "
+        f"AGENTGUARD_PERF_ITERATIONS={iterations}, "
+        f"AGENTGUARD_PERF_TIMEOUT_SEC={timeout}"
+    )
+    sys.exit(2)
 
 env = os.environ.copy()
 env.update({
@@ -48,7 +93,6 @@ for key in (
     env.pop(key, None)
 
 cwd = os.environ.get("AGENTGUARD_ROOT")
-samples = []
 payload = hook_input.encode()
 
 def run_once():
@@ -74,21 +118,75 @@ def run_once():
         sys.exit(2)
     return elapsed_ms
 
-for _ in range(2):
-    run_once()
+def run_batch():
+    # Two warmup runs per batch, excluded from the samples (as the
+    # original single-batch harness did), then `iterations` samples.
+    # Every batch — the first and both confirmation batches — reuses
+    # the same iteration count.
+    for _ in range(2):
+        run_once()
+    samples = [run_once() for _ in range(iterations)]
+    return statistics.median(samples), max(samples)
 
-for _ in range(iterations):
-    samples.append(run_once())
-
-median_ms = statistics.median(samples)
-max_sample_ms = max(samples)
+median_ms, max_sample_ms = run_batch()
 summary = (
     f"median {median_ms:.1f}ms <= {max_ms:.1f}ms "
     f"(max sample {max_sample_ms:.1f}ms, n={iterations})"
 )
-print(summary)
 within_tail_limit = max_sample_limit_ms <= 0 or max_sample_ms <= max_sample_limit_ms
-sys.exit(0 if median_ms <= max_ms and within_tail_limit else 1)
+if median_ms <= max_ms and within_tail_limit:
+    print(summary)
+    sys.exit(0)
+if not within_tail_limit:
+    # A per-sample cap breach is a tail failure, not a noisy median:
+    # it is never eligible for the confirmation batches below.
+    print(summary)
+    sys.exit(1)
+
+# Median-only breach: collect two confirmation batches and judge the
+# median of the three batch medians. The first batch remains a vote and,
+# where a per-sample cap is set, it is re-checked against the pooled
+# maximum, so one fast batch cannot outvote two slow ones and no sample
+# is discarded.
+batch_medians = [median_ms]
+pooled_max_ms = max_sample_ms
+try:
+    for _ in range(2):
+        batch_median_ms, batch_max_ms = run_batch()
+        batch_medians.append(batch_median_ms)
+        pooled_max_ms = max(pooled_max_ms, batch_max_ms)
+except SystemExit:
+    # A hook error or timeout in a confirmation batch: keep the
+    # context the bare error line would otherwise destroy, then let
+    # the original exit status stand.
+    print(
+        f"initial median {median_ms:.1f}ms vs {max_ms:.1f}ms budget; "
+        f"confirmation aborted, batch medians so far "
+        f"[{', '.join(f'{value:.1f}' for value in batch_medians)}]ms "
+        f"(hook error or timeout reported above)"
+    )
+    raise
+median_of_medians_ms = statistics.median(batch_medians)
+within_tail_limit = (
+    max_sample_limit_ms <= 0 or pooled_max_ms <= max_sample_limit_ms
+)
+# Neutral wording on this path: the first batch breached by
+# definition, so no statistic is printed with a "<=" it does not
+# satisfy; the _pass/_fail prefix carries the verdict.
+print(
+    f"initial median {median_ms:.1f}ms vs {max_ms:.1f}ms budget "
+    f"(max sample {max_sample_ms:.1f}ms, n={iterations}); "
+    f"confirmation batch medians "
+    f"[{', '.join(f'{value:.1f}' for value in batch_medians)}]ms, "
+    f"median-of-medians {median_of_medians_ms:.1f}ms "
+    f"vs {max_ms:.1f}ms budget "
+    f"(pooled max sample {pooled_max_ms:.1f}ms, n={iterations * 3})"
+)
+sys.exit(
+    0
+    if median_of_medians_ms <= max_ms and within_tail_limit
+    else 1
+)
 PY
   )
   status=$?
