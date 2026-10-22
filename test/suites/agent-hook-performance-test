@@ -10,16 +10,18 @@ AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/
 # hook is. A median-only breach therefore collects two more batches and
 # judges the median of the three batch medians: passing requires at
 # least two of the three batch medians under the budget. The original
-# batch stays in the vote and the per-sample cap still covers every
-# sample, so this is a more robust estimator, not a rerun-until-pass:
-# slowness that persists across the whole sampling window fails at
-# least two batches and still fails, while a one-batch contention
-# window cannot fail the suite alone. The trade-off is symmetric: an
-# intermittent regression confined to one batch would be outvoted just
-# as one-batch contention is — timing alone cannot tell them apart,
-# and the pooled per-sample cap still bounds every sample taken.
-# A breach of the per-sample cap is not median-only and fails at once,
-# as does a hook error or timeout (exit 2 from the harness below).
+# batch stays in the vote, so this is a failure-triggered majority
+# vote, not a rerun-until-pass: slowness that persists across the
+# whole sampling window fails at least two batches and still fails,
+# while a one-batch contention window cannot fail the suite alone.
+# The trade-off is symmetric: an intermittent regression confined to
+# one batch would be outvoted just as one-batch contention is —
+# timing alone cannot tell them apart. Where a per-sample cap is set
+# (the compound family), it is re-checked over every pooled sample;
+# the cheap-path assertions set no cap, so for them the majority vote
+# is the only guard. A breach of the per-sample cap is not
+# median-only and fails at once, as does a hook error or timeout
+# (exit 2 from the harness below).
 #
 # Cost bound: a breached assertion runs 3 batches of (2 warmups +
 # `iterations` samples), each run capped by the per-run timeout, so one
@@ -131,9 +133,10 @@ if not within_tail_limit:
     sys.exit(1)
 
 # Median-only breach: collect two confirmation batches and judge the
-# median of the three batch medians. The first batch remains a vote and
-# the per-sample cap is re-checked against the pooled maximum, so one
-# fast batch cannot outvote two slow ones and no sample is discarded.
+# median of the three batch medians. The first batch remains a vote and,
+# where a per-sample cap is set, it is re-checked against the pooled
+# maximum, so one fast batch cannot outvote two slow ones and no sample
+# is discarded.
 batch_medians = [median_ms]
 pooled_max_ms = max_sample_ms
 for _ in range(2):
