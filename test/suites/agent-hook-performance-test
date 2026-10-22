@@ -20,6 +20,16 @@ AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/
 # and the pooled per-sample cap still bounds every sample taken.
 # A breach of the per-sample cap is not median-only and fails at once,
 # as does a hook error or timeout (exit 2 from the harness below).
+#
+# Cost bound: a breached assertion runs 3 batches of (2 warmups +
+# `iterations` samples), each run capped by the per-run timeout, so one
+# assertion costs at most 3 * (2 + iterations) * timeout (~66s at the
+# defaults of 9 samples and a 2s timeout, ~11 minutes if all ten timed
+# assertions breach). Never call this from a backgrounded or parallel
+# context: a wall-clock median is only meaningful when the suite owns
+# the host, which is why `test/agentguard-test` runs this suite
+# exclusively, ahead of the parallel pool and last among the exclusive
+# suites.
 _assert_hook_median_under() {
   local desc="$1" hook="$2" input="$3"
   local max_ms="${4:-${AGENTGUARD_PERF_MAX_MEDIAN_MS:-250}}"

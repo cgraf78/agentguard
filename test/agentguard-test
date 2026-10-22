@@ -124,8 +124,20 @@ done
 
 # Run timing and signal-deadline suites before the worker pool so their measured
 # signal is not biased by the CPU and writeback residue of peak parallel load.
+# The performance suite runs last among them: by then the helpers and runner
+# suites have already exercised the host, so its latency medians are taken
+# under the residual load its confirmation batches are designed to arbitrate,
+# not on the idle machine a CI job only resembles at startup.
 for suite in ${exclusive_suites[@]+"${exclusive_suites[@]}"}; do
-  "$suite"
+  case "${suite##*/}" in
+    agent-hook-performance-test) continue ;;
+    *) "$suite" ;;
+  esac
+done
+for suite in ${exclusive_suites[@]+"${exclusive_suites[@]}"}; do
+  case "${suite##*/}" in
+    agent-hook-performance-test) "$suite" ;;
+  esac
 done
 "$test_dir/run-suites" ${parallel_suites[@]+"${parallel_suites[@]}"}
 
