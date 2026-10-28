@@ -36,6 +36,9 @@ _HOOK_HM_POLICY_AGENT=''
 _HOOK_INPUT_STATE_REFRESHED=''
 _HOOK_INPUT_SESSION=''
 _HOOK_INPUT_EVENT=''
+# A malformed or vanished native shell cwd cannot be used for repository
+# bookkeeping after execution. Output scanners can still inspect the response.
+_HOOK_COMMAND_CWD_VALID=1
 # Set once this process has tried to read stdin, so the telemetry trap does not
 # wait on an empty or held-open pipe a second time.
 _HOOK_INPUT_ATTEMPTED=''
@@ -1388,6 +1391,7 @@ _hook_parse_command() {
   # normal allow response; jq 1.7 decodes a lone \u0000 to an empty string.
   # _hook_finish always exits.
   [ -n "$cmd" ] || _hook_finish
+  _hook_cd_to_command_cwd "$_can_block"
   # Strip leading whitespace exactly like the historical
   # `sed 's/^[[:space:]]*//'` (every line: sed is line-oriented, so a leading
   # newline survives into TRIMMED and empties the first line below). mapfile
@@ -1717,6 +1721,41 @@ _hook_gh_watch_prefilter() {
       ;;
   esac
   [[ "$1" =~ $_HOOK_GH_PREFILTER_GH_PR ]]
+}
+
+# Codex runs hooks in the host directory even when its native envelope names
+# the shell's actual execution directory. Use that host-owned field, never an
+# arbitrary tool_input.cwd/workdir that a Bash-compatible runtime may ignore.
+# Older Codex releases report only the session directory; explicit `git -C`
+# remains necessary there. Do not guess a directory from transcript contents.
+_hook_cd_to_command_cwd() {
+  local can_block="$1" agent target
+  _hook_agent_name agent
+  [ "$agent" = codex ] || return 0
+  # Extensions are adjacent to the invoked launcher (including a symlink),
+  # not to the command's repository. Freeze a relative invocation path before
+  # changing cwd so repository contents cannot replace an extension.
+  case "${_HOOK_SELF:-$0}" in
+    /*) ;;
+    *) _HOOK_SELF="${PWD%/}/${_HOOK_SELF:-$0}" ;;
+  esac
+  # Appending /. preserves trailing newlines in a valid pathname across the
+  # command substitution; NUL cannot be represented in a shell pathname.
+  if target=$(printf '%s' "$_HOOK_INPUT" | jq -r '
+    if type != "object" or (has("cwd") | not) then empty
+    elif (.cwd | type) == "string" then
+      if (.cwd | startswith("/")) and (.cwd | contains("\u0000") | not)
+      then .cwd + "/." else error("invalid cwd") end
+    else error("invalid cwd") end
+  ' 2>/dev/null) && { [ -z "$target" ] || cd -P -- "$target" 2>/dev/null; }; then
+    return 0
+  fi
+  _HOOK_COMMAND_CWD_VALID=0
+  if [ "$can_block" = 1 ]; then
+    _hook_block 'cannot inspect the command directory: Codex supplied an invalid or inaccessible cwd. Refusing to classify the command in another directory.'
+    _hook_finish
+  fi
+  _hook_warn 'Codex supplied an invalid or inaccessible command directory; repository watch bookkeeping is skipped, but command output is still inspected.'
 }
 
 # Uses the command classifier to change into a leading `cd` target. Used by

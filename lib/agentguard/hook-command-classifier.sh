@@ -4155,13 +4155,77 @@ _man_noninteractive() {
   esac
 }
 
+# Recognize GDB's batch modes without mistaking command text, filenames, or
+# inferior arguments for an option. Unknown options stay conservative; add their
+# argument shape here only when a real batch workflow needs them.
+_gdb_noninteractive() {
+  local fragment="$1" word i
+  local -a words=()
+
+  _fragment_token_words "$fragment" words
+  _fragment_command_index_from_words "${words[@]}" || return 1
+  for ((i = _FRAGMENT_COMMAND_INDEX + 1; i < ${#words[@]}; i++)); do
+    _clean_command_word "${words[$i]}" word
+    case "$word" in
+      -batch | --batch | -batch-silent | --batch-silent) return 0 ;;
+      -- | -args | --args) return 1 ;;
+      # These options consume the next token even when it spells --batch.
+      -ex | --eval-command | -iex | --init-eval-command | \
+        -x | --command | -ix | --init-command | \
+        -p | --pid | -c | --core | -s | --symbols | -e | --exec | \
+        -se | --se | -d | --directory | -cd | --cd | -tty | --tty)
+        ((i++))
+        [ "$i" -lt "${#words[@]}" ] || return 1
+        ;;
+      --eval-command=* | --init-eval-command=* | --command=* | --init-command=* | \
+        --pid=* | --core=* | --symbols=* | --exec=* | --se=* | \
+        --directory=* | --cd=* | --tty=*) ;;
+      -q | --quiet | --silent | -nx | --nx | -nh | --nh) ;;
+      -*) return 1 ;;
+      *) ;; # GDB permits executable/core operands before its batch option.
+    esac
+  done
+  return 1
+}
+
+# A remote expression contacts an existing Neovim server and exits. Require
+# both values explicitly: a bare --server does not select client-only mode,
+# and an option mentioned inside an expression must stay expression data.
+_nvim_remote_expr() {
+  local fragment="$1" word value i server=0 expression=0
+  local -a words=()
+
+  _fragment_token_words "$fragment" words
+  _fragment_command_index_from_words "${words[@]}" || return 1
+  for ((i = _FRAGMENT_COMMAND_INDEX + 1; i < ${#words[@]}; i++)); do
+    _clean_command_word "${words[$i]}" word
+    case "$word" in
+      --server | --remote-expr)
+        ((i++))
+        [ "$i" -lt "${#words[@]}" ] || return 1
+        _clean_command_word "${words[$i]}" value
+        [ -n "$value" ] || return 1
+        if [ "$word" = --server ]; then
+          [[ "$value" != -* ]] || return 1
+          server=1
+        else
+          expression=1
+        fi
+        ;;
+      *) return 1 ;;
+    esac
+  done
+  [ "$server" -eq 1 ] && [ "$expression" -eq 1 ]
+}
+
 # Flags that switch a normally-interactive command into a non-interactive mode,
 # keyed by command family. This is the extension point for the TTY guard: a
 # family gains a batch mode by adding one row here. Value-taking pager selection
-# uses _man_noninteractive instead. Families with neither keep blocking.
+# and client modes use argument-aware helpers instead. Families with neither
+# keep blocking.
 #
 # Absence of a row means "not implemented here", not "has no batch mode" —
-# `gdb --batch`, `emacs --batch`, and `top -b -n 1` are all real batch
+# `emacs --batch` and `top -b -n 1` are real batch
 # invocations that this table deliberately does not cover yet. Add a row when
 # one of them is actually needed.
 #
@@ -4198,10 +4262,19 @@ _fragment_has_noninteractive_flag() {
   local fragment="$1" command_word="$2" word flag i
   local -a words=() flags=()
 
-  if [ "${command_word##*/}" = man ]; then
-    _man_noninteractive "$fragment"
-    return $?
-  fi
+  case "${command_word##*/}" in
+    man)
+      _man_noninteractive "$fragment"
+      return $?
+      ;;
+    gdb)
+      _gdb_noninteractive "$fragment"
+      return $?
+      ;;
+    nvim)
+      _nvim_remote_expr "$fragment" && return 0
+      ;;
+  esac
 
   while IFS= read -r flag; do
     flags+=("$flag")

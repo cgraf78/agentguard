@@ -272,7 +272,16 @@ missed one, and the producer's push-race guard covers an early check).
   re-armed and then ended is left out of the labelled reminder (a command
   that also started checks, such as `gh pr create && gh pr merge`, may
   still get the general one once per prompt). A command that only merges
-  or closes never reminds. Without a terminal, gh refuses a merge
+  or closes gives no checks-started reminder. When its status is unknown,
+  a foreground call instead recommends a one-shot `git pr-watch <url>` for
+  its recorded, unambiguous targets, once per prompt. Targets from different
+  repositories get separate commands, each run from its owning checkout.
+  `AGENTGUARD_PR_WATCH_HINT`, when set, replaces this default advice too.
+  This does not forget or change the obligation: the producer's structured
+  merged/closed result confirms completion; pending and failed results leave
+  it outstanding. An ambiguous bare number, an unrecorded target, or a newer
+  producer result already marked merged/closed gets no reconciliation hint.
+  Without a terminal, gh refuses a merge
   that names no method (`--admin` alone included) unless it merely joins a
   merge queue or finds the pull request queued or merged already, so only a
   merge method counts.
@@ -328,7 +337,7 @@ clean; all but the classifier-based ones (marked Bash 4) run under Bash 3.2.
 | `_hook_watch_claim_block <tool-dir> <key>` | claims the one Stop block per record or re-arm |
 | `_hook_watch_launch <option>[\|<option>...] <command> [<subcommand>]` | pre-bash only (needs the command classifier): whether the command runs a watcher with one of the options; sets `_HOOK_WATCH_DETACHED` |
 | `_hook_gh_pr_key_scope <url>` | prints `<key> <scope>` for a pull-request URL and sets `_HOOK_GH_PR_KEY`, `_HOOK_GH_PR_SCOPE`, `_HOOK_GH_PR_NUMBER` |
-| `_hook_gh_watch_pass <command-text> <output> <status\|-> <background\|-> [<watch-command>]` | Bash 4. The post-bash watch pass, the same code post-bash runs on the agent's own command: judges `<command-text>` (lines of shell) and, for a successful command, records created pull requests from the bare URL lines in `<output>`, re-arms after `gh pr ready\|reopen\|update-branch` and pushes (a push is also parsed with the hook payload's stderr), forgets after `gh pr merge\|close` under the conditions above (`AGENTGUARD_CMD_TRIMMED` must pass the same command-text check as `<command-text>`), and reminds as described above. `<status>` and `<background>` (`1` or `0`) may be `-` to read them from the hook payload. A `<status>` the caller passes counts as known, so a `0` lets a merge or close forget: pass `-` unless you know the unwrapped command's own exit status. `<watch-command>` (default `git pr-watch --wait`) is what the reminders and the stored hint recommend; recording still needs `git-pr-watch` on `PATH`. Fails, doing nothing, when the text runs no command that starts checks and none that ends a pull request it names (see Forget); such a merge or close alone succeeds without reminding. Skips the general reminder when `_HOOK_GH_WATCH_REMINDED` is already set. Sets `_HOOK_GH_WATCH_LABELS` (labels recorded or re-armed), `_HOOK_GH_WATCH_PASS_REMINDED` (this call reminded; reset at entry), and, after any reminder, `_HOOK_GH_WATCH_REMINDED` |
+| `_hook_gh_watch_pass <command-text> <output> <status\|-> <background\|-> [<watch-command>]` | Bash 4. The post-bash watch pass, the same code post-bash runs on the agent's own command: judges `<command-text>` (lines of shell) and, for a successful command, records created pull requests from the bare URL lines in `<output>`, re-arms after `gh pr ready\|reopen\|update-branch` and pushes (a push is also parsed with the hook payload's stderr), forgets after `gh pr merge\|close` under the conditions above (`AGENTGUARD_CMD_TRIMMED` must pass the same command-text check as `<command-text>`), and reminds as described above. `<status>` and `<background>` (`1` or `0`) may be `-` to read them from the hook payload. A `<status>` the caller passes counts as known, so a `0` lets a merge or close forget: pass `-` unless you know the unwrapped command's own exit status. `<watch-command>` (default `git pr-watch --wait`) is what the reminders and the stored hint recommend; recording still needs `git-pr-watch` on `PATH`. Fails, doing nothing, when the text runs no command that starts checks and none that ends a pull request it names (see Forget); such a merge or close alone gives no checks-started reminder, but unknown status may produce the one-shot reconciliation advice described above. Skips the general reminder when `_HOOK_GH_WATCH_REMINDED` is already set. Sets `_HOOK_GH_WATCH_LABELS` (labels recorded or re-armed), `_HOOK_GH_WATCH_PASS_REMINDED` (this call reminded; reset at entry), and, after any reminder, `_HOOK_GH_WATCH_REMINDED` |
 | `_hook_gh_watch_chain <variable>` | pre-bash only (needs the command classifier): stores in the named variable the first command in the hook's command that records or re-arms a pull request (`git push`, `git pr-open\|pr-submit\|pr-restack\|pr-sync-stack`, `gh pr create\|new\|ready\|reopen\|update-branch`) and succeeds; fails when there is none. Lets an extension advise against chaining a watcher behind such a command |
 | `_hook_gh_checks_reminder [<watch-command>]` | the general reminder alone (hint, else the watch command when it can run, else `gh pr checks`); sets `_HOOK_GH_WATCH_REMINDED`; callers de-duplicate (see the contract below) |
 | `_hook_gh_push_scopes <output> <command>` | prints the recorded scopes a successful push re-arms, `ALL`, or nothing. `<command>` decides two things: a dry-run, delete, `--no-push`, or help word means nothing re-arms, and only a command with a `push` word re-arms `ALL` when it printed output but no `To` block (blank output re-arms `ALL` for any command). Its words are split on whitespace without honoring quotes, so `-o 'x -n'` reads as `-n` |
@@ -442,7 +451,10 @@ watcher basename.
 - Codex payloads carry no exit status, and a cancelled Muse call with empty
   output reads as status 0, so either can re-arm everything on a quiet push
   or revive a terminal key after a failed `gh pr reopen` (nuisance re-arms,
-  never missed ones). Neither forgets on a merge or close.
+  never missed ones). Reminders for those unknown-status calls say checks
+  may have started, rather than asserting success. Neither forgets on a
+  merge or close: a one-shot `git pr-watch <url>` query can publish the
+  authoritative merged/closed result without starting a waiting process.
 - A merge or close by branch or with no argument (the current branch's pull
   request), with an ambiguous bare number, through a script or another tool,
   or chained other than by `&&` forgets nothing: the gate stays until a

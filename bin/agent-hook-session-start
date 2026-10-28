@@ -66,6 +66,12 @@ if [ -n "$disk" ] && [ "$disk" -gt 90 ] 2>/dev/null; then
   _hook_context "WARNING: Disk usage at ${disk}%"
 fi
 
+_session_agent=''
+_hook_agent_name _session_agent
+if [ "$_session_agent" = codex ]; then
+  _hook_context 'Use git -C /absolute/repository for Git commands targeting a checkout: older Codex releases omit exec_command workdir from hook payloads. Explicit -C keeps repository protections accurate without weakening them.'
+fi
+
 _hook_hm_session_start
 # A reused session key (pid-derived fallbacks repeat after logout/reboot)
 # must not inherit a previous session's churn bypass: the marker persists in

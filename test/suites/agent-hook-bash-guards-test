@@ -311,6 +311,48 @@ _assert_eq "echo nvim --headless: allowed" "0" "$HOOK_EXIT"
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"nvim --headless -c qall! && nvim ."}}'
 _assert_eq "compound with interactive nvim: blocked" "2" "$HOOK_EXIT"
 
+# Batch debugger options and Neovim client requests are single-shot operations.
+# Values and operands that merely spell these options must not exempt an
+# interactive invocation; each row exercises the real pre-bash hook decision.
+while IFS='|' read -r label expected command; do
+  _run_hook "$PRE_BASH" "$(jq -nc --arg c "$command" '{tool_input:{command:$c}}')"
+  _assert_eq "$label" "$expected" "$HOOK_EXIT"
+done <<'TTY_CLIENT_CASES'
+gdb short batch from captured session|0|gdb -q -batch -ex 'set pagination off' -ex 'thread apply all bt' -p 2570498
+gdb long batch|0|gdb --batch -ex 'thread apply all bt' ./myapp core
+gdb batch silent|0|gdb --batch-silent -x commands.gdb ./myapp
+gdb short batch silent|0|gdb -batch-silent -ex quit
+path-qualified wrapped gdb batch|0|timeout 5 /usr/bin/gdb -nx -nh --batch -ex bt
+gdb batch after eval value|0|gdb -ex 'set pagination off' --batch -p 42
+gdb batch before inferior arguments|0|gdb --batch --args ./myapp --batch
+gdb batch after option terminator stays blocked|2|gdb -- -batch
+gdb inferior flag stays blocked|2|gdb --args ./myapp --batch
+gdb short eval value is not batch|2|gdb -ex '-batch'
+gdb long eval value is not batch|2|gdb --eval-command '--batch'
+gdb init eval value is not batch|2|gdb -iex '-batch'
+gdb command file value is not batch|2|gdb -x '--batch'
+gdb pid value is not batch|2|gdb -p '--batch'
+gdb attached eval value is not batch|2|gdb --eval-command=--batch
+gdb missing eval value stays blocked|2|gdb -ex
+gdb unknown mode stays blocked|2|gdb --unknown-mode --batch
+gdb interactive compound stays blocked|2|gdb --batch -ex bt; gdb ./myapp
+nvim captured remote expression|0|nvim --server /run/user/1000/nvim.18592.0 --remote-expr 'luaeval("1")'
+nvim remote expression before server|0|nvim --remote-expr '1 + 1' --server /tmp/nvim.sock
+path-qualified wrapped nvim remote expression|0|timeout 5 /usr/bin/nvim --server /tmp/nvim.sock --remote-expr '1'
+nvim missing server stays blocked|2|nvim --remote-expr '1'
+nvim missing server value stays blocked|2|nvim --remote-expr '1' --server
+nvim empty server stays blocked|2|nvim --server '' --remote-expr '1'
+nvim missing expression stays blocked|2|nvim --server /tmp/nvim.sock --remote-expr
+nvim empty expression stays blocked|2|nvim --server /tmp/nvim.sock --remote-expr ''
+nvim server alone stays blocked|2|nvim --server /tmp/nvim.sock
+nvim client option after terminator stays blocked|2|nvim --server /tmp/nvim.sock -- --remote-expr '1'
+nvim command value is not client mode|2|nvim --cmd '--remote-expr' --server /tmp/nvim.sock
+nvim server value is not client mode|2|nvim --server '--remote-expr' '1'
+nvim remote editor mode stays blocked|2|nvim --server /tmp/nvim.sock --remote file.txt
+nvim unknown mode stays blocked|2|nvim --unknown-mode --server /tmp/nvim.sock --remote-expr '1'
+nvim interactive compound with client stays blocked|2|nvim --server /tmp/nvim.sock --remote-expr '1'; nvim .
+TTY_CLIENT_CASES
+
 # Literal pager selection must exempt cat without admitting another pager or
 # mistaking an option's argument or a page name for the pager setting.
 while IFS='|' read -r label expected command; do
