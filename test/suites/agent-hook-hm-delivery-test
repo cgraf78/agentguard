@@ -177,14 +177,16 @@ _assert_contains "reserve floor with a leading zero is decimal" "--max-context-b
 
 _delivery_case
 _run_hook agent-hook-prompt-submit codex s-codex "$(_prompt_payload s-codex)" >/dev/null
-_assert_contains "codex prompt: persistent delivery" \
-  "--text check the deploy --delivery persistent|session=s-codex" "$(_log)"
-_assert_not_contains "codex prompt: no size budget" "--max-context-bytes" "$(_log)"
+_assert_contains "codex prompt: persistent delivery within the preview budget" \
+  "--text check the deploy --delivery persistent --max-context-bytes 9499|session=s-codex" "$(_log)"
 
 _delivery_case
 _run_hook agent-hook-session-start codex s-codex "$(_start_payload s-codex startup)" >/dev/null
-_assert_contains "codex session-start: persistent, reset on first start, no budget" \
-  "hook session-start --project /tmp/project --json --delivery persistent --reset|session=s-codex" "$(_log)"
+_assert_contains "codex session-start: persistent, reset on first start" \
+  "hook session-start --project /tmp/project --json --delivery persistent --reset --max-context-bytes" "$(_log)"
+budget=$(sed -n 's/.*--max-context-bytes \([0-9]*\).*/\1/p' "$case_dir/hm.log")
+_assert_eq "codex session-start: guidance leaves less room for memory" "1" \
+  "$((budget > 0 && budget < 9499))"
 
 _delivery_case
 _run_hook agent-hook-prompt-submit muse s-muse "$(_prompt_payload s-muse)" >/dev/null
@@ -328,7 +330,43 @@ _delivery_case
 _respond_with_context 15000
 out=$(_run_hook agent-hook-prompt-submit codex s-codex "$(_prompt_payload s-codex)" \
   HM_RESPONSE="$case_dir/response.json")
-_assert_contains "codex: no size limit" "Hive Memory Context" "$out"
+_assert_not_contains "codex: oversized tracked memory is not counted as visible" "Hive Memory Context" "$out"
+_assert_file_exists "codex: oversized memory leaves a reset pending" "$(_state_dir s-codex)/hm-context-dirty"
+
+_delivery_case
+out=$(_run_hook agent-hook-session-start codex s-codex "$(_start_payload s-codex startup)" \
+  HM_FILL=m)
+ctx=$(_ctx "$out")
+_assert_contains "codex startup: memory remains useful" "mmmm" "$ctx"
+_assert_contains "codex startup: existing guidance survives budgeting" "Use git -C" "$ctx"
+_assert_eq "codex startup: full rendered context reserves preview headroom" "9499" \
+  "$(printf '%s' "$ctx" | wc -c | tr -d ' ')"
+_assert_file_missing "codex startup: delivered memory needs no reset" "$(_state_dir s-codex)/hm-context-dirty"
+
+_delivery_case
+# Codex estimates tokens from UTF-8 bytes, not characters. This body is
+# fewer than 5,000 characters but over the complete-context byte budget.
+body="Hive Memory Context $(printf 'é%.0s' {1..4800})"
+jq -cn --arg body "$body" \
+  '{warnings: [], actions: [{kind: "inject_context", body: $body}]}' \
+  >"$case_dir/response.json"
+out=$(_run_hook agent-hook-prompt-submit codex s-codex "$(_prompt_payload s-codex)" \
+  HM_RESPONSE="$case_dir/response.json")
+_assert_not_contains "codex: multibyte context is measured in bytes" "Hive Memory Context" "$out"
+_assert_file_exists "codex: multibyte overflow leaves a reset pending" "$(_state_dir s-codex)/hm-context-dirty"
+
+_delivery_case
+out=$(_run_hook agent-hook-prompt-submit codex s-codex "$(_prompt_payload s-codex)" \
+  HM_FILL=m TEST_TAIL_BYTES=1000)
+_assert_not_contains "codex: an unexpected extension cannot silently truncate memory" "mmmm" "$(_ctx "$out")"
+_assert_contains "codex: extension context survives an overflow" "tttt" "$(_ctx "$out")"
+_assert_file_exists "codex: extension overflow schedules memory recovery" "$(_state_dir s-codex)/hm-context-dirty"
+out=$(_run_hook agent-hook-prompt-submit codex s-codex "$(_prompt_payload s-codex)" \
+  HM_FILL=m TEST_TAIL_BYTES=1000)
+_assert_contains "codex: next prompt recovers memory with room for the extension" "mmmm" "$(_ctx "$out")"
+_assert_eq "codex: recovered full context still reserves preview headroom" "9499" \
+  "$(printf '%s' "$(_ctx "$out")" | wc -c | tr -d ' ')"
+_assert_file_missing "codex: successful recovery clears the reset" "$(_state_dir s-codex)/hm-context-dirty"
 
 _delivery_case
 _respond_with_context 12000

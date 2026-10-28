@@ -2318,8 +2318,12 @@ _hook_hm_note_once() {
 #     id, SessionStart source=clear). Hook additionalContext over 10,000
 #     characters is replaced by a 2 KB preview, so it is not visible.
 #   - Codex keeps context the same way; PreCompact fires at compaction and
-#     SessionStart source=compact|clear|resume at the next prompt. No size
-#     limit up to 200,000 characters.
+#     SessionStart source=compact|clear|resume at the next prompt. Codex
+#     0.165.0 spills additionalContext above 2,500 approximate tokens to a
+#     file and shows only a preview (hooks/src/output_spill.rs). Its token
+#     estimate is ceil(UTF-8 bytes / 4), so budget the complete context below
+#     10,000 bytes, with 500 bytes of headroom. The saved full output is not
+#     evidence that every memory reached the model.
 #   - Muse replaces prompt-submit context on every turn (lifetime `turn`);
 #     session-start context persists through compaction and resume, so
 #     compaction needs no reset, and /clear starts a new session id. Hook
@@ -2371,6 +2375,8 @@ _hook_hm_delivery_policy() {
       ;;
     codex)
       _HOOK_HM_LIFETIME=persistent
+      _HOOK_HM_LIMIT_KIND=context
+      _HOOK_HM_LIMIT=9500
       ;;
     muse)
       case "$event" in
