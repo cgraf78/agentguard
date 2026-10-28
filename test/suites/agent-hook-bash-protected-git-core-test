@@ -229,4 +229,108 @@ _assert_eq "escaped git add -A: blocked" "2" "$HOOK_EXIT"
 _run_hook "$PRE_BASH" '{"tool_input":{"command":"cd /tmp && git add -A"}}'
 _assert_eq "git add -A after a sequenced command: blocked" "2" "$HOOK_EXIT"
 
+# Codex can run a hook in the session directory while reporting the shell's
+# execution directory in its native envelope. Only the host-owned cwd is
+# authoritative: an ignored field inside tool_input must not bypass a guard.
+echo ""
+echo "=== pre-bash: Codex command directory ==="
+
+_codex_repo="$HOME/.normal-git-repo"
+for _cmd in 'git status -uall' 'git ls-files --others --exclude-standard' 'git add -A'; do
+  _run_hook_named_agent codex "$PRE_BASH" "$(jq -nc --arg cmd "$_cmd" --arg cwd "$_codex_repo" \
+    '{cwd:$cwd,tool_input:{command:$cmd}}')"
+  _assert_eq "Codex native cwd in ordinary repo: $_cmd allowed" "0" "$HOOK_EXIT"
+done
+
+_run_hook_named_agent codex "$PRE_BASH" "$(jq -nc --arg cwd "$HOME" \
+  '{cwd:$cwd,tool_input:{command:"git add -A"}}')"
+_assert_eq "Codex native cwd at protected home: still blocked" "2" "$HOOK_EXIT"
+
+_run_hook_named_agent codex "$PRE_BASH" "$(jq -nc --arg cwd "$_codex_repo" --arg home "$HOME" \
+  '{cwd:$cwd,tool_input:{command:("git -C " + $home + " add -A")}}')"
+_assert_eq "Codex native repo cwd cannot hide explicit protected target" "2" "$HOOK_EXIT"
+
+_run_hook_named_agent codex "$PRE_BASH" "$(jq -nc --arg cwd "$_codex_repo" \
+  '{tool_input:{command:"git add -A",cwd:$cwd,workdir:$cwd}}')"
+_assert_eq "Codex ignored tool-input cwd cannot bypass protected home" "2" "$HOOK_EXIT"
+
+_run_hook_named_agent codex "$PRE_BASH" '{"tool_input":{"command":"git add -A"}}'
+_assert_eq "Codex missing native cwd retains protected-home guard" "2" "$HOOK_EXIT"
+
+_run_hook_named_agent codex "$PRE_BASH" "$(jq -nc --arg cwd "$_codex_repo" \
+  '{cwd:$cwd,tool_input:{command:"sudo true"}}')"
+_assert_eq "Codex native cwd does not bypass sudo protection" "2" "$HOOK_EXIT"
+
+for _bad_cwd in 'null' 'false' '17' '{}' '[]' '""' '"relative"' '"/does/not/exist/agentguard-cwd"' '"/tmp/\u0000ignored"'; do
+  _run_hook_named_agent codex "$PRE_BASH" "$(jq -nc --argjson cwd "$_bad_cwd" \
+    '{cwd:$cwd,tool_input:{command:"true"}}')"
+  _assert_eq "Codex invalid native cwd $_bad_cwd fails closed" "2" "$HOOK_EXIT"
+done
+
+_codex_spaced_repo="$HOME/repo with spaces"
+git init -q "$_codex_spaced_repo"
+_run_hook_named_agent codex "$PRE_BASH" "$(jq -nc --arg cwd "$_codex_spaced_repo" \
+  '{cwd:$cwd,tool_input:{command:"git add -A"}}')"
+_assert_eq "Codex native cwd with spaces works without shell evaluation" "0" "$HOOK_EXIT"
+
+# shellcheck disable=SC2016 # Literal command substitution must remain data.
+_special_cwd="$HOME/"'repo $(touch cwd-sentinel)'
+git init -q "$_special_cwd"
+_run_hook_named_agent codex "$PRE_BASH" "$(jq -nc --arg cwd "$_special_cwd" \
+  '{cwd:$cwd,tool_input:{command:"git add -A"}}')"
+_assert_eq "Codex literal shell syntax in native cwd is preserved" "0" "$HOOK_EXIT"
+_assert_eq "Codex native cwd is never evaluated as shell text" "no" \
+  "$([ -e "$HOME/cwd-sentinel" ] && printf yes || printf no)"
+
+# The protected-Git classifier is conservative about trailing-newline paths.
+# Preserve that rejection rather than broadening its path resolution here.
+_newline_cwd="$HOME/repo"$'\n'
+git init -q "$_newline_cwd"
+_run_hook_named_agent codex "$PRE_BASH" "$(jq -nc --arg cwd "$_newline_cwd" \
+  '{cwd:$cwd,tool_input:{command:"git add -A"}}')"
+_assert_eq "Codex newline cwd keeps conservative Git classification" "2" "$HOOK_EXIT"
+
+# A host-owned directory does not override an inherited explicit Git target.
+GIT_DIR="$HOME/.protected-bare-git" GIT_WORK_TREE="$HOME" \
+  _run_hook_named_agent codex "$PRE_BASH" "$(jq -nc --arg cwd "$_codex_repo" \
+    '{cwd:$cwd,tool_input:{command:"git add -A"}}')"
+_assert_eq "native directory does not erase inherited protected Git routing" "2" "$HOOK_EXIT"
+
+for _agent in claude muse grok; do
+  _run_hook_named_agent "$_agent" "$PRE_BASH" "$(jq -nc --arg cwd "$_codex_repo" \
+    '{cwd:$cwd,tool_input:{command:"git add -A"}}')"
+  _assert_eq "$_agent directory handling remains unchanged" "2" "$HOOK_EXIT"
+  _run_hook_named_agent "$_agent" "$PRE_BASH" '{"cwd":null,"tool_input":{"command":"true"}}'
+  _assert_eq "$_agent does not inherit Codex cwd validation" "0" "$HOOK_EXIT"
+done
+
+# Post-execution failures cannot undo a call; keep inspecting output even when
+# the command removed its working directory before its post hook ran.
+_run_hook_named_agent codex "$BIN_DIR/agent-hook-post-bash" \
+  '{"cwd":"/does/not/exist/agentguard-cwd","tool_input":{"command":"true"},"tool_response":"-----BEGIN PRIVATE KEY-----"}'
+_assert_eq "Codex vanished post cwd is advisory" "0" "$HOOK_EXIT"
+_assert_contains "Codex vanished post cwd is reported" 'command directory' "$HOOK_STDERR"
+_assert_contains "Codex vanished post cwd retains credential scan" 'may contain credentials' "$HOOK_STDERR"
+
+# Moving into the native cwd must not redirect relative extension lookups into
+# the tool's repository. Preserve the launcher path the user actually invoked.
+_relative_install="$TEST_TMPDIR/relative-cwd-install"
+_install_hook_fixture "$_relative_install" agent-hook-pre-bash
+mkdir -p "$_codex_repo/bin"
+printf '%s\n' '_hook_block "original-directory extension enforced"' \
+  >"$_relative_install/bin/agent-hook-pre-bash-work"
+printf '%s\n' '_hook_context "target-directory extension sourced"' \
+  >"$_codex_repo/bin/agent-hook-pre-bash-work"
+_relative_result=$(
+  cd -- "$_relative_install" || exit 1
+  _run_hook_named_agent codex bin/agent-hook-pre-bash "$(jq -nc --arg cwd "$_codex_repo" \
+    '{cwd:$cwd,tool_input:{command:"true"}}')"
+  printf 'exit=%s\n%s\n%s\n' "$HOOK_EXIT" "$HOOK_STDOUT" "$HOOK_STDERR"
+)
+_assert_contains "Codex cwd preserves original relative hook extension" \
+  'original-directory extension enforced' "$_relative_result"
+_assert_contains "Codex cwd retains relative extension protection" 'exit=2' "$_relative_result"
+_assert_not_contains "Codex cwd never loads a tool-repository extension" \
+  'target-directory extension sourced' "$_relative_result"
+
 _test_summary

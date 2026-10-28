@@ -650,6 +650,138 @@ _assert_eq "claude payload without a status forgets" "o_r_13 " \
   "$(_forgotten_by_payload "$(jq -nc '{tool_input:{command:"gh pr merge 13 --squash"},tool_response:{stdout:"",stderr:""}}')")"
 _assert_eq "codex without a status forgets nothing; with one, forgets" "/o_r_13 " \
   "$(_forgotten_by_payload "$(_string_payload "$_merge13" "")" codex)/$(_forgotten_by_payload "$(_payload "$_merge13")" codex)"
+
+# Native Codex payloads omit status. Keep the obligation, but give the agent
+# a one-shot producer query that can publish authoritative terminal state.
+_new_sid
+_seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+_run "$POST_BASH" codex "$(_string_payload "gh pr merge https://github.com/o/r/pull/13 --squash" "")"
+_assert_file_exists "unknown-status merge keeps the key" "$(_session_tool)/keys/o_r_13"
+_assert_contains "unknown-status merge explains missing status" "runtime did not report an exit status" "$(_context)"
+_assert_contains "unknown-status merge recommends one-shot reconciliation" \
+  '`git pr-watch https://github.com/o/r/pull/13`' "$(_context)"
+_assert_not_contains "reconciliation does not start a waiting watcher" 'git pr-watch --wait' "$(_context)"
+_run "$POST_BASH" codex "$(_string_payload "gh pr merge https://github.com/o/r/pull/13 --squash" "")"
+_assert_eq "repeated merge hint is once per prompt" "" "$(_context)"
+
+_new_sid
+_seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+_seed_key x_y_13 1000 x_y https://github.com/x/y/pull/13
+_run "$POST_BASH" codex "$(_string_payload "gh pr close 13" "")"
+_assert_eq "ambiguous unknown-status close invents no target" "" "$(_context)"
+_run "$POST_BASH" codex "$(_string_payload "gh pr close 13 -R o/r" "")"
+_assert_contains "explicit repository disambiguates reconciliation" \
+  '`git pr-watch https://github.com/o/r/pull/13`' "$(_context)"
+_assert_not_contains "explicit repository leaves the other target alone" 'https://github.com/x/y/pull/13' "$(_context)"
+
+_new_sid
+_seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+_seed_key x_y_12 1000 x_y https://github.com/x/y/pull/12
+_run "$POST_BASH" codex "$(_string_payload 'gh pr close https://github.com/o/r/pull/13 && gh pr close https://github.com/x/y/pull/12' "")"
+_assert_contains "reconciliation groups commands by repository" \
+  '`git pr-watch https://github.com/o/r/pull/13` and `git pr-watch https://github.com/x/y/pull/12`, each from a checkout of its repository' "$(_context)"
+
+_new_sid
+_seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+WATCH_ENV=('AGENTGUARD_PR_WATCH_HINT=Use the team checker for <labels>.')
+_run "$POST_BASH" codex "$(_string_payload 'gh pr close 13 -R o/r' '')"
+WATCH_ENV=()
+_assert_contains "reconciliation honors custom watcher advice" \
+  'Use the team checker for https://github.com/o/r/pull/13.' "$(_context)"
+_assert_not_contains "custom reconciliation advice replaces default command" 'git pr-watch' "$(_context)"
+
+_new_sid
+_seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+WATCH_ENV=(GH_REPO=x/y)
+_run "$POST_BASH" codex "$(_string_payload 'gh pr close 13' '')"
+WATCH_ENV=()
+_assert_eq "ambient GH_REPO prevents bare-number reconciliation guesses" "" "$(_context)"
+
+for _word in merged closed; do
+  _new_sid
+  _seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+  _run "$POST_BASH" codex "$(_string_payload "gh pr close 13 -R o/r" "")"
+  _run "$STOP" codex '{}'
+  _assert_contains "unknown close before $_word reconciliation stays pending" 'pull/13' "$HOOK_STDERR"
+  printf '%s %s 2000\n' "$(printf 'c%.0s' {1..40})" "$_word" >"$PRODUCER/done/o_r_13"
+  _run "$STOP" codex '{}'
+  _assert_not_contains "producer $_word result suppresses Stop reminder" 'pull/13' "$HOOK_STDERR"
+  _run "$POST_BASH" codex "$(_string_payload "git push" "")"
+  _assert_eq "unknown push does not revive producer $_word result" 1000 "$(_key_epoch o_r_13)"
+  rm -f "$PRODUCER/done/o_r_13"
+done
+
+_new_sid
+_seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+printf '1 action failed 2000\n' >"$PRODUCER/exited/o_r_13"
+_run "$STOP" codex '{}'
+_assert_contains "failed producer result retains Stop reminder" 'pull/13' "$HOOK_STDERR"
+rm -f "$PRODUCER/exited/o_r_13"
+
+_new_sid
+_seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+_run "$POST_BASH" codex "$(_string_payload 'git push' 'pre-push: refusing main')"
+_assert_eq "unknown push conservatively re-arms the key" 1 "$([ "$(_key_epoch o_r_13)" != 1000 ] && printf 1)"
+_assert_contains "unknown push uses conditional status-aware wording" 'may have started checks on' "$(_context)"
+_assert_contains "unknown push explains missing status" 'runtime did not report an exit status' "$(_context)"
+_assert_not_contains "unknown push does not claim checks started" 'this started checks on' "$(_context)"
+
+_new_sid
+_seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+_run "$POST_BASH" codex "$(_payload 'git push' '' 1)"
+_assert_eq "known failed Codex push does not re-arm" 1000 "$(_key_epoch o_r_13)"
+_assert_eq "known failed Codex push has no reminder" "" "$(_context)"
+
+_new_sid
+_seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+_run "$POST_BASH" codex "$(_payload 'git push' '' 0)"
+_assert_contains "known successful Codex push retains affirmative wording" 'this started checks on' "$(_context)"
+
+_new_sid
+_seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+_run "$POST_BASH" codex "$(jq -c --arg cwd "$TEST_TMPDIR/missing-workdir" '.cwd = $cwd' \
+  <<<"$(_payload 'gh pr merge https://github.com/o/r/pull/13 --squash')")"
+_assert_file_exists "invalid native cwd cannot forget a known-success merge" "$(_session_tool)/keys/o_r_13"
+
+# The status adapter is shared. Preserve each native host's known-success
+# and known-failure semantics, including Claude's status-free PostToolUse.
+for _agent in claude muse grok; do
+  for _status in 0 1 unknown; do
+    case "$_agent" in
+      claude)
+        if [ "$_status" = unknown ]; then
+          _native=$(jq -nc '{hook_event_name:"PostToolUse",tool_input:{command:"git push"},tool_response:{stdout:""}}')
+        else
+          _native=$(_payload 'git push' '' "$_status")
+        fi
+        ;;
+      muse)
+        if [ "$_status" = unknown ]; then
+          _native=$(_string_payload 'git push' '')
+        else
+          _native=$(_string_payload 'git push' "$(_muse_envelope '' "{\"exit_code\":$_status}")")
+        fi
+        ;;
+      grok)
+        _native=$(jq -nc --arg status "$_status" '{toolInput:{command:"git push"},toolResult:{stdout:""}} |
+          if $status == "unknown" then . else .toolResult.exit_code = ($status | tonumber) end')
+        ;;
+    esac
+    _new_sid
+    _seed_key o_r_13 1000 o_r https://github.com/o/r/pull/13
+    _run "$POST_BASH" "$_agent" "$_native"
+    if [ "$_status" = 1 ]; then
+      _assert_eq "$_agent native failure does not re-arm" 1000 "$(_key_epoch o_r_13)"
+      _assert_not_contains "$_agent native failure claims no checks" 'started checks on' "$(_context)"
+    elif [ "$_status" = 0 ] || [ "$_agent" = claude ]; then
+      _assert_contains "$_agent native success preserves affirmative wording" 'this started checks on' "$(_context)"
+      _assert_not_contains "$_agent native success is not treated as unknown" 'did not report' "$(_context)"
+    else
+      _assert_contains "$_agent native unknown status remains conditional" 'may have started checks on' "$(_context)"
+      _assert_eq "$_agent native unknown status still re-arms" 1 "$([ "$(_key_epoch o_r_13)" != 1000 ] && printf 1)"
+    fi
+  done
+done
 _bare=$(jq -nc --arg cmd "$_merge13" '{tool_input:{command:$cmd},tool_response:{stdout:"",stderr:""}}')
 for _agent in gemini grok; do
   _assert_eq "$_agent payload without a status forgets nothing (claude's does)" "/o_r_13 " \

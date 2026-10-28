@@ -58,6 +58,13 @@ _assert_eq "session-start: no crash" "0" "$?"
 echo ""
 echo "=== stop: response JSON ==="
 
+_run_hook_named_agent codex "$MOCK_SS" '{}'
+_assert_contains "Codex session explains explicit Git directory workaround" \
+  'git -C' "$HOOK_STDOUT"
+_run_hook_named_agent claude "$MOCK_SS" '{}'
+_assert_not_contains "Codex directory advice does not affect Claude" \
+  'older Codex' "$HOOK_STDOUT"
+
 _assert_stop_notification_cycle() {
   local agent="$1" mock_dir mock_stop mock_prompt marker active_marker
   local session_id stop_out expected

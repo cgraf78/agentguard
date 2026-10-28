@@ -502,7 +502,11 @@ To add a new managed agent runtime:
   stays allowed), `git push --mirror`, `git push --prune`,
   interactive TTY commands (editors, `man`/`info`, `top`-style monitors,
   debuggers, `watch`; `vim`/`vi`/`view`/`nvim` are exempt with a batch
-  flag such as `-es` or `--headless`, and `man` with an explicit `cat` pager
+  flag such as `-es` or `--headless`; `nvim` also supports the explicit
+  `--server VALUE --remote-expr VALUE` client form, and `gdb` supports
+  `-batch`/`--batch` and `-batch-silent`/`--batch-silent`. Values and operands
+  that merely spell these flags do not select those modes. `man` is exempt
+  with an explicit `cat` pager
   such as `man -P cat`, `man --pager=cat`, or `MANPAGER=cat man`). A literal
   command-prefix `PAGER=cat` also works when `MANPAGER` does not override it;
   other pagers, nonempty `MANOPT`, and unsupported modes stay blocked.

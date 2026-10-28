@@ -735,15 +735,19 @@ _hook_gh_drop_label() {
 #           reminder names a pull request the command ended (`create &&
 #           merge` can still get the general one), while a later re-arm in
 #           the same command (`close && reopen`) adds it back.
+# With $2 set to 1 or 2, unresolved forgets collect their recorded URL labels
+# in _HOOK_GH_W_RECONCILE_LABELS instead. The levels use the same target rules
+# as $1, but never change obligations: a producer must confirm the result.
 _hook_gh_apply_targets() {
-  local forget="$1" target op repo arg key owner name state count open
+  local forget="$1" reconcile="${2:-0}" target op repo arg key owner name state count open
+  local base id label
   for target in ${_HOOK_GH_W_TARGETS[@]+"${_HOOK_GH_W_TARGETS[@]}"}; do
     op="${target%% *}"
     target="${target#* }"
     repo="${target%% *}"
     arg="${target#* }"
     arg="${arg#\#}"
-    [ "$op" != forget ] || [ "$forget" -ge 1 ] || continue
+    [ "$op" != forget ] || [ "$forget" -ge 1 ] || [ "$reconcile" -ge 1 ] || continue
     key=''
     if _hook_gh_pr_key_scope "$arg" >/dev/null; then
       key="$_HOOK_GH_PR_KEY"
@@ -757,7 +761,7 @@ _hook_gh_apply_targets() {
         fi
         _hook_gh_lower key "${owner}_${name}_$arg"
       elif [ "$op" = forget ]; then
-        [ "$forget" -ge 2 ] || continue
+        [ "$forget" -ge 2 ] || [ "$reconcile" -ge 2 ] || continue
         count=0 open=''
         while read -r name _ state; do
           [[ "$name" == *"_$arg" ]] || continue
@@ -778,8 +782,27 @@ _hook_gh_apply_targets() {
       continue
     fi
     if [ "$op" = forget ]; then
-      _hook_watch_forget "$_HOOK_GH_PR_TOOL_DIR" "$key" &&
-        _hook_gh_drop_label "$_HOOK_WATCH_KEY_LABEL"
+      if [ "$forget" -ge 1 ]; then
+        _hook_watch_forget "$_HOOK_GH_PR_TOOL_DIR" "$key" &&
+          _hook_gh_drop_label "$_HOOK_WATCH_KEY_LABEL"
+      else
+        _hook_watch_session_dir base || continue
+        _hook_watch_tool_id "$_HOOK_GH_PR_TOOL_DIR" id || continue
+        _hook_watch_read_key "$base/$id/keys/$key" || continue
+        # Do not ask for another query once a newer producer result already
+        # confirms completion. An old terminal record may predate a reopen.
+        if _hook_watch_roots "$_HOOK_GH_PR_TOOL_DIR" &&
+          _hook_watch_terminal "$key" &&
+          [ "$_HOOK_WATCH_DONE_EPOCH" -gt "$_HOOK_WATCH_KEY_EPOCH" ]; then
+          continue
+        fi
+        label="$_HOOK_WATCH_KEY_LABEL"
+        _hook_gh_pr_key_scope "$label" >/dev/null || continue
+        case " $_HOOK_GH_W_RECONCILE_LABELS " in
+          *" $label "*) ;;
+          *) _HOOK_GH_W_RECONCILE_LABELS="$_HOOK_GH_W_RECONCILE_LABELS $label" ;;
+        esac
+      fi
     elif [ -n "$key" ]; then
       _hook_gh_add_labels "$(_hook_watch_rearm_key "$_HOOK_GH_PR_TOOL_DIR" "$key")"
     else
@@ -929,8 +952,9 @@ _hook_gh_checks_reminder() {
 # _hook_gh_checks_reminder, and not at all when this hook process already
 # gave a PR checks reminder (_HOOK_GH_WATCH_REMINDED, say post-bash's own
 # for a wrapped push's printed summary), so a wrapped command gets one
-# general reminder, not two. A command that only merges or closes never
-# reminds. AGENTGUARD_WATCH=0 turns recording, re-arming, and forgetting
+# general reminder, not two. A merge/close with unknown status instead
+# recommends one-shot producer reconciliation for unambiguous recorded keys.
+# AGENTGUARD_WATCH=0 turns recording, re-arming, and forgetting
 # off; AGENTGUARD_PR_WATCH_HINT replaces the advice,
 # its `<labels>` token filled in. Needs Bash 4 (the command classifier).
 # Sets _HOOK_GH_WATCH_LABELS (the labels recorded or re-armed),
@@ -939,29 +963,29 @@ _hook_gh_checks_reminder() {
 # or skipped as a repeat within the prompt.
 _hook_gh_watch_pass() {
   local text="$1" output="$2" status="$3" background="$4" watch="${5:-}"
-  local hint command advice key known forget=0
+  local hint command advice key known lead reconcile=0 forget=0
   _HOOK_GH_W_LABELS=''
+  _HOOK_GH_W_RECONCILE_LABELS=''
   _HOOK_GH_WATCH_LABELS=''
   _HOOK_GH_WATCH_PASS_REMINDED=''
+  # Post hooks still scan output when native execution cwd is unusable, but
+  # repository bookkeeping must never run in the hook host's fallback cwd.
+  [ "${_HOOK_COMMAND_CWD_VALID:-1}" = 1 ] || return 0
   _hook_gh_watch_prefilter "$text" || return 1
   _hook_gh_classify "$text" || return 1
-  # Only merges or closes: nothing to remind about, and without obligations
-  # to forget, no reason to read the status.
+  # Merge/close-only calls do not start checks. Without existing obligations
+  # there is nothing to forget or reconcile, so no reason to read the status.
   if [ -z "$_HOOK_GH_W_STARTS" ]; then
     ! _hook_flag_disabled "${AGENTGUARD_WATCH:-}" && [ -d "$_HOOK_STATE_DIR/watch" ] || return 0
   fi
-  # Only a forget needs to know the status rather than assume 0 when the
-  # payload reports none; finding that out costs another jq on Claude Code.
+  # Missing status still conservatively records/re-arms obligations, but
+  # cannot prove a command succeeded or justify forgetting its target.
   if [ "$status" != - ]; then
     known="$status"
-  elif [ -n "$_HOOK_GH_W_ENDS" ]; then
-    _hook_tool_status_known known
-    status="${known:-0}"
   else
-    known=''
-    status=$(_hook_tool_status_field) || status=''
-    case "$status" in '' | *[!0-9]*) status=0 ;; esac
+    _hook_tool_status_known known
   fi
+  status="${known:-0}"
   [ "$status" = 0 ] || return 0
   # Only a successful create, push, gh re-arm, or forget feeds the
   # obligations, and push parsing runs only once this session recorded
@@ -998,7 +1022,15 @@ _hook_gh_watch_pass() {
       [ -z "${GH_REPO:-}" ] || forget=1
       case "$text ${AGENTGUARD_CMD_TRIMMED:-}" in *GH_REPO*) forget=1 ;; esac
     fi
-    _hook_gh_apply_targets "$forget"
+    # A standalone merge/close with no status needs the producer's final
+    # state instead. Reuse exactly the conservative target resolver above;
+    # never guess a repository from an ambiguous bare number.
+    if [ -z "$known" ] && [ -z "$_HOOK_GH_W_STARTS" ] && [ "$background" = 0 ]; then
+      reconcile=2
+      [ -z "${GH_REPO:-}" ] || reconcile=1
+      case "$text ${AGENTGUARD_CMD_TRIMMED:-}" in *GH_REPO*) reconcile=1 ;; esac
+    fi
+    _hook_gh_apply_targets "$forget" "$reconcile"
     if [ -n "$_HOOK_GH_W_PUSH" ] && [ -d "$_HOOK_STATE_DIR/watch" ]; then
       if [ "$background" = 1 ]; then
         _hook_gh_add_labels "$(_hook_watch_rearm "$_HOOK_GH_PR_TOOL_DIR" ALL)"
@@ -1008,20 +1040,41 @@ _hook_gh_watch_pass() {
     fi
   fi
   _HOOK_GH_WATCH_LABELS="${_HOOK_GH_W_LABELS# }"
-  [ -n "$_HOOK_GH_W_STARTS" ] || return 0
+  if [ -z "$_HOOK_GH_W_STARTS" ]; then
+    if [ -n "$_HOOK_GH_W_RECONCILE_LABELS" ] &&
+      command -v "$_HOOK_GH_PR_WATCH_ARGV" >/dev/null 2>&1; then
+      key="pr-reconcile-$(printf '%s' "$_HOOK_GH_W_RECONCILE_LABELS" | cksum | tr -d ' ')"
+      if _hook_once_per_prompt "$key"; then
+        if [ -n "${AGENTGUARD_PR_WATCH_HINT:-}" ]; then
+          _hook_gh_fill_hint hint "$AGENTGUARD_PR_WATCH_HINT" "${_HOOK_GH_W_RECONCILE_LABELS# }"
+        else
+          _hook_gh_watch_commands command 'git pr-watch' "$_HOOK_GH_W_RECONCILE_LABELS"
+          hint="Confirm its final state with $command. Run from the owning repository checkout; this one-shot query updates watch completion."
+        fi
+        _hook_remind "The runtime did not report an exit status for this merge or close. $hint Pending or failing pull requests still need attention and a watcher."
+        _HOOK_GH_WATCH_PASS_REMINDED=1
+        _HOOK_GH_WATCH_REMINDED=1
+      fi
+    fi
+    return 0
+  fi
   if [ -n "$_HOOK_GH_WATCH_LABELS" ]; then
     # Every record or re-arm is new work, so it always reminds, even when the
     # same command ran earlier in the prompt.
     _HOOK_GH_WATCH_REMINDED=1
     _HOOK_GH_WATCH_PASS_REMINDED=1
+    lead="PR checks gate: this started checks on $_HOOK_GH_WATCH_LABELS, which is not done or green until they pass on the pushed commit."
+    if [ -z "$known" ]; then
+      lead="PR checks gate: this command may have started checks on $_HOOK_GH_WATCH_LABELS; the runtime did not report an exit status. Keep watching until the current head is confirmed green or the pull request is merged or closed."
+    fi
     if [ -n "${AGENTGUARD_PR_WATCH_HINT:-}" ]; then
       _hook_gh_fill_hint hint "$AGENTGUARD_PR_WATCH_HINT" "$_HOOK_GH_WATCH_LABELS"
-      _hook_remind "PR checks gate: this started checks on $_HOOK_GH_WATCH_LABELS, which is not done or green until they pass on the pushed commit. $hint"
+      _hook_remind "$lead $hint"
       return 0
     fi
     _hook_gh_watch_commands command "${watch:-git pr-watch --wait}" "$_HOOK_GH_WATCH_LABELS"
     _hook_gh_background_advice advice
-    _hook_remind "PR checks gate: this started checks on $_HOOK_GH_WATCH_LABELS, which is not done or green until they pass on the pushed commit. Watch them in the background with $command ($advice; never \`&\`, nohup, setsid, or disown) and act on its result when it exits; report pending or failing checks instead of calling it green. Restart it after every exit until it reports done, unless it reports a stall (report that instead); a foreground run is killed at the tool timeout and silently stops watching."
+    _hook_remind "$lead Watch them in the background with $command ($advice; never \`&\`, nohup, setsid, or disown) and act on its result when it exits; report pending or failing checks instead of calling it green. Restart it after every exit until it reports done, unless it reports a stall (report that instead); a foreground run is killed at the tool timeout and silently stops watching."
     return 0
   fi
   # Otherwise once per prompt for the same command text: re-running it while
