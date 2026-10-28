@@ -344,9 +344,21 @@ _assert_eq "codex startup: full rendered context reserves preview headroom" "949
 _assert_file_missing "codex startup: delivered memory needs no reset" "$(_state_dir s-codex)/hm-context-dirty"
 
 _delivery_case
+touch "$dirty_repo/é"
+git -C "$dirty_repo" config core.quotePath false
+out=$(cd "$dirty_repo" && _run_hook agent-hook-session-start codex s-codex \
+  "$(_start_payload s-codex startup)" HM_FILL=m)
+_assert_contains "codex startup: fixture guidance contains UTF-8" "é" "$(_ctx "$out")"
+_assert_contains "codex startup: multibyte guidance leaves room for memory" "mmmm" "$(_ctx "$out")"
+_assert_eq "codex startup: multibyte prefix is subtracted in bytes" "9499" \
+  "$(printf '%s' "$(_ctx "$out")" | wc -c | tr -d ' ')"
+
+_delivery_case
 # Codex estimates tokens from UTF-8 bytes, not characters. This body is
 # fewer than 5,000 characters but over the complete-context byte budget.
 body="Hive Memory Context $(printf 'é%.0s' {1..4800})"
+_assert_eq "codex: UTF-8 fixture exceeds the byte budget" "9620" \
+  "$(printf '%s' "$body" | wc -c | tr -d ' ')"
 jq -cn --arg body "$body" \
   '{warnings: [], actions: [{kind: "inject_context", body: $body}]}' \
   >"$case_dir/response.json"
@@ -354,6 +366,14 @@ out=$(_run_hook agent-hook-prompt-submit codex s-codex "$(_prompt_payload s-code
   HM_RESPONSE="$case_dir/response.json")
 _assert_not_contains "codex: multibyte context is measured in bytes" "Hive Memory Context" "$out"
 _assert_file_exists "codex: multibyte overflow leaves a reset pending" "$(_state_dir s-codex)/hm-context-dirty"
+
+_delivery_case
+printf '#!/usr/bin/env bash\nexit 1\n' >"$DELIVERY_STUB/wc"
+chmod +x "$DELIVERY_STUB/wc"
+out=$(_run_hook agent-hook-prompt-submit codex s-codex "$(_prompt_payload s-codex)" HM_FILL=m)
+rm -f "$DELIVERY_STUB/wc"
+_assert_not_contains "codex: uncertain byte count cannot claim memory delivery" "mmmm" "$(_ctx "$out")"
+_assert_file_exists "codex: failed byte count leaves a reset pending" "$(_state_dir s-codex)/hm-context-dirty"
 
 _delivery_case
 out=$(_run_hook agent-hook-prompt-submit codex s-codex "$(_prompt_payload s-codex)" \

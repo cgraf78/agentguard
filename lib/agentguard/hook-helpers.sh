@@ -2398,16 +2398,21 @@ _hook_hm_delivery_policy() {
 # units: bytes for `context` limits, bytes once escaped as a JSON string for
 # `stdout` limits (Muse counts the raw JSON response).
 _hook_hm_size() {
-  local LC_ALL=C size
+  local LC_ALL=C units
   if [ "$_HOOK_HM_LIMIT_KIND" = stdout ] && [ -n "$1" ]; then
-    size=$(printf '%s' "$1" | jq -Rs . | wc -c) || size=''
-    size=${size//[!0-9]/}
+    units=$(printf '%s' "$1" | jq -Rs . | wc -c) || units=''
+    units=${units//[!0-9]/}
     # jq adds two quotes and a newline.
-    size=$((${size:-0} > 3 ? ${size:-0} - 3 : 0))
+    units=$((${units:-0} > 3 ? ${units:-0} - 3 : 0))
   else
-    size=${#1}
+    # Shell string lengths remain locale-sensitive on some runtimes, including
+    # Termux. Count bytes explicitly so UTF-8 cannot bypass the delivery cap.
+    units=$(printf '%s' "$1" | wc -c) || units=''
+    units=${units//[!0-9]/}
+    # An unreadable size must not count an uncertain delivery as visible.
+    [ -n "$units" ] || units="${_HOOK_HM_LIMIT:-0}"
   fi
-  printf -v "$2" '%s' "$size"
+  printf -v "$2" '%s' "$units"
 }
 
 # Per-event file (in the session state dir, suffixed with the hm event) with
@@ -2546,7 +2551,7 @@ _hook_hm_finalize_delivery() {
   local half tail_file="$_HOOK_STATE_DIR/$_HOOK_HM_TAIL_PREFIX$_HOOK_HM_EVENT"
 
   case "$_HOOK_HM_LIMIT_KIND" in
-    context) size=${#_HOOK_CTX} ;;
+    context) _hook_hm_size "$_HOOK_CTX" size ;;
     stdout)
       # Muse counts the raw response, so measure the exact strict-agent JSON
       # (and jq's trailing newline) that _hook_finish prints.
