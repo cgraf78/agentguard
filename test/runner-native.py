@@ -271,12 +271,26 @@ class NativeRunnerTest(unittest.TestCase):
             runner.stdout.close()
             runner.stderr.close()
 
+    def test_disappeared_proc_process_needs_no_ps_command(self) -> None:
+        # Minimal Linux images expose procfs without installing procps. Once
+        # a child vanishes there, its absence must not invoke an external ps.
+        with (
+            patch.object(Path, "is_file", return_value=True),
+            patch.object(Path, "exists", return_value=False),
+            patch.object(Path, "read_bytes", side_effect=FileNotFoundError),
+            patch.object(subprocess, "run", side_effect=AssertionError("ps must not run")),
+        ):
+            self.assertFalse(self.running(123))
+
     @staticmethod
     def running(pid: int) -> bool:
         """Treat a killed orphan zombie as stopped on minimal container PID 1."""
         stat = Path(f"/proc/{pid}/stat")
-        if stat.exists():
-            return stat.read_text().rsplit(") ", 1)[1].split()[0] != "Z"
+        if Path("/proc/self/stat").is_file():
+            try:
+                return stat.read_bytes().rsplit(b") ", 1)[1].split()[0] != b"Z"
+            except (FileNotFoundError, ProcessLookupError):
+                return False
         result = subprocess.run(
             ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False
         )
