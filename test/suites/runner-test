@@ -240,4 +240,7 @@ else
   wait "$runner_pid" 2>/dev/null || true
 fi
 
+python3 "$AGENTGUARD_TEST_DIR/runner-native.py"
+_assert_exit "runner: native sessions, fail-closed startup, inheritance, and cleanup" 0 "$?"
+
 _test_summary
