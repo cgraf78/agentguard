@@ -17,6 +17,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+CASE_TIMEOUT = 12
+BATCH_TIMEOUT = 30
+
 
 class NativeRunnerTest(unittest.TestCase):
     """Exercise the public runner with owned processes and persistence roots."""
@@ -49,7 +52,7 @@ class NativeRunnerTest(unittest.TestCase):
             env=self.env,
             capture_output=True,
             text=True,
-            timeout=12,
+            timeout=CASE_TIMEOUT,
             **kwargs,
         )
 
@@ -382,9 +385,105 @@ class NativeRunnerTest(unittest.TestCase):
         self.assertEqual(result.returncode, 125, result.stderr)
         self.assertFalse(marker.exists(), "unsupported Python launched a suite")
 
+    def run_batch(self, suite: Path, count: int, *, stall: float = BATCH_TIMEOUT):
+        """Bound launch stalls separately from a progressing multi-suite batch."""
+        read_fd, write_fd = os.pipe()
+        env = dict(self.env, RUNNER_ACK_FD=str(write_fd))
+        runner = None
+        started = time.monotonic()
+        completed = 0
+        failure = None
+        stdout = stderr = ""
+        try:
+            runner = subprocess.Popen(
+                [str(self.runner), *([str(suite)] * count)],
+                env=env,
+                pass_fds=(write_fd,),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            os.close(write_fd)
+            write_fd = None
+            # stop() settles completed workers serially. Keep a finite budget
+            # per declared launch. The stall/drain budget allows two active
+            # workers' serialized TERM(5), KILL(2), snapshot(2), and reap(2)
+            # stages plus scheduling margin. This is not a performance test.
+            # Only a target's ACK resets the stall clock.
+            absolute = started + count * CASE_TIMEOUT
+            progress = started + BATCH_TIMEOUT
+            while completed < count:
+                remaining = min(progress, absolute) - time.monotonic()
+                ready, _, _ = select.select([read_fd], [], [], max(0, remaining))
+                if remaining <= 0 or not ready:
+                    raise TimeoutError(
+                        f"batch stalled after {completed}/{count} launches; "
+                        f"elapsed={time.monotonic() - started:.3f}s"
+                    )
+                chunk = os.read(read_fd, count - completed)
+                if not chunk:
+                    raise AssertionError(f"batch ACK stream closed at {completed}/{count}")
+                self.assertEqual(chunk, b"+" * len(chunk), "invalid batch ACK")
+                completed += len(chunk)
+                progress = time.monotonic() + stall
+            stdout, stderr = runner.communicate(
+                timeout=min(BATCH_TIMEOUT, max(0, absolute - time.monotonic()))
+            )
+        except Exception as error:
+            failure = error
+        finally:
+            os.close(read_fd)
+            if write_fd is not None:
+                os.close(write_fd)
+            if runner is not None:
+                # subprocess.run(timeout=...) would immediately kill the
+                # supervisor, denying it the chance to settle owned groups.
+                # These fixtures never fork; allow normal teardown first.
+                if runner.poll() is None:
+                    runner.terminate()
+                try:
+                    stdout, stderr = runner.communicate(timeout=BATCH_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    runner.kill()
+                    stdout, stderr = runner.communicate(timeout=2)
+        if failure is not None:
+            raise AssertionError(
+                f"batch failed after {completed}/{count} launches; "
+                f"elapsed={time.monotonic() - started:.3f}s; "
+                f"stdout={stdout!r}; stderr={stderr!r}; cause={failure}"
+            ) from failure
+        return subprocess.CompletedProcess(runner.args, runner.returncode, stdout, stderr)
+
+    def test_batch_stall_reports_progress_and_settles_the_supervisor(self) -> None:
+        pid_file = self.root / "stalled-pid"
+        target = self.suite(
+            "stalled",
+            "import os,signal\nfrom pathlib import Path\n"
+            f"Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+            "os.write(int(os.environ['RUNNER_ACK_FD']),b'+')\nsignal.pause()\n",
+        )
+        original = self.runner
+        # Capture a supervisor-side diagnostic even when cancellation prevents
+        # replay of the suites' captured logs. The wrapper preserves its PID.
+        self.runner = self.suite(
+            "diagnostic-runner",
+            "import os,sys\n"
+            "os.write(2,b'controlled supervisor diagnostic\\n')\n"
+            f"os.execv({str(original)!r},[{str(original)!r},*sys.argv[1:]])\n",
+        )
+        self.env["AGENTGUARD_TEST_JOBS"] = "1"
+        with self.assertRaises(AssertionError) as caught:
+            self.run_batch(target, 2, stall=1)
+        self.assertIn("after 1/2 launches", str(caught.exception))
+        self.assertIn("controlled supervisor diagnostic", str(caught.exception))
+        self.assertFalse(self.running(int(pid_file.read_text())), "stalled target survived cleanup")
+
     def test_silent_fast_failures_preserve_status_without_shell_noise(self) -> None:
-        suite = self.suite("silent", "raise SystemExit(6)\n")
-        result = self.run_suites(*([suite] * 40))
+        suite = self.suite(
+            "silent",
+            "import os\nos.write(int(os.environ['RUNNER_ACK_FD']),b'+')\nraise SystemExit(6)\n",
+        )
+        result = self.run_batch(suite, 40)
         self.assertEqual(result.returncode, 6)
         self.assertEqual((result.stdout, result.stderr), ("", ""))
 
