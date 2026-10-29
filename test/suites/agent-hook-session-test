@@ -593,7 +593,7 @@ echo "=== busy pane mark ==="
 
 MOCK_BUSY_DIR=$(_tmpdir)
 _install_hook_fixture "$MOCK_BUSY_DIR" agent-hook-prompt-submit agent-hook-stop \
-  agent-hook-notification agent-hook-session-end
+  agent-hook-notification agent-hook-session-end agent-hook-telemetry
 cat >"$MOCK_BUSY_DIR/bin/term-pane-mark" <<'MOCK'
 #!/usr/bin/env bash
 if [[ ${TERM_PANE_MARK_LEGACY:-0} == 1 && "$*" == *'--token '* ]]; then exit 64; fi
@@ -622,19 +622,104 @@ chmod +x "$MOCK_BUSY_DIR/bin/term-pane-mark" "$MOCK_BUSY_DIR/bin/term-notify-sou
 
 # Run one busy-fixture hook with optional JSON on stdin and return its stdout.
 # A wrapper process stands in for the agent: it records its PID in LOG.owner
-# and runs the hook as its child (the trailing no-op prevents an exec), so the
-# mark's expected owner is the hook's parent, as under a real agent.
+# and runs the hook as its child, preserving its status while preventing exec,
+# so mark ownership and the native exit contract can both be checked.
 _busy_hook() {
   local hook="$1" agent="$2" log="$3" payload="${4-}"
+  local session="${5:-$TEST_SID-busy-$agent}"
   printf '%s' "$payload" |
-    AGENTGUARD_SESSION_ID="$TEST_SID-busy-$agent" \
+    AGENTGUARD_SESSION_ID="$session" \
       TMPDIR="$TEST_TMPDIR" \
       AGENTGUARD_NAME="$agent" \
       TERM_PANE_MARK_LOG="$log" \
       PATH="$MOCK_BUSY_DIR/bin:$PATH" \
-      bash -c 'printf "%s" "$$" >"$1.owner"; "$2"; :' _ "$log" \
+      bash -c 'printf "%s" "$$" >"$1.owner"; "$2"; hook_status=$?; exit "$hook_status"' _ "$log" \
       "$MOCK_BUSY_DIR/bin/$hook" 2>/dev/null
 }
+
+# Exercise provider-native envelopes, rather than assuming every runtime sends
+# Codex session/turn metadata. Gemini uses BeforeAgent/AfterAgent; Grok's stdin
+# names are camelCase with snake_case event values. OpenCode normalizes its JS
+# callbacks to Claude-shaped events and declares its fail-open Stop contract.
+for native_agent in claude codex gemini grok muse opencode; do
+  native_session="$TEST_SID-native-envelope-$native_agent"
+  native_log="$MOCK_BUSY_DIR/native-envelope-$native_agent.log"
+  for native_cycle in first second; do
+    case "$native_agent" in
+      grok)
+        native_prompt=$(jq -nc --arg session "$native_session" \
+          '{sessionId:$session,hookEventName:"user_prompt_submit",prompt:"Work."}')
+        native_stop=$(jq -nc --arg session "$native_session" \
+          '{sessionId:$session,hookEventName:"stop",stopHookActive:false}')
+        ;;
+      codex)
+        native_prompt=$(jq -nc --arg session "$native_session" --arg turn "$native_cycle" \
+          '{session_id:$session,turn_id:$turn,transcript_path:"/tmp/native-rollout.jsonl",hook_event_name:"UserPromptSubmit",prompt:"Work."}')
+        native_stop=$(jq -nc --arg session "$native_session" --arg turn "$native_cycle" \
+          '{session_id:$session,turn_id:$turn,transcript_path:"/tmp/native-rollout.jsonl",hook_event_name:"Stop",stop_hook_active:false}')
+        ;;
+      *)
+        native_prompt_event=UserPromptSubmit
+        native_stop_event=Stop
+        if [ "$native_agent" = gemini ]; then
+          native_prompt_event=BeforeAgent
+          native_stop_event=AfterAgent
+        fi
+        native_prompt=$(jq -nc --arg session "$native_session" --arg event "$native_prompt_event" \
+          '{session_id:$session,hook_event_name:$event,prompt:"Work."}')
+        native_stop=$(jq -nc --arg session "$native_session" --arg event "$native_stop_event" \
+          '{session_id:$session,hook_event_name:$event}')
+        ;;
+    esac
+    native_out=$(_busy_hook agent-hook-prompt-submit "$native_agent" "$native_log" \
+      "$native_prompt" "$native_session")
+    _assert_eq "native attention ($native_agent/$native_cycle): prompt exits successfully" 0 "$?"
+    _assert_eq "native attention ($native_agent/$native_cycle): prompt returns clean JSON" '{}' "$native_out"
+
+    # Claude, Codex and Muse wire SubagentStop only to passive telemetry. Grok
+    # reuses the Stop launcher and distinguishes the child through subagentType.
+    # Gemini exposes no child hook here; OpenCode suppresses guard lifecycle in
+    # its adapter (covered against V1/V2 in opencode-agentguard-test).
+    if [ "$native_cycle" = first ] && [ "$native_agent" != gemini ] && [ "$native_agent" != opencode ]; then
+      native_before_marks=$(cat "$native_log")
+      case "$native_agent" in
+        grok)
+          native_child=$(jq -nc --arg session "$native_session" \
+            '{sessionId:$session,hookEventName:"subagent_stop",subagentType:"explore"}')
+          _busy_hook agent-hook-stop grok "$native_log" "$native_child" "$native_session" >/dev/null
+          ;;
+        claude | codex | muse)
+          native_child=$(jq -nc --arg session "$native_session" \
+            '{session_id:$session,hook_event_name:"SubagentStop",agent_id:"native-child"}')
+          _busy_hook agent-hook-telemetry "$native_agent" "$native_log" \
+            "$native_child" "$native_session" >/dev/null
+          ;;
+      esac
+      _assert_file_content "native attention ($native_agent): child leaves parent busy untouched" \
+        "$native_before_marks" "$native_log"
+      _assert_file_missing "native attention ($native_agent): child leaves completion silent" "$native_log.notify"
+    fi
+
+    native_mark_line=$(wc -l <"$native_log")
+    for native_repeat in first repeated; do
+      if [ "$native_agent" = opencode ]; then
+        native_out=$(AGENTGUARD_STOP_BLOCK_ENDS_TURN=1 _busy_hook agent-hook-stop \
+          "$native_agent" "$native_log" "$native_stop" "$native_session")
+      else
+        native_out=$(_busy_hook agent-hook-stop "$native_agent" "$native_log" \
+          "$native_stop" "$native_session")
+      fi
+      _assert_eq "native attention ($native_agent/$native_cycle/$native_repeat): Stop exits successfully" 0 "$?"
+      _assert_eq "native attention ($native_agent/$native_cycle/$native_repeat): Stop returns clean JSON" '{}' "$native_out"
+    done
+    native_want=1
+    [ "$native_cycle" = first ] || native_want=2
+    _assert_eq "native attention ($native_agent/$native_cycle): exactly one completion bell" \
+      "$native_want" "$(wc -l <"$native_log.notify" | tr -d ' ')"
+    _assert_contains "native attention ($native_agent/$native_cycle): completed work clears busy" \
+      'clear busy' "$(tail -n +"$((native_mark_line + 1))" "$native_log")"
+  done
+done
 
 # Notification admission must agree with busy ownership, including children
 # hosted inside the foreground process. These invoke real hooks; only the tty

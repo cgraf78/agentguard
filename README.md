@@ -639,8 +639,8 @@ To add a new managed agent runtime:
   turn's bell. Prompt rearming and Stop publication share a bounded lock;
   a successful rearm finishes after the previous publisher. A timed-out or
   failed rearm suppresses subsequent claims until a later successful prompt;
-  it cannot retract a notification already admitted and in flight. Legacy hosts without turn identities keep their existing
-  prompt-cycle behavior.
+  it cannot retract a notification already admitted and in flight. Legacy hosts
+  without turn identities keep their existing prompt-cycle behavior.
 
   Tagged lifecycle notifications use Python 3's kernel file lock; Python 3 is
   required on hosts supplying turn identities. Without it those notifications
