@@ -633,6 +633,21 @@ To add a new managed agent runtime:
   item IDs; prompt-submit still surfaces memory reminders before Stop. Grok
   Stop always emits empty JSON because Grok treats Stop context as
   keep-working feedback; an extension block still exits with status 2.
+  When the host supplies a session and turn identity, completion notifications
+  admit only the current foreground turn. Child/background prompts cannot
+  rearm the parent's notification, and delayed Stops cannot consume a newer
+  turn's bell. Prompt rearming and Stop publication share a bounded lock;
+  a successful rearm finishes after the previous publisher. A timed-out or
+  failed rearm suppresses subsequent claims until a later successful prompt;
+  it cannot retract a notification already admitted and in flight. Legacy hosts
+  without turn identities keep their existing prompt-cycle behavior.
+
+  Tagged lifecycle notifications use Python 3's kernel file lock; Python 3 is
+  required on hosts supplying turn identities. Without it those notifications
+  fail silent. Kernel locks release after the final synchronous publisher exits,
+  including forced termination; the private `attention-lock` file stays in place
+  and must not be removed while the session is active.
+
   `agent-hook-notification` plays notifications for host attention events such
   as permission requests.
 

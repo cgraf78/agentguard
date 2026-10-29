@@ -148,7 +148,11 @@ clear it early (both commands come from
 command is installed.
 
 Busy marks use length-prefixed session/turn generation tokens when provided, preventing a late
-Stop from clearing newer work. Foreground-terminal ownership remains required.
+Stop from clearing newer work. The same cached foreground/identity policy
+protects prompt rearming and completion notifications. Tagged lifecycle hooks
+serialize token publication, continuation markers, notification claims, and
+notifier invocation; stale or malformed Stops fail silent. Older hosts retain
+legacy prompt-cycle behavior. Foreground-terminal ownership remains required.
 A detached shared Codex backend cannot claim an attached TUI's pane by process
 ancestry; interactive `codex --no-daemon` retains the foreground hook contract.
 

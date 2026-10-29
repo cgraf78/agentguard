@@ -45,6 +45,9 @@ _HOOK_INPUT_ATTEMPTED=''
 _HOOK_PROMPT_SUBMITTED=''
 # Cached _hook_stop_is_foreground answer (1 or 0); a Stop hook asks twice.
 _HOOK_STOP_FOREGROUND=''
+_HOOK_ACTIVITY_FOREGROUND=''
+_HOOK_TURN_KIND=''
+_HOOK_TURN_TOKEN=''
 # Set while a Stop hook has not yet settled whether its turn ends; see
 # _hook_stop_arm.
 _HOOK_STOP_PENDING=''
@@ -699,11 +702,135 @@ _hook_remind() {
   _hook_context "$message"
 }
 
-_hook_prompt_cycle_reset() {
-  # UserPromptSubmit is the clean boundary between requests. Short-lived hooks
-  # can use this directory to avoid repeating broad guidance during one edit
-  # cycle while still rearming for the next human prompt.
+# Parse lifecycle identity once per hook. Missing identities retain the legacy
+# contract; explicitly malformed identities must never gain legacy admission.
+_hook_turn_identity() {
+  [ -z "$_HOOK_TURN_KIND" ] || return 0
+  _HOOK_TURN_KIND=legacy
+  _hook_hm_read_input
+  case "${_HOOK_INPUT:-}" in
+    *'"turn_id"'* | *'"turnId"'* | *\\u*)
+      local identity
+      identity=$(printf '%s' "$_HOOK_INPUT" | jq -er '
+        if (has("turn_id") or has("turnId")) | not then "legacy"
+        else
+          (.session_id // .sessionId // .thread_id // .threadId) as $session |
+          (.turn_id // .turnId) as $turn |
+          select(($session | type) == "string" and ($turn | type) == "string") |
+          select(($session | length) > 0 and ($turn | length) > 0) |
+          (($session | length | tostring) + ":" + $session + ":" + $turn) |
+          select(length <= 256 and test("^[A-Za-z0-9:._-]+$"))
+        end
+      ' 2>/dev/null) || identity=''
+      case "$identity" in
+        '') _HOOK_TURN_KIND=invalid ;;
+        legacy) ;;
+        *)
+          _HOOK_TURN_KIND=tagged
+          _HOOK_TURN_TOKEN="$identity"
+          ;;
+      esac
+      ;;
+  esac
+}
+
+# A failed first tagged rearm may leave a fence without a current-token file.
+# Treat that session as managed too, so missing metadata cannot bypass failure
+# admission or rearm it through the legacy path.
+_hook_attention_managed() {
+  local fence
+  [ "$_HOOK_TURN_KIND" = legacy ] || return 0
+  [ ! -e "$_HOOK_STATE_DIR/attention-turn" ] || return 0
+  for fence in "$_HOOK_STATE_DIR"/attention-disabled.*; do
+    [ ! -e "$fence" ] || return 0
+  done
+  return 1
+}
+
+# Serialize prompt rearming with the complete Stop publication. The private
+# inode stays in place: unlinking it could let waiters lock different files.
+# Python locks the inherited open-file description, which the shell and its
+# synchronous notifier/writer children retain until publication has finished.
+# The kernel releases it even after SIGKILL; no PID/age-based lock theft exists.
+# Older hosts without turn identities never enter this path or require Python.
+_hook_attention_locked() (
+  local _attention_candidate=''
+  command -v python3 >/dev/null 2>&1 || return 1
+  _hook_mkstate "$_HOOK_STATE_DIR" || return 1
+  umask 077
+  exec 9>>"$_HOOK_STATE_DIR/attention-lock" || return 1
+  python3 - <<'PYLOCK' || return 1
+import fcntl
+import time
+
+deadline = time.monotonic() + 1
+while True:
+    try:
+        fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        if time.monotonic() >= deadline:
+            raise SystemExit(1)
+        time.sleep(0.01)
+PYLOCK
+  # Candidate ownership is invocation-local; a signal cannot remove another
+  # prompt's replacement. FD 9 closes automatically on every exit path.
+  trap '[ -z "$_attention_candidate" ] || rm -f -- "$_attention_candidate"' EXIT
+  "$@"
+)
+
+# Failure fences have unique names because they can be published by a prompt
+# that times out while another reset owns the lock. A successful reset clears
+# only the fences it observed on entry, never a newer prompt's failure.
+_hook_attention_disable() {
+  mktemp "$_HOOK_STATE_DIR/attention-disabled.XXXXXX" >/dev/null 2>&1 || true
+}
+
+_hook_prompt_cycle_write() {
+  local current="$_HOOK_STATE_DIR/attention-turn"
+  local fences=("$_HOOK_STATE_DIR"/attention-disabled.*)
+  _attention_candidate=$(mktemp "$_HOOK_STATE_DIR/.attention-turn.XXXXXX") || {
+    _hook_attention_disable
+    return 1
+  }
+  if ! printf '%s\n' "$_HOOK_TURN_KIND:$_HOOK_TURN_TOKEN" >"$_attention_candidate" ||
+    ! mv -f -- "$_attention_candidate" "$current"; then
+    rm -f -- "$_attention_candidate"
+    _attention_candidate=''
+    _hook_attention_disable
+    return 1
+  fi
+  _attention_candidate=''
+  rm -f -- "${fences[@]}"
   rm -rf "$_HOOK_STATE_DIR/prompt-cycle" 2>/dev/null || true
+}
+
+_hook_prompt_cycle_reset() {
+  # Child/background prompts sharing the host process must not rearm the
+  # foreground turn's bell or discard its continuation/deduplication markers.
+  _hook_activity_is_foreground || return 0
+  _hook_turn_identity
+  if _hook_attention_managed; then
+    _hook_attention_locked _hook_prompt_cycle_write || {
+      # A timed-out reset must not leave the previous turn admitted while the
+      # host proceeds with new work. Only a later successful reset clears this.
+      _hook_attention_disable
+    }
+  else
+    # UserPromptSubmit remains the historical request boundary on older hosts.
+    rm -rf "$_HOOK_STATE_DIR/prompt-cycle" 2>/dev/null || true
+  fi
+}
+
+# Called only under the attention lock, including continuation-marker writes.
+_hook_attention_is_current() {
+  local current='' fence
+  for fence in "$_HOOK_STATE_DIR"/attention-disabled.*; do
+    [ ! -e "$fence" ] || return 1
+  done
+  IFS= read -r current <"$_HOOK_STATE_DIR/attention-turn" 2>/dev/null || return 1
+  [ "$_HOOK_TURN_KIND" != invalid ] &&
+    [ "$current" = "$_HOOK_TURN_KIND:$_HOOK_TURN_TOKEN" ]
 }
 
 _hook_mark_once() {
@@ -756,7 +883,9 @@ _hook_stop_is_foreground() {
   if [ -z "$_HOOK_STOP_FOREGROUND" ]; then
     _HOOK_STOP_FOREGROUND=1
     _hook_hm_read_input
-    if [ -n "${_HOOK_INPUT+x}" ]; then
+    if ! _hook_activity_is_foreground; then
+      _HOOK_STOP_FOREGROUND=0
+    elif [ -n "${_HOOK_INPUT+x}" ]; then
       child_type=$(printf '%s' "$_HOOK_INPUT" | jq -r '.subagent_type // .subagentType // empty' 2>/dev/null) || child_type=''
       if [ -n "$child_type" ]; then
         _HOOK_STOP_FOREGROUND=0
@@ -816,18 +945,53 @@ _hook_stop_arm() {
 # lets _hook_exit finish the job; the bell claim and the idempotent clear make
 # a repeat harmless.
 _hook_stop_settle() {
+  local settled=0
   if _hook_stop_is_foreground; then
-    if [ "$1" = 1 ]; then
-      _hook_stop_mark_continued
-    else
-      if _hook_stop_should_notify; then
-        # --owner: an agent this one launched cannot mark this agent's pane pending.
-        term-notify-sound --owner "$PPID" >/dev/null 2>&1 || true
+    _hook_turn_identity
+    if _hook_attention_managed; then
+      if _hook_attention_locked _hook_stop_settle_current "$1"; then
+        settled=1
       fi
-      _hook_pane_busy clear
+    else
+      _hook_stop_settle_current "$1"
+      settled=1
+    fi
+    # Modern markers can independently settle their exact busy token when the
+    # notification transaction fails. Never retry an old provider's untagged
+    # clear here: only successful locked/current settlement grants that proof.
+    if [ "$1" != 1 ] && [ "$settled" != 1 ]; then
+      _hook_stop_clear_busy
     fi
   fi
   _HOOK_STOP_PENDING=''
+}
+
+_hook_stop_clear_busy() {
+  case "$_HOOK_TURN_KIND" in
+    invalid) return 0 ;;
+    legacy)
+      # Missing identity cannot become an untagged clear against known tagged
+      # work, including independently installed older marker implementations.
+      if _hook_attention_managed; then
+        _hook_attention_is_current || return 0
+      fi
+      ;;
+  esac
+  _hook_pane_busy clear token-only
+}
+
+_hook_stop_settle_current() {
+  if _hook_attention_managed; then
+    _hook_attention_is_current || return 1
+  fi
+  if [ "$1" = 1 ]; then
+    _hook_stop_mark_continued
+  else
+    if _hook_stop_should_notify; then
+      term-notify-sound --owner "$PPID" >/dev/null 2>&1 || true
+    fi
+    _hook_pane_busy clear
+  fi
 }
 
 # Settle a Stop that exits before the launcher decided. Only a block that
@@ -882,18 +1046,24 @@ _hook_turn_aborted() {
   ' >/dev/null 2>&1
 }
 
-# Return whether this hook's session is foreground work whose turns the busy
-# mark tracks. Codex runs background agents (memory consolidation, task-title
+# Return whether this lifecycle event belongs to foreground work. Busy marks,
+# notification settlement, and prompt rearming must share this admission rule.
+# Codex runs background agents (memory consolidation, task-title
 # generation) as ephemeral sessions inside the user's Codex process: the same
 # process and pane, their own prompts, Stops, and Interrupts, and no
 # transcript. They must neither mark an idle pane nor clear the user's turn.
 # The cost is that `codex exec --ephemeral` run directly in a pane, also
 # transcript-less, is not marked either.
-_hook_busy_tracked() {
+_hook_activity_is_foreground() {
+  case "$_HOOK_ACTIVITY_FOREGROUND" in 1) return 0 ;; 0) return 1 ;; esac
+  _HOOK_ACTIVITY_FOREGROUND=0
   local _busy_agent_name
   _hook_agent_name _busy_agent_name
   _hook_hm_read_input
-  [ -n "${_HOOK_INPUT:-}" ] || return 0
+  if [ -z "${_HOOK_INPUT:-}" ]; then
+    _HOOK_ACTIVITY_FOREGROUND=1
+    return 0
+  fi
   # A foreground host can execute child hooks in its own process. Explicit
   # child identity is stronger evidence than terminal ownership. Most hooks
   # lack these keys: keep their existing subprocess budget and parse JSON only
@@ -906,9 +1076,11 @@ _hook_busy_tracked() {
       ' >/dev/null 2>&1 || return 1
       ;;
   esac
-  [ "$_busy_agent_name" = codex ] || return 0
-  ! printf '%s' "$_HOOK_INPUT" |
-    jq -e 'has("transcript_path") and .transcript_path == null' >/dev/null 2>&1
+  if [ "$_busy_agent_name" = codex ] && printf '%s' "$_HOOK_INPUT" |
+    jq -e 'has("transcript_path") and .transcript_path == null' >/dev/null 2>&1; then
+    return 1
+  fi
+  _HOOK_ACTIVITY_FOREGROUND=1
 }
 
 # Set or clear the busy mark on the agent's tmux pane, so the terminal can show
@@ -924,31 +1096,22 @@ _hook_pane_busy() {
   local token='' mark_status=0
   local -a mark_args
   command -v term-pane-mark >/dev/null 2>&1 || return 0
-  _hook_busy_tracked || return 0
+  _hook_activity_is_foreground || return 0
   _hook_hm_read_input
-  case "${_HOOK_INPUT:-}" in
-    *'"turn_id"'* | *'"turnId"'* | *\\u*)
-      # The lifecycle payload, rather than inherited environment, identifies
-      # the work. A delayed Stop from one turn cannot clear a newer turn or a
-      # child thread. Older hosts without turn identities retain the legacy API.
-      token=$(printf '%s' "$_HOOK_INPUT" | jq -er '
-      (.session_id // .sessionId // .thread_id // .threadId) as $session |
-      (.turn_id // .turnId) as $turn |
-      select(($session | type) == "string" and ($turn | type) == "string") |
-      select(($session | length) > 0 and ($turn | length) > 0) |
-      # Prefix the session length: colons are valid inside either ID,
-      # so plain concatenation would alias ("a:b", "c") and ("a", "b:c").
-      (($session | length | tostring) + ":" + $session + ":" + $turn) |
-      select(length <= 256 and test("^[A-Za-z0-9:._-]+$"))
-    ' 2>/dev/null) || token=''
-      ;;
-  esac
+  _hook_turn_identity
+  token="$_HOOK_TURN_TOKEN"
   mark_args=("$1" busy --owner "$PPID")
   [ -z "$token" ] || mark_args+=(--token "$token")
   term-pane-mark "${mark_args[@]}" >/dev/null 2>&1 || mark_status=$?
   # Providers update independently. An older marker rejects unknown flags
   # before changing state, so preserve its original foreground-only contract.
-  if [ "$mark_status" = 64 ] && [ -n "$token" ]; then
+  if [ "$mark_status" = 64 ] && [ -n "$token" ] && [ "${2:-}" != token-only ]; then
+    # The synchronous notifier may have stalled while a newer prompt failed
+    # rearm and published a fence. Revalidate at the actual compatibility
+    # boundary; only the modern token-aware clear remains safe after that.
+    if [ "$1" = clear ] && _hook_attention_managed && ! _hook_attention_is_current; then
+      return 0
+    fi
     term-pane-mark "$1" busy --owner "$PPID" >/dev/null 2>&1 || true
   fi
 }
