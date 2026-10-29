@@ -11,6 +11,11 @@ identity until descendant teardown is finished. This avoids Bash monitor
 mode's concurrent parent/child `setpgid` calls and prevents cleanup from
 signalling a reused process group. Unsupported supervision fails before any
 suite starts. AgentGuard tests do not require Dot.
+On Android, the runner supports ordinary unprivileged app execution. Process
+privacy denials are excluded only when proc directory metadata proves another
+UID; inaccessible same-UID or unknown-owner entries fail cleanup closed. Root
+execution receives no privacy exception. Linux retains the process-group check
+because descendants there may change UID through setuid executables.
 
 ## Suite Scope
 

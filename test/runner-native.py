@@ -14,6 +14,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -94,6 +95,100 @@ class NativeRunnerTest(unittest.TestCase):
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         return module
+
+    def restricted_snapshot(
+        self,
+        *,
+        android: bool,
+        owner: int | None,
+        groups: set[int],
+        caller: int = 10000,
+        known_group: int | None = None,
+    ):
+        """Model Android denying both stat contents and getpgid for another app."""
+        module = self.load_runner()
+        proc = self.root / "proc"
+        (proc / "self").mkdir(parents=True)
+        (proc / "self" / "stat").touch()
+        foreign = proc / "41"
+        foreign.mkdir()
+        owned = proc / "42"
+        owned.mkdir()
+        (owned / "stat").write_bytes(b"42 (suite) S 1 42 42 0")
+        original_stat = Path.stat
+        original_read = Path.read_bytes
+
+        def path(value):
+            value = Path(value)
+            return proc / value.relative_to("/proc") if value.is_relative_to("/proc") else value
+
+        def metadata(value, *args, **kwargs):
+            if value == foreign:
+                if owner is None:
+                    raise PermissionError(13, "private process metadata")
+                return SimpleNamespace(st_uid=owner)
+            return original_stat(value, *args, **kwargs)
+
+        def contents(value):
+            if value == foreign / "stat":
+                raise PermissionError(13, "private process stat")
+            return original_read(value)
+
+        with (
+            patch.object(module, "Path", path),
+            patch.object(Path, "stat", metadata),
+            patch.object(Path, "read_bytes", contents),
+            patch.dict(module.sys.__dict__),
+            patch.object(module.sys, "platform", "android" if android else "linux"),
+            patch.object(module.os, "geteuid", return_value=caller),
+            patch.object(
+                module.os,
+                "getpgid",
+                return_value=known_group,
+                side_effect=PermissionError(13, "private pgid") if known_group is None else None,
+            ),
+        ):
+            if android:
+                module.sys.getandroidapilevel = lambda: 31
+            else:
+                module.sys.__dict__.pop("getandroidapilevel", None)
+            return module.live_members(groups)
+
+    def test_android_foreign_app_privacy_does_not_block_owned_snapshot(self) -> None:
+        self.assertEqual(
+            self.restricted_snapshot(android=True, owner=10001, groups={42}), {42: [42]}
+        )
+
+    def test_android_unreadable_same_uid_stays_fail_closed(self) -> None:
+        with self.assertRaises(PermissionError):
+            self.restricted_snapshot(android=True, owner=10000, groups={42})
+
+    def test_android_unknown_owner_stays_fail_closed(self) -> None:
+        with self.assertRaises(PermissionError):
+            self.restricted_snapshot(android=True, owner=None, groups={42})
+
+    def test_linux_denied_foreign_uid_stays_fail_closed(self) -> None:
+        with self.assertRaises(PermissionError):
+            self.restricted_snapshot(android=False, owner=10001, groups={42})
+
+    def test_android_root_denial_stays_fail_closed(self) -> None:
+        with self.assertRaises(PermissionError):
+            self.restricted_snapshot(android=True, owner=10001, groups={42}, caller=0)
+
+    def test_linux_known_unowned_group_denial_is_excluded(self) -> None:
+        self.assertEqual(
+            self.restricted_snapshot(android=False, owner=10001, groups={42}, known_group=41),
+            {42: [42]},
+        )
+
+    def test_known_owned_group_denial_stays_fail_closed(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "cannot inspect owned group member 41"):
+            self.restricted_snapshot(android=True, owner=10001, groups={42}, known_group=42)
+
+    def test_empty_owned_group_set_never_scans_foreign_processes(self) -> None:
+        module = self.load_runner()
+        with patch.object(module.Path, "iterdir", side_effect=AssertionError("global scan")):
+            self.assertEqual(module.live_members(set()), {})
 
     def test_signals_at_replay_boundaries_are_preserved(self) -> None:
         module = self.load_runner()

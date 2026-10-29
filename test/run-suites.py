@@ -65,6 +65,8 @@ def wait_exited(pid: int) -> bool:
 def live_members(groups: set[int]) -> dict[int, list[int]]:
     """Snapshot runnable members while the owned leaders reserve group IDs."""
     members: dict[int, list[int]] = {}
+    if not groups:
+        return members
     if Path("/proc/self/stat").is_file():
         for entry in Path("/proc").iterdir():
             if not entry.name.isascii() or not entry.name.isdecimal():
@@ -81,6 +83,29 @@ def live_members(groups: set[int]) -> dict[int, list[int]]:
                     group = os.getpgid(int(entry.name))
                 except ProcessLookupError:
                     continue
+                except PermissionError as error:
+                    # Android app privacy also denies getpgid across app UIDs.
+                    # Ordinary app descendants cannot switch UID. Require
+                    # independent directory ownership evidence before treating
+                    # a denial as foreign; same-UID or unreadable metadata is
+                    # still incomplete evidence and must fail closed. Linux
+                    # permits setuid descendants, so never apply this there.
+                    owner = None
+                    if hasattr(sys, "getandroidapilevel") and os.geteuid() >= 10000:
+                        try:
+                            owner = entry.stat().st_uid
+                        except (FileNotFoundError, ProcessLookupError):
+                            continue
+                        except PermissionError:
+                            pass
+                        if owner is not None and owner != os.geteuid():
+                            continue
+                    raise PermissionError(
+                        error.errno,
+                        f"process snapshot pid={entry.name} owner_uid={owner} "
+                        f"caller_uid={os.geteuid()}: stat and getpgid denied",
+                        str(entry / "stat"),
+                    ) from error
                 if group in groups:
                     raise RuntimeError(f"cannot inspect owned group member {entry.name}") from None
                 continue
@@ -324,7 +349,12 @@ def main() -> int:
     except OSError as error:
         print(f"run-suites: native wait observation is unavailable: {error}", file=sys.stderr)
         return 125
-    live_members(set())
+    # With no workers there is no owned group to inspect. Validate only our
+    # own procfs access; a global scan needlessly crosses Android app privacy.
+    if Path("/proc/self/stat").is_file():
+        Path("/proc/self/stat").read_bytes()
+    else:
+        live_members({os.getpgrp()})
     with tempfile.TemporaryDirectory(prefix="agentguard-run.") as temporary:
         runner = Runner(Path(temporary))
         for signum in HANDLED_SIGNALS:
