@@ -86,9 +86,9 @@ def live_members(groups: set[int]) -> dict[int, list[int]]:
                 except PermissionError as error:
                     # Android app privacy also denies getpgid across app UIDs.
                     # Ordinary app descendants cannot switch UID. Require
-                    # independent directory ownership evidence before treating
-                    # a denial as foreign; same-UID or unreadable metadata is
-                    # still incomplete evidence and must fail closed. Linux
+                    # directory ownership or kernel signal authority before
+                    # treating a denial as foreign; same-UID or signalable
+                    # unknown processes remain unproved. Linux
                     # permits setuid descendants, so never apply this there.
                     owner = None
                     if hasattr(sys, "getandroidapilevel") and os.geteuid() >= 10000:
@@ -100,6 +100,22 @@ def live_members(groups: set[int]) -> dict[int, list[int]]:
                             pass
                         if owner is not None and owner != os.geteuid():
                             continue
+                        if owner is None:
+                            # Android can hide even directory metadata (pid 1
+                            # on stock Termux). Signal 0 delivers no signal:
+                            # the kernel checks real/saved UID authority, and
+                            # Android allows same-domain signull even for a
+                            # nondumpable child. Ordinary app descendants keep
+                            # that UID/domain, so EPERM excludes them; a
+                            # signalable unknown process remains unproved.
+                            try:
+                                os.kill(int(entry.name), 0)
+                            except ProcessLookupError:
+                                continue
+                            except PermissionError as denied:
+                                if denied.errno == errno.EPERM:
+                                    continue
+                                raise
                     raise PermissionError(
                         error.errno,
                         f"process snapshot pid={entry.name} owner_uid={owner} "

@@ -104,6 +104,7 @@ class NativeRunnerTest(unittest.TestCase):
         groups: set[int],
         caller: int = 10000,
         known_group: int | None = None,
+        signal_error: OSError | None = None,
     ):
         """Model Android denying both stat contents and getpgid for another app."""
         module = self.load_runner()
@@ -141,6 +142,7 @@ class NativeRunnerTest(unittest.TestCase):
             patch.dict(module.sys.__dict__),
             patch.object(module.sys, "platform", "android" if android else "linux"),
             patch.object(module.os, "geteuid", return_value=caller),
+            patch.object(module.os, "kill", side_effect=signal_error),
             patch.object(
                 module.os,
                 "getpgid",
@@ -189,6 +191,102 @@ class NativeRunnerTest(unittest.TestCase):
         module = self.load_runner()
         with patch.object(module.Path, "iterdir", side_effect=AssertionError("global scan")):
             self.assertEqual(module.live_members(set()), {})
+
+    def test_android_hidden_owner_with_denied_signal_is_foreign(self) -> None:
+        self.assertEqual(
+            self.restricted_snapshot(
+                android=True,
+                owner=None,
+                groups={42},
+                signal_error=PermissionError(1, "foreign signal authority"),
+            ),
+            {42: [42]},
+        )
+
+    def test_android_hidden_owner_that_vanishes_is_excluded(self) -> None:
+        self.assertEqual(
+            self.restricted_snapshot(
+                android=True,
+                owner=None,
+                groups={42},
+                signal_error=ProcessLookupError(3, "process vanished"),
+            ),
+            {42: [42]},
+        )
+
+    def test_android_hidden_owner_eacces_stays_fail_closed(self) -> None:
+        with self.assertRaises(PermissionError):
+            self.restricted_snapshot(
+                android=True,
+                owner=None,
+                groups={42},
+                signal_error=PermissionError(13, "security policy denied signal probe"),
+            )
+
+    def test_android_hidden_owner_probe_error_stays_fail_closed(self) -> None:
+        with self.assertRaises(OSError):
+            self.restricted_snapshot(
+                android=True,
+                owner=None,
+                groups={42},
+                signal_error=OSError(5, "probe unavailable"),
+            )
+
+    def test_android_known_same_uid_denial_overrides_signal_probe(self) -> None:
+        with self.assertRaises(PermissionError):
+            self.restricted_snapshot(
+                android=True,
+                owner=10000,
+                groups={42},
+                signal_error=PermissionError(1, "signal authority denied"),
+            )
+
+    @unittest.skipUnless(hasattr(sys, "getandroidapilevel"), "Android app privacy boundary")
+    def test_android_kernel_signal_authority_matches_owned_scope(self) -> None:
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import ctypes,sys; "
+                "assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0; "
+                "print('ready',flush=True); sys.stdin.buffer.read()",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            start_new_session=True,
+        )
+        report = {"caller_uid": os.geteuid(), "owned_pid": child.pid, "foreign_pid": 1}
+
+        def probe(name, action):
+            try:
+                action()
+                report[name] = None
+            except OSError as error:
+                report[name] = error.errno
+
+        try:
+            readable, _, _ = select.select([child.stdout], [], [], 5)
+            self.assertTrue(readable, "nondumpable owned child did not become ready")
+            self.assertEqual(child.stdout.readline(), b"ready\n")
+            probe("foreign_stat_errno", lambda: Path("/proc/1/stat").read_bytes())
+            probe("foreign_directory_errno", lambda: Path("/proc/1").stat())
+            probe("foreign_group_errno", lambda: os.getpgid(1))
+            probe("foreign_signal0_errno", lambda: os.kill(1, 0))
+            probe("owned_signal0_errno", lambda: os.kill(child.pid, 0))
+            print("android-privacy-probe " + json.dumps(report, sort_keys=True), flush=True)
+            self.assertEqual(report["foreign_signal0_errno"], 1, report)
+            self.assertIsNone(report["owned_signal0_errno"], report)
+        finally:
+            child.stdin.close()
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # A failed readiness assertion must still settle our child.
+                # Popen retains its identity until this final kill and reap.
+                child.kill()
+                child.wait(timeout=5)
+            finally:
+                child.stdout.close()
 
     def test_signals_at_replay_boundaries_are_preserved(self) -> None:
         module = self.load_runner()
