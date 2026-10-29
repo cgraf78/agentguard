@@ -11,7 +11,8 @@ identity until descendant teardown is finished. This avoids Bash monitor
 mode's concurrent parent/child `setpgid` calls and prevents cleanup from
 signalling a reused process group. Unsupported supervision fails before any
 suite starts. AgentGuard tests do not require Dot.
-On Android, the runner supports ordinary unprivileged app execution. Process
+On Android, the runner supports ordinary unprivileged app execution (app IDs
+10000 through 19999 within each user's 100000-wide UID range). Process
 privacy denials are excluded when proc directory metadata proves another UID,
 or when hidden ownership and a kernel signal-0 permission denial exclude an
 owned app descendant. The latter sends no signal. Inaccessible same-UID or

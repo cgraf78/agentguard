@@ -62,6 +62,13 @@ def wait_exited(pid: int) -> bool:
     return observed == pid
 
 
+def android_app_uid(uid: int) -> bool:
+    """Match Android UserHandle.isApp, excluding SDK sandbox and isolated UIDs."""
+    # Android assigns each user a 100000-wide range. Only app IDs 10000
+    # through 19999 carry the ordinary-app scope used by the privacy proof.
+    return uid > 0 and 10000 <= uid % 100000 <= 19999
+
+
 def live_members(groups: set[int]) -> dict[int, list[int]]:
     """Snapshot runnable members while the owned leaders reserve group IDs."""
     members: dict[int, list[int]] = {}
@@ -91,7 +98,7 @@ def live_members(groups: set[int]) -> dict[int, list[int]]:
                     # unknown processes remain unproved. Linux
                     # permits setuid descendants, so never apply this there.
                     owner = None
-                    if hasattr(sys, "getandroidapilevel") and os.geteuid() >= 10000:
+                    if hasattr(sys, "getandroidapilevel") and android_app_uid(os.geteuid()):
                         try:
                             owner = entry.stat().st_uid
                         except (FileNotFoundError, ProcessLookupError):

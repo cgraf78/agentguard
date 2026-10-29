@@ -111,7 +111,7 @@ class NativeRunnerTest(unittest.TestCase):
     ):
         """Model Android denying both stat contents and getpgid for another app."""
         module = self.load_runner()
-        proc = self.root / "proc"
+        proc = self.root / f"proc-{caller}-{owner}"
         (proc / "self").mkdir(parents=True)
         (proc / "self" / "stat").touch()
         foreign = proc / "41"
@@ -158,6 +158,47 @@ class NativeRunnerTest(unittest.TestCase):
             else:
                 module.sys.__dict__.pop("getandroidapilevel", None)
             return module.live_members(groups)
+
+    def test_android_regular_app_boundaries_allow_both_privacy_routes(self) -> None:
+        for caller in (10000, 19999, 110000, 119999):
+            for owner in (caller + 1, None):
+                with self.subTest(caller=caller, owner=owner):
+                    self.assertEqual(
+                        self.restricted_snapshot(
+                            android=True,
+                            owner=owner,
+                            groups={42},
+                            caller=caller,
+                            signal_error=PermissionError(1, "foreign signal authority"),
+                        ),
+                        {42: [42]},
+                    )
+
+    def test_android_nonapp_boundaries_refuse_both_privacy_routes(self) -> None:
+        for caller in (
+            -80001,
+            0,
+            9999,
+            20000,
+            29999,
+            90000,
+            99999,
+            100000,
+            101000,
+            109999,
+            120000,
+            129999,
+            190000,
+        ):
+            for owner in (caller + 1, None):
+                with self.subTest(caller=caller, owner=owner), self.assertRaises(PermissionError):
+                    self.restricted_snapshot(
+                        android=True,
+                        owner=owner,
+                        groups={42},
+                        caller=caller,
+                        signal_error=PermissionError(1, "foreign signal authority"),
+                    )
 
     def test_android_foreign_app_privacy_does_not_block_owned_snapshot(self) -> None:
         self.assertEqual(
