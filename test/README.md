@@ -4,6 +4,14 @@
 `test/helpers.sh`, discovers suites under `test/suites/`, and runs each suite in
 an isolated fixture environment.
 
+The parallel runner requires Python 3.9 or newer with POSIX `waitid` and
+`WNOWAIT` (Linux, macOS, and Termux). It creates each suite's session once in
+the child, observes completion without reaping its leader, and reserves that
+identity until descendant teardown is finished. This avoids Bash monitor
+mode's concurrent parent/child `setpgid` calls and prevents cleanup from
+signalling a reused process group. Unsupported supervision fails before any
+suite starts. AgentGuard tests do not require Dot.
+
 ## Suite Scope
 
 Prefer narrow suites that match a hook family or policy area:
