@@ -2318,8 +2318,12 @@ _hook_hm_note_once() {
 #     id, SessionStart source=clear). Hook additionalContext over 10,000
 #     characters is replaced by a 2 KB preview, so it is not visible.
 #   - Codex keeps context the same way; PreCompact fires at compaction and
-#     SessionStart source=compact|clear|resume at the next prompt. No size
-#     limit up to 200,000 characters.
+#     SessionStart source=compact|clear|resume at the next prompt. Codex
+#     0.165.0 spills additionalContext above 2,500 approximate tokens to a
+#     file and shows only a preview (hooks/src/output_spill.rs). Its token
+#     estimate is ceil(UTF-8 bytes / 4), so budget the complete context below
+#     10,000 bytes, with 500 bytes of headroom. The saved full output is not
+#     evidence that every memory reached the model.
 #   - Muse replaces prompt-submit context on every turn (lifetime `turn`);
 #     session-start context persists through compaction and resume, so
 #     compaction needs no reset, and /clear starts a new session id. Hook
@@ -2371,6 +2375,8 @@ _hook_hm_delivery_policy() {
       ;;
     codex)
       _HOOK_HM_LIFETIME=persistent
+      _HOOK_HM_LIMIT_KIND=context
+      _HOOK_HM_LIMIT=9500
       ;;
     muse)
       case "$event" in
@@ -2392,16 +2398,21 @@ _hook_hm_delivery_policy() {
 # units: bytes for `context` limits, bytes once escaped as a JSON string for
 # `stdout` limits (Muse counts the raw JSON response).
 _hook_hm_size() {
-  local LC_ALL=C size
+  local LC_ALL=C units
   if [ "$_HOOK_HM_LIMIT_KIND" = stdout ] && [ -n "$1" ]; then
-    size=$(printf '%s' "$1" | jq -Rs . | wc -c) || size=''
-    size=${size//[!0-9]/}
+    units=$(printf '%s' "$1" | jq -Rs . | wc -c) || units=''
+    units=${units//[!0-9]/}
     # jq adds two quotes and a newline.
-    size=$((${size:-0} > 3 ? ${size:-0} - 3 : 0))
+    units=$((${units:-0} > 3 ? ${units:-0} - 3 : 0))
   else
-    size=${#1}
+    # Shell string lengths remain locale-sensitive on some runtimes, including
+    # Termux. Count bytes explicitly so UTF-8 cannot bypass the delivery cap.
+    units=$(printf '%s' "$1" | wc -c) || units=''
+    units=${units//[!0-9]/}
+    # An unreadable size must not count an uncertain delivery as visible.
+    [ -n "$units" ] || units="${_HOOK_HM_LIMIT:-0}"
   fi
-  printf -v "$2" '%s' "$size"
+  printf -v "$2" '%s' "$units"
 }
 
 # Per-event file (in the session state dir, suffixed with the hm event) with
@@ -2540,7 +2551,7 @@ _hook_hm_finalize_delivery() {
   local half tail_file="$_HOOK_STATE_DIR/$_HOOK_HM_TAIL_PREFIX$_HOOK_HM_EVENT"
 
   case "$_HOOK_HM_LIMIT_KIND" in
-    context) size=${#_HOOK_CTX} ;;
+    context) _hook_hm_size "$_HOOK_CTX" size ;;
     stdout)
       # Muse counts the raw response, so measure the exact strict-agent JSON
       # (and jq's trailing newline) that _hook_finish prints.

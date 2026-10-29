@@ -659,7 +659,12 @@ lose context is reported:
 - A reset that fails leaves a marker so the next prompt resets first.
 - AgentGuard passes each host's context lifetime (Muse drops prompt context
   every turn) and size limit (Claude shows at most 10,000 characters of hook
-  context; Muse drops hook output over 16 KB).
+  context; Codex previews context above 2,500 approximate tokens; Muse drops
+  hook output over 16 KB). Codex's default threshold uses UTF-8 bytes divided
+  by four, rounded up. Its complete tracked context is budgeted below 9,500 bytes,
+  leaving 500 bytes of headroom, including any context before Hive Memory.
+  Codex still preserves oversized output in its full saved artifact; the
+  preview alone does not count as full memory delivery.
 - The size budget is exact: the host limit minus context already present,
   counted in the host's units (JSON-escaped response bytes on Muse), minus
   the tail recorded for that event. A tail is recorded only when context
