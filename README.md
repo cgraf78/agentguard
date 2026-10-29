@@ -350,6 +350,14 @@ clear it early (both commands come from
 `claude-templates` enables a Claude-specific maintenance hook when that
 command is installed.
 
+When the host supplies session and turn IDs, busy marks carry a length-prefixed
+session/turn token so a delayed Stop cannot clear newer work. The foreground-terminal
+ownership check remains mandatory. Codex's shared app-server executes hooks
+in a detached backend, which cannot identify an attached TUI from process
+ancestry; such hooks deliberately mark no pane. Interactive `codex --no-daemon`
+keeps the hook parent in the foreground terminal and supports this integration
+without guessing a session-to-terminal association.
+
 The launcher trust boundary includes the fixed platform Bash, awk, and env
 paths and the absolute Bash candidate files above. Termux uses its
 corresponding fixed paths below `/data/data/com.termux/files/usr/bin`; other

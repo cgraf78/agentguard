@@ -596,7 +596,22 @@ _install_hook_fixture "$MOCK_BUSY_DIR" agent-hook-prompt-submit agent-hook-stop 
   agent-hook-notification agent-hook-session-end
 cat >"$MOCK_BUSY_DIR/bin/term-pane-mark" <<'MOCK'
 #!/usr/bin/env bash
+if [[ ${TERM_PANE_MARK_LEGACY:-0} == 1 && "$*" == *'--token '* ]]; then exit 64; fi
 printf '%s\n' "$*" >>"$TERM_PANE_MARK_LOG"
+if [[ -n ${TERM_PANE_MARK_STATE:-} ]]; then
+  action=$1
+  shift
+  token=''
+  while [[ $# -gt 0 ]]; do
+    if [[ $1 == --token ]]; then token=$2; break; fi
+    shift
+  done
+  if [[ $action == set ]]; then
+    printf '%s' "$token" >"$TERM_PANE_MARK_STATE"
+  elif [[ -f $TERM_PANE_MARK_STATE && $(cat "$TERM_PANE_MARK_STATE") == "$token" ]]; then
+    rm -f "$TERM_PANE_MARK_STATE"
+  fi
+fi
 printf '%s\n' "mark noise"
 MOCK
 cat >"$MOCK_BUSY_DIR/bin/term-notify-sound" <<'MOCK'
@@ -682,6 +697,50 @@ busy_log="$MOCK_BUSY_DIR/codex-transcript.log"
 _busy_hook agent-hook-stop codex "$busy_log" '{"transcript_path":"/tmp/rollout.jsonl"}' >/dev/null
 _assert_file_content "busy: a Codex session with a transcript clears the mark" \
   "$(_busy_mark "$busy_log" clear)" "$busy_log"
+
+# Turn identity travels with both endpoints. An old Stop must not clear the
+# next turn, and a child thread must not share its parent's generation.
+for lifecycle in prompt-submit stop; do
+  busy_log="$MOCK_BUSY_DIR/codex-turn-$lifecycle.log"
+  action='clear'
+  [[ $lifecycle != prompt-submit ]] || action='set'
+  _busy_hook "agent-hook-$lifecycle" codex "$busy_log" \
+    '{"session_id":"thread-a","turn_id":"turn-b","prompt":"Work.","transcript_path":"/tmp/rollout.jsonl"}' >/dev/null
+  _assert_file_content "busy: $lifecycle carries exact thread and turn identity" \
+    "$(_busy_mark "$busy_log" "$action") --token 8:thread-a:turn-b" "$busy_log"
+done
+
+# Delimiters inside valid IDs must not alias another session/turn pair.
+collision_state="$MOCK_BUSY_DIR/collision-state"
+TERM_PANE_MARK_STATE="$collision_state" _busy_hook agent-hook-prompt-submit codex \
+  "$MOCK_BUSY_DIR/collision-first.log" \
+  '{"session_id":"a:b","turn_id":"c","prompt":"Work.","transcript_path":"/tmp/a"}' >/dev/null
+TERM_PANE_MARK_STATE="$collision_state" _busy_hook agent-hook-prompt-submit codex \
+  "$MOCK_BUSY_DIR/collision-new.log" \
+  '{"session_id":"a","turn_id":"b:c","prompt":"Work.","transcript_path":"/tmp/b"}' >/dev/null
+TERM_PANE_MARK_STATE="$collision_state" _busy_hook agent-hook-stop codex \
+  "$MOCK_BUSY_DIR/collision-late-stop.log" \
+  '{"session_id":"a:b","turn_id":"c","transcript_path":"/tmp/a"}' >/dev/null
+_assert_file_content "busy: delimiter-colliding old Stop cannot clear the newer pair" \
+  '1:a:b:c' "$collision_state"
+
+busy_log="$MOCK_BUSY_DIR/codex-unsafe-turn.log"
+_busy_hook agent-hook-prompt-submit codex "$busy_log" \
+  '{"session_id":"thread-a","turn_id":"bad,#{pane_id}","prompt":"Work.","transcript_path":"/tmp/rollout.jsonl"}' >/dev/null
+_assert_file_content "busy: malformed turn metadata falls back without injection" \
+  "$(_busy_mark "$busy_log" set)" "$busy_log"
+busy_log="$MOCK_BUSY_DIR/codex-legacy-marker.log"
+TERM_PANE_MARK_LEGACY=1 _busy_hook agent-hook-prompt-submit codex "$busy_log" \
+  '{"session_id":"thread-a","turn_id":"turn-b","prompt":"Work.","transcript_path":"/tmp/rollout.jsonl"}' >/dev/null
+_assert_file_content "busy: independently updated legacy marker retains foreground protection" \
+  "$(_busy_mark "$busy_log" set)" "$busy_log"
+for child_identity in '"agent_id":"child-a"' '"agentId":"child-a"' \
+  '"subagent_type":"reviewer"' '"subagentType":"reviewer"'; do
+  busy_log="$MOCK_BUSY_DIR/codex-child-prompt.log"
+  _busy_hook agent-hook-prompt-submit codex "$busy_log" \
+    "{\"session_id\":\"parent\",\"turn_id\":\"child-turn\",\"prompt\":\"Review.\",\"transcript_path\":\"/tmp/child.jsonl\",$child_identity}" >/dev/null
+  _assert_file_missing "busy: explicitly identified child $child_identity cannot replace parent work" "$busy_log"
+done
 busy_log="$MOCK_BUSY_DIR/claude-no-transcript.log"
 _busy_hook agent-hook-prompt-submit claude "$busy_log" \
   '{"prompt":"Do the thing.","transcript_path":null}' >/dev/null
