@@ -6,6 +6,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -166,7 +167,9 @@ exec "'''
 
     # A failed newer prompt must remain fenced even when an older reset was
     # already inside its transaction and finishes clearing prior failures.
-    real_mv = subprocess.check_output(["which", "mv"], text=True).strip()
+    real_mv = shutil.which("mv")
+    if real_mv is None:
+        raise SystemExit("attention notification fixture requires mv on PATH")
     mv = fixture / "bin/mv"
     mv.write_text(
         '''#!/usr/bin/env bash
