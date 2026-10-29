@@ -636,6 +636,129 @@ _busy_hook() {
       "$MOCK_BUSY_DIR/bin/$hook" 2>/dev/null
 }
 
+# Notification admission must agree with busy ownership, including children
+# hosted inside the foreground process. These invoke real hooks; only the tty
+# notifier is replaced so a failing test cannot ring or mark the live pane.
+attention_case=0
+for child_fields in '"agent_id":"child"' '"agentId":"child"' \
+  '"subagent_type":"reviewer"' '"subagentType":"reviewer"' \
+  '"transcript_path":null'; do
+  attention_case=$((attention_case + 1))
+  attention_log="$MOCK_BUSY_DIR/attention-child-$attention_case.log"
+  attention_session="$TEST_SID-attention-$attention_case"
+  _busy_hook agent-hook-stop codex "$attention_log" \
+    "{\"session_id\":\"$attention_session\",$child_fields}" >/dev/null
+  _assert_file_missing "attention: child Stop ($child_fields) is silent" "$attention_log.notify"
+
+  _busy_hook agent-hook-prompt-submit codex "$attention_log" \
+    "{\"session_id\":\"$attention_session\",\"prompt\":\"Parent.\"}" >/dev/null
+  _busy_hook agent-hook-stop codex "$attention_log" \
+    "{\"session_id\":\"$attention_session\"}" >/dev/null
+  before_notify=$(wc -l <"$attention_log.notify" | tr -d ' ')
+  _busy_hook agent-hook-prompt-submit codex "$attention_log" \
+    "{\"session_id\":\"$attention_session\",\"prompt\":\"Child.\",$child_fields}" >/dev/null
+  _busy_hook agent-hook-stop codex "$attention_log" \
+    "{\"session_id\":\"$attention_session\"}" >/dev/null
+  _assert_eq "attention: child prompt ($child_fields) cannot rearm parent" \
+    "$before_notify" "$(wc -l <"$attention_log.notify" | tr -d ' ')"
+done
+
+attention_log="$MOCK_BUSY_DIR/attention-late.log"
+attention_session="$TEST_SID-attention-late"
+for turn in A B; do
+  _busy_hook agent-hook-prompt-submit codex "$attention_log" \
+    "{\"session_id\":\"$attention_session\",\"turn_id\":\"$turn\",\"prompt\":\"Work.\"}" >/dev/null
+done
+_busy_hook agent-hook-stop codex "$attention_log" \
+  "{\"session_id\":\"$attention_session\",\"turn_id\":\"A\"}" >/dev/null
+_assert_file_missing 'attention: late Stop A cannot ring during B' "$attention_log.notify"
+for invalid_turn in '"turn_id":null' '"turn_id":{}' '"turn_id":"bad/turn"' '"turn_id":""'; do
+  _busy_hook agent-hook-stop codex "$attention_log" \
+    "{\"session_id\":\"$attention_session\",$invalid_turn}" >/dev/null
+done
+_busy_hook agent-hook-stop codex "$attention_log" \
+  "{\"session_id\":\"$attention_session\"}" >/dev/null
+_assert_file_missing 'attention: invalid or missing identity cannot claim tagged B' "$attention_log.notify"
+_busy_hook agent-hook-stop codex "$attention_log" \
+  "{\"session_id\":\"$attention_session\",\"turn_id\":\"B\"}" >/dev/null
+_assert_eq 'attention: current Stop B still owns its one bell' 1 \
+  "$(wc -l <"$attention_log.notify" | tr -d ' ')"
+
+attention_fixture=$(_tmpdir)
+_install_hook_fixture "$attention_fixture" agent-hook-prompt-submit agent-hook-stop
+python3 "$AGENTGUARD_ROOT/test/attention-notification.py" "$attention_fixture" "$TEST_SID-attention-races"
+_assert_eq 'attention: serialized publication, contention fences, signals, and recovery' 0 "$?"
+
+# Notification infrastructure failure must not retain a completed busy mark.
+# The marker's independent turn guard still protects any newer work.
+cat >"$MOCK_BUSY_DIR/bin/python3" <<'MOCK'
+#!/usr/bin/env bash
+exit 1
+MOCK
+chmod +x "$MOCK_BUSY_DIR/bin/python3"
+attention_state="$MOCK_BUSY_DIR/attention-failed-lock.busy"
+attention_log="$MOCK_BUSY_DIR/attention-failed-lock.log"
+attention_payload="{\"session_id\":\"$TEST_SID-attention-failed-lock\",\"turn_id\":\"B\",\"prompt\":\"Work.\"}"
+TERM_PANE_MARK_STATE="$attention_state" _busy_hook agent-hook-prompt-submit codex \
+  "$attention_log" "$attention_payload" >/dev/null
+_assert_file_exists 'attention: unavailable lock preserves submitted busy state' "$attention_state"
+_busy_hook agent-hook-stop codex "$attention_log" \
+  "{\"session_id\":\"$TEST_SID-attention-failed-lock\"}" >/dev/null
+_assert_file_missing 'attention: missing Stop cannot bypass first tagged reset failure' "$attention_log.notify"
+_assert_not_contains 'attention: missing Stop after first tagged failure cannot request legacy clear' \
+  'clear busy' "$(cat "$attention_log")"
+TERM_PANE_MARK_STATE="$attention_state" _busy_hook agent-hook-stop codex \
+  "$attention_log" "$attention_payload" >/dev/null
+_assert_file_missing 'attention: unavailable lock still clears completed busy state' "$attention_state"
+_assert_file_missing 'attention: unavailable lock remains silent' "$attention_log.notify"
+rm -f "$MOCK_BUSY_DIR/bin/python3"
+
+attention_state="$MOCK_BUSY_DIR/attention-invalid-stop.busy"
+attention_log="$MOCK_BUSY_DIR/attention-invalid-stop.log"
+attention_session="$TEST_SID-attention-invalid-stop"
+TERM_PANE_MARK_STATE="$attention_state" _busy_hook agent-hook-prompt-submit codex \
+  "$attention_log" "{\"session_id\":\"$attention_session\",\"turn_id\":\"B\",\"prompt\":\"Work.\"}" >/dev/null
+for invalid_identity in '"turn_id":null' '"turn_id":"bad/turn"' '"no_turn":true'; do
+  TERM_PANE_MARK_STATE="$attention_state" _busy_hook agent-hook-stop codex \
+    "$attention_log" "{\"session_id\":\"$attention_session\",$invalid_identity}" >/dev/null
+done
+_assert_not_contains 'attention: invalid or missing Stop cannot request untagged busy clear' \
+  'clear busy' "$(cat "$attention_log")"
+_assert_file_exists 'attention: invalid or missing Stop preserves tagged busy state' "$attention_state"
+_assert_file_missing 'attention: invalid or missing Stop preserves completion bell' "$attention_log.notify"
+TERM_PANE_MARK_STATE="$attention_state" _busy_hook agent-hook-stop codex \
+  "$attention_log" "{\"session_id\":\"$attention_session\",\"turn_id\":\"B\"}" >/dev/null
+_assert_file_missing 'attention: valid current Stop clears tagged busy state' "$attention_state"
+
+# Older providers have no token-aware clear: fallback is allowed only inside
+# a successful current-generation transaction, never after a failed lock.
+attention_log="$MOCK_BUSY_DIR/attention-old-marker.log"
+attention_session="$TEST_SID-attention-old-marker"
+for turn in A B; do
+  TERM_PANE_MARK_LEGACY=1 _busy_hook agent-hook-prompt-submit codex \
+    "$attention_log" "{\"session_id\":\"$attention_session\",\"turn_id\":\"$turn\",\"prompt\":\"Work.\"}" >/dev/null
+done
+for stop_fields in '"turn_id":"A"' '"turn_id":null' '"no_turn":true'; do
+  TERM_PANE_MARK_LEGACY=1 _busy_hook agent-hook-stop codex \
+    "$attention_log" "{\"session_id\":\"$attention_session\",$stop_fields}" >/dev/null
+done
+_assert_not_contains 'attention: stale or invalid Stop cannot fallback to old marker clear' \
+  'clear busy' "$(cat "$attention_log")"
+cat >"$MOCK_BUSY_DIR/bin/python3" <<'MOCK'
+#!/usr/bin/env bash
+exit 1
+MOCK
+chmod +x "$MOCK_BUSY_DIR/bin/python3"
+TERM_PANE_MARK_LEGACY=1 _busy_hook agent-hook-stop codex \
+  "$attention_log" "{\"session_id\":\"$attention_session\",\"turn_id\":\"B\"}" >/dev/null
+_assert_not_contains 'attention: unavailable lock cannot fallback to old marker clear' \
+  'clear busy' "$(cat "$attention_log")"
+rm -f "$MOCK_BUSY_DIR/bin/python3"
+TERM_PANE_MARK_LEGACY=1 _busy_hook agent-hook-stop codex \
+  "$attention_log" "{\"session_id\":\"$attention_session\",\"turn_id\":\"B\"}" >/dev/null
+_assert_contains 'attention: successful current Stop preserves old marker compatibility' \
+  'clear busy --owner' "$(cat "$attention_log")"
+
 # _busy_mark LOG ACTION prints the mark call expected from the hook run that
 # wrote LOG.
 _busy_mark() {
