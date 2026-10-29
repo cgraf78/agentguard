@@ -892,9 +892,21 @@ _hook_turn_aborted() {
 _hook_busy_tracked() {
   local _busy_agent_name
   _hook_agent_name _busy_agent_name
-  [ "$_busy_agent_name" = codex ] || return 0
   _hook_hm_read_input
   [ -n "${_HOOK_INPUT:-}" ] || return 0
+  # A foreground host can execute child hooks in its own process. Explicit
+  # child identity is stronger evidence than terminal ownership. Most hooks
+  # lack these keys: keep their existing subprocess budget and parse JSON only
+  # when the key prefilter (or an escaped key) could describe a child.
+  case "$_HOOK_INPUT" in
+    *'"agent_id"'* | *'"agentId"'* | *'"subagent_type"'* | *'"subagentType"'* | *\\u*)
+      printf '%s' "$_HOOK_INPUT" | jq -e '
+        (.agent_id // .agentId // "") == ""
+        and (.subagent_type // .subagentType // "") == ""
+      ' >/dev/null 2>&1 || return 1
+      ;;
+  esac
+  [ "$_busy_agent_name" = codex ] || return 0
   ! printf '%s' "$_HOOK_INPUT" |
     jq -e 'has("transcript_path") and .transcript_path == null' >/dev/null 2>&1
 }
@@ -909,9 +921,36 @@ _hook_busy_tracked() {
 # Optional and best effort: without the command, or outside tmux, nothing is
 # marked.
 _hook_pane_busy() {
+  local token='' mark_status=0
+  local -a mark_args
   command -v term-pane-mark >/dev/null 2>&1 || return 0
   _hook_busy_tracked || return 0
-  term-pane-mark "$1" busy --owner "$PPID" >/dev/null 2>&1 || true
+  _hook_hm_read_input
+  case "${_HOOK_INPUT:-}" in
+    *'"turn_id"'* | *'"turnId"'* | *\\u*)
+      # The lifecycle payload, rather than inherited environment, identifies
+      # the work. A delayed Stop from one turn cannot clear a newer turn or a
+      # child thread. Older hosts without turn identities retain the legacy API.
+      token=$(printf '%s' "$_HOOK_INPUT" | jq -er '
+      (.session_id // .sessionId // .thread_id // .threadId) as $session |
+      (.turn_id // .turnId) as $turn |
+      select(($session | type) == "string" and ($turn | type) == "string") |
+      select(($session | length) > 0 and ($turn | length) > 0) |
+      # Prefix the session length: colons are valid inside either ID,
+      # so plain concatenation would alias ("a:b", "c") and ("a", "b:c").
+      (($session | length | tostring) + ":" + $session + ":" + $turn) |
+      select(length <= 256 and test("^[A-Za-z0-9:._-]+$"))
+    ' 2>/dev/null) || token=''
+      ;;
+  esac
+  mark_args=("$1" busy --owner "$PPID")
+  [ -z "$token" ] || mark_args+=(--token "$token")
+  term-pane-mark "${mark_args[@]}" >/dev/null 2>&1 || mark_status=$?
+  # Providers update independently. An older marker rejects unknown flags
+  # before changing state, so preserve its original foreground-only contract.
+  if [ "$mark_status" = 64 ] && [ -n "$token" ]; then
+    term-pane-mark "$1" busy --owner "$PPID" >/dev/null 2>&1 || true
+  fi
 }
 
 _hook_flag_enabled() {

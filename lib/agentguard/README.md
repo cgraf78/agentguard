@@ -147,6 +147,11 @@ clear it early (both commands come from
 `claude-templates` enables a Claude-specific maintenance hook when that
 command is installed.
 
+Busy marks use length-prefixed session/turn generation tokens when provided, preventing a late
+Stop from clearing newer work. Foreground-terminal ownership remains required.
+A detached shared Codex backend cannot claim an attached TUI's pane by process
+ancestry; interactive `codex --no-daemon` retains the foreground hook contract.
+
 The launcher trusts the fixed platform Bash, awk, and env paths and the
 absolute Bash candidate files above. Termux uses its corresponding fixed
 paths below `/data/data/com.termux/files/usr/bin`; other platforms use
