@@ -7,7 +7,10 @@ agent-hook-post-mcp \- track MCP tool failure streaks
 .B agent-hook-post-mcp
 reads an MCP hook JSON payload from standard input and records success or
 failure for the target MCP server. The pre-MCP hook uses those counters as a
-circuit breaker after repeated failures.
+circuit breaker after repeated failures. A success resets the server's
+count and closes the breaker; a failure increments it, records the tool
+and the start of its error for the block message, and restarts the
+cooldown before the next retry probe.
 .SH EXIT STATUS
 .TP
 .B 0

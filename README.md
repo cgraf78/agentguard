@@ -437,7 +437,8 @@ Each hook emits one JSON response through `_hook_finish`.
 - once markers: `_hook_prompt_cycle_reset`, `_hook_once_per_prompt`,
   `_hook_once_per_session`
 - state helpers: `_hook_edit_churn_file`, `_hook_counter_read`,
-  `_hook_counter_increment`, `_hook_counter_reset`
+  `_hook_counter_increment`, `_hook_counter_reset`, `_hook_now` (current
+  epoch), `_hook_write_atomic`
 - target directory setup: `_hook_cd_to_target`
 - extension loading: `_hook_source_agent`, `_hook_source_work`
 - final JSON emission: `_hook_finish`
@@ -595,11 +596,18 @@ To add a new managed agent runtime:
   hook/launcher environment to turn it off for all file types. Formatting still
   runs, and the commit gate still lints. Like the churn knobs, an `export` in
   an agent tool shell cannot reach hook processes.
-- `agent-hook-pre-mcp` guards MCP calls: it blocks a server after repeated
-  failures, warns on exact `search_files` leaf-tool calls without a path
-  filter, and warns once on exact `knowledge_load` leaf-tool calls because
-  large docs can consume significant context.
-- `agent-hook-post-mcp` tracks MCP failure streaks for that circuit breaker.
+- `agent-hook-pre-mcp` guards MCP calls: it blocks a server after three
+  consecutive failures, warns on exact `search_files` leaf-tool calls without
+  a path filter, and warns once on exact `knowledge_load` leaf-tool calls
+  because large docs can consume significant context. The circuit breaker is
+  half-open: 60 seconds after the last failure or probe, the next call goes
+  through as a probe. The block message says when that retry is allowed and
+  quotes the last failing tool and the start of its error, since repeated
+  failures are often bad arguments rather than a down server; after two
+  failed probes it calls the server probably down.
+- `agent-hook-post-mcp` tracks MCP failure streaks for that circuit breaker:
+  a success resets it, a failure (including a failed probe) counts, records
+  the tool and error, and restarts the cooldown.
 - `agent-hook-session-start` detects repo type in `sl`, `git`, then `jj` order,
   reports uncommitted changes, warns on high disk usage, and injects Hive Memory
   startup context when `hm` is installed and configured.

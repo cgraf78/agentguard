@@ -48,8 +48,9 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
 _hook_parse_mcp
 
 # Track consecutive failures per server so the pre-mcp circuit breaker
-# can block calls to a down server. Reset on any success. Runtimes report a
-# failed MCP call differently:
+# can pause calls to a failing server; each failure also restarts its
+# cooldown. Reset on any success, which closes a half-open breaker. Runtimes
+# report a failed MCP call differently:
 #   - a failure event (Claude/Muse PostToolUseFailure, Grok
 #     post_tool_use_failure) is itself the signal;
 #   - a top-level flag (OpenCode adapter, Grok `isError`);
@@ -73,7 +74,24 @@ if verdict=$(printf '%s' "$_HOOK_INPUT" | jq -r --arg agent "$agent" '
     then "true" else "false" end
 ' 2>/dev/null); then
   case "$verdict" in
-    true) _hook_counter_increment "$_HOOK_MCP_FAIL_FILE" ;;
+    true)
+      # Keep the start of the error for pre-mcp's block message: it usually
+      # says whether the arguments or the server are at fault. Only
+      # failures pay for this second jq.
+      failure_text=$(printf '%s' "$_HOOK_INPUT" | jq -r '
+        def text:
+          if type == "string" then .
+          elif type == "array" then map(text) | join(" ")
+          elif type == "object" then
+            (.error // .message // .content // .text // .output // .stderr // empty) | text
+          else empty end;
+        [.error, .tool_response, .toolResponse, .tool_result, .toolResult]
+        | map(select(. != null) | text | select(. != ""))
+        | (first // "") | gsub("[[:cntrl:]]+"; " ") | .[0:200]
+      ' 2>/dev/null) || failure_text=''
+      _hook_mcp_failures_read
+      _hook_mcp_failures_write "$((_HOOK_MCP_FAILS + 1))" "$_HOOK_MCP_TOOL_NAME" "$failure_text"
+      ;;
     false) _hook_counter_reset "$_HOOK_MCP_FAIL_FILE" ;;
   esac
 else

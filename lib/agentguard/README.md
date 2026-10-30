@@ -222,7 +222,8 @@ Each hook emits one JSON response through `_hook_finish`.
 - once markers: `_hook_prompt_cycle_reset`, `_hook_once_per_prompt`,
   `_hook_once_per_session`
 - state helpers: `_hook_edit_churn_file`, `_hook_counter_read`,
-  `_hook_counter_increment`, `_hook_counter_reset`
+  `_hook_counter_increment`, `_hook_counter_reset`, `_hook_now` (current
+  epoch), `_hook_write_atomic`
 - target directory setup: `_hook_cd_to_target`
 - extension loading: `_hook_source_agent`, `_hook_source_work`
 - final JSON emission: `_hook_finish`
