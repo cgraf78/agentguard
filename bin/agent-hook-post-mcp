@@ -75,19 +75,17 @@ if verdict=$(printf '%s' "$_HOOK_INPUT" | jq -r --arg agent "$agent" '
 ' 2>/dev/null); then
   case "$verdict" in
     true)
-      # Keep the start of the error for pre-mcp's block message: it usually
-      # says whether the arguments or the server are at fault. Only
-      # failures pay for this second jq.
+      # Keep the start of the error for pre-mcp's block message: the agent
+      # that hits the block may never have seen it (subagents share the
+      # session's counter). Only failures pay for this second jq.
       failure_text=$(printf '%s' "$_HOOK_INPUT" | jq -r '
-        def text:
-          if type == "string" then .
+        def text: if type == "string" then .
           elif type == "array" then map(text) | join(" ")
-          elif type == "object" then
-            (.error // .message // .content // .text // .output // .stderr // empty) | text
+          elif type == "object" then (.error // .message // .content // .text // empty) | text
           else empty end;
         [.error, .tool_response, .toolResponse, .tool_result, .toolResult]
-        | map(select(. != null) | text | select(. != ""))
-        | (first // "") | gsub("[[:cntrl:]]+"; " ") | .[0:200]
+        | map(text | select(. != "")) | (first // "") | gsub("[[:cntrl:]]+"; " ")
+        | if length > 400 then .[0:400] + "..." else . end
       ' 2>/dev/null) || failure_text=''
       _hook_mcp_failures_read
       _hook_mcp_failures_write "$((_HOOK_MCP_FAILS + 1))" "$_HOOK_MCP_TOOL_NAME" "$failure_text"

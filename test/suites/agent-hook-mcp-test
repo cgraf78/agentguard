@@ -89,9 +89,11 @@ _mcp_record 3 20
 _run_hook "$PRE_MCP" "$MCP_CALL"
 _assert_eq "within cooldown: blocked" "2" "$HOOK_EXIT"
 _assert_wait_between "within cooldown: reports remaining seconds" 33 41
-_assert_contains "within cooldown: names bad arguments" "bad arguments" "$HOOK_STDERR"
-_assert_contains "within cooldown: points at the error text" "error text" "$HOOK_STDERR"
-_assert_not_contains "within cooldown: does not claim the server is down" "appears to be down" "$HOOK_STDERR"
+_assert_contains "within cooldown: advice is conditional on the error" \
+  "If the error points at your arguments" "$HOOK_STDERR"
+_assert_contains "within cooldown: says the counter is shared" \
+  "failures from any agent in this session count" "$HOOK_STDERR"
+_assert_not_contains "within cooldown: no earlier-retries note" "Retries after earlier pauses" "$HOOK_STDERR"
 _assert_eq "within cooldown: count kept" "3" "$(_mcp_record_line 1)"
 
 # Past the cooldown: one probe goes through and re-stamps the record, so a
@@ -163,43 +165,30 @@ else
 fi
 
 # Corrupt records never raise an arithmetic error (which would fail the hook
-# closed on every later call), and a bad stamp gets a fresh cooldown.
-_reset_state
-mkdir -p "${MCP_FAIL_FILE%/*}"
-printf '3\n0999\n' >"$MCP_FAIL_FILE"
-_run_hook "$PRE_MCP" "$MCP_CALL"
-_assert_eq "leading-zero epoch: read as decimal, probe allowed" "0" "$HOOK_EXIT"
-_assert_not_contains "leading-zero epoch: no internal error" "internal error" "$HOOK_STDERR"
+# closed on every later call), and a bad stamp gets a fresh cooldown. Rows:
+# name|record lines (`NOW` is the current epoch)|expected exit.
+while IFS='|' read -r _name _record _expected; do
+  _reset_state
+  mkdir -p "${MCP_FAIL_FILE%/*}"
+  printf '%b\n' "${_record//NOW/$(date +%s)}" >"$MCP_FAIL_FILE"
+  _run_hook "$PRE_MCP" "$MCP_CALL"
+  _assert_eq "$_name: exit" "$_expected" "$HOOK_EXIT"
+  _assert_not_contains "$_name: no internal error" "internal error" "$HOOK_STDERR"
+  [ "$_expected" = 0 ] || _assert_wait_between "$_name: fresh cooldown" 54 60
+done <<'ROWS'
+leading-zero epoch, long past|3\n0999|0
+overlong epoch|3\n99999999999999999999|2
+garbage epoch|3\nsoon|2
+leading-zero count|08\nNOW|2
+overlong count|99999999999999999999\nNOW|0
+ROWS
 
-_reset_state
-mkdir -p "${MCP_FAIL_FILE%/*}"
-printf '3\n99999999999999999999\n' >"$MCP_FAIL_FILE"
-_run_hook "$PRE_MCP" "$MCP_CALL"
-_assert_eq "overlong epoch: blocked" "2" "$HOOK_EXIT"
-_assert_wait_between "overlong epoch: cooldown starts now" 54 60
-_assert_not_contains "overlong epoch: no internal error" "internal error" "$HOOK_STDERR"
-
-_reset_state
-mkdir -p "${MCP_FAIL_FILE%/*}"
-printf '3\nsoon\n' >"$MCP_FAIL_FILE"
-_run_hook "$PRE_MCP" "$MCP_CALL"
-_assert_eq "garbage epoch: blocked" "2" "$HOOK_EXIT"
-_assert_wait_between "garbage epoch: cooldown starts now" 54 60
-
+# post-mcp reads a leading-zero count as decimal too.
 _reset_state
 mkdir -p "${MCP_FAIL_FILE%/*}"
 printf '08\n%s\n' "$(date +%s)" >"$MCP_FAIL_FILE"
-_run_hook "$PRE_MCP" "$MCP_CALL"
-_assert_eq "leading-zero count: read as decimal" "2" "$HOOK_EXIT"
-_assert_not_contains "leading-zero count: no internal error" "internal error" "$HOOK_STDERR"
 _run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":true}'
 _assert_eq "leading-zero count: post-mcp increments" "9" "$(_mcp_record_line 1)"
-
-_reset_state
-mkdir -p "${MCP_FAIL_FILE%/*}"
-printf '99999999999999999999\n%s\n' "$(date +%s)" >"$MCP_FAIL_FILE"
-_run_hook "$PRE_MCP" "$MCP_CALL"
-_assert_not_contains "overlong count: no internal error" "internal error" "$HOOK_STDERR"
 
 # The block names the last failing tool and the start of its error, which
 # usually says whether the arguments or the server are at fault.
@@ -215,19 +204,25 @@ _assert_eq "last failure: error kept on one line" \
 _run_hook "$PRE_MCP" "$MCP_CALL"
 _assert_eq "last failure: blocked" "2" "$HOOK_EXIT"
 _assert_contains "last failure: names the tool and error" \
-  "The last failure was tool 'search': tool failed: '/tmp/x' is not in the subpath" "$HOOK_STDERR"
+  "Last failure (search): tool failed: '/tmp/x' is not in the subpath" "$HOOK_STDERR"
 
 # Codex reports the error inside the CallToolResult content.
 _reset_state
 _run_hook "$POST_MCP" '{"tool_name":"mcp__srv__lookup","tool_response":{"isError":true,"content":[{"type":"text","text":"target directory src/x does not exist"}]}}'
 _assert_eq "content error: text extracted" "target directory src/x does not exist" "$(_mcp_record_line 4)"
 
-# Long errors are cut to 200 characters.
+# Long errors are cut to 400 characters plus an ellipsis; shorter ones are
+# kept whole.
 _reset_state
 _mcp_long_error=$(printf 'e%.0s' $(seq 1 500))
 _run_hook "$POST_MCP" "$(jq -nc --arg e "$_mcp_long_error" '{"tool_name":"mcp__srv__tool","hook_event_name":"PostToolUseFailure","error":$e}')"
 _mcp_kept=$(_mcp_record_line 4)
-_assert_eq "long error: cut to 200 characters" "200" "${#_mcp_kept}"
+_assert_eq "long error: cut to 400 characters plus ellipsis" "403" "${#_mcp_kept}"
+_assert_eq "long error: ends with an ellipsis" "..." "${_mcp_kept: -3}"
+_reset_state
+_mcp_exact_error=$(printf 'e%.0s' $(seq 1 400))
+_run_hook "$POST_MCP" "$(jq -nc --arg e "$_mcp_exact_error" '{"tool_name":"mcp__srv__tool","hook_event_name":"PostToolUseFailure","error":$e}')"
+_assert_eq "400-character error: kept whole" "$_mcp_exact_error" "$(_mcp_record_line 4)"
 
 # A probe keeps the last failure in the re-stamped record.
 _reset_state
@@ -238,17 +233,32 @@ _assert_eq "probe re-stamp: allowed" "0" "$HOOK_EXIT"
 _assert_eq "probe re-stamp: tool kept" "search" "$(_mcp_record_line 3)"
 _assert_eq "probe re-stamp: error kept" "bad path" "$(_mcp_record_line 4)"
 
-# After two failed probes (five failures), the block says the server is
-# probably down instead of blaming the arguments.
+# The advice never turns into a verdict by count: an argument error repeats
+# as reliably as an outage. From five failures (two failed probes) the block
+# only adds that earlier retries failed too.
 _reset_state
 _mcp_record 4 0
 _run_hook "$PRE_MCP" "$MCP_CALL"
-_assert_not_contains "one failed probe: not called down" "probably down" "$HOOK_STDERR"
+_assert_not_contains "one failed probe: no earlier-retries note" "Retries after earlier pauses" "$HOOK_STDERR"
 _mcp_record 5 0
 _run_hook "$PRE_MCP" "$MCP_CALL"
 _assert_eq "two failed probes: blocked" "2" "$HOOK_EXIT"
-_assert_contains "two failed probes: probably down" "probably down" "$HOOK_STDERR"
-_assert_not_contains "two failed probes: no bad-arguments hint" "bad arguments" "$HOOK_STDERR"
+_assert_contains "two failed probes: earlier retries noted" "Retries after earlier pauses failed too." "$HOOK_STDERR"
+_assert_contains "two failed probes: advice still conditional" \
+  "If the error points at your arguments" "$HOOK_STDERR"
+
+# The expensive-op warnings stay quiet when the breaker blocks the call, so
+# they do not read like its cause; the knowledge_load once-marker is not
+# spent either.
+_reset_state
+_mcp_record 3 0
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__search_files","tool_input":{"query":"x"}}'
+_assert_eq "blocked search_files: blocked" "2" "$HOOK_EXIT"
+_assert_not_contains "blocked search_files: no path warning" "without a path filter" "$HOOK_STDERR"
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__knowledge_load","tool_input":{"url":"https://example.com"}}'
+_assert_not_contains "blocked knowledge_load: no warning" "knowledge_load can consume" "$HOOK_STDERR"
+_assert_file_missing "blocked knowledge_load: once-marker unspent" \
+  "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/knowledge-load-warned"
 
 # Below the threshold the cooldown does not apply.
 _reset_state

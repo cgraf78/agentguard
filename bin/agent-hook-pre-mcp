@@ -80,22 +80,23 @@ if [ -f "$_HOOK_MCP_FAIL_FILE" ]; then
     if [ "$_mcp_wait" -gt 0 ]; then
       _mcp_last=''
       [ -z "$_HOOK_MCP_FAIL_TOOL" ] ||
-        _mcp_last=" The last failure was tool '$_HOOK_MCP_FAIL_TOOL'${_HOOK_MCP_FAIL_ERROR:+: $_HOOK_MCP_FAIL_ERROR}."
+        _mcp_last=" Last failure ($_HOOK_MCP_FAIL_TOOL)${_HOOK_MCP_FAIL_ERROR:+: $_HOOK_MCP_FAIL_ERROR}."
       # The third failure opens the breaker, so from five on at least two
-      # probes have failed too.
-      if [ "$_HOOK_MCP_FAILS" -ge 5 ]; then
-        _mcp_advice='Retries after earlier pauses failed too, so the server is probably down: try a different approach or ask the user to check it.'
-      else
-        _mcp_advice="Repeated failures are often bad arguments rather than a down server (a path outside the server's root, a target that does not exist): read the error text and fix the arguments before retrying."
-      fi
-      _hook_block "MCP server '$_HOOK_MCP_SERVER' has failed $_HOOK_MCP_FAILS consecutive times this session, so its calls are paused; one retry is allowed in ${_mcp_wait}s.$_mcp_last $_mcp_advice"
+      # probes have failed too. That is a fact, not a verdict: an argument
+      # error repeats just as reliably as an outage, so the advice stays
+      # conditional on what the error says.
+      _mcp_retries=''
+      [ "$_HOOK_MCP_FAILS" -lt 5 ] || _mcp_retries=' Retries after earlier pauses failed too.'
+      _hook_block "MCP server '$_HOOK_MCP_SERVER' has failed $_HOOK_MCP_FAILS consecutive times this session (failures from any agent in this session count), so its calls are paused; one retry is allowed in ${_mcp_wait}s.$_mcp_last$_mcp_retries If the error points at your arguments (for example a path outside the server's root, or a target that does not exist), fix them before retrying; if it says the server is unreachable or the connection closed, the server is probably down: try a different approach or ask the user to check it."
     fi
   fi
 fi
 
 # --- Expensive operation guards ---
+# Skipped when the breaker blocks the call: next to the block they would read
+# like its cause.
 
-if [ "$_HOOK_MCP_TOOL_NAME" = "search_files" ]; then
+if [ -z "$_HOOK_BLOCKED" ] && [ "$_HOOK_MCP_TOOL_NAME" = "search_files" ]; then
   has_path=$(printf '%s' "$_HOOK_INPUT" | jq -r '
     .tool_input
     | (.target_directories // .path // .directory // .paths // empty)
@@ -107,7 +108,7 @@ if [ "$_HOOK_MCP_TOOL_NAME" = "search_files" ]; then
   fi
 fi
 
-if [ "$_HOOK_MCP_TOOL_NAME" = "knowledge_load" ]; then
+if [ -z "$_HOOK_BLOCKED" ] && [ "$_HOOK_MCP_TOOL_NAME" = "knowledge_load" ]; then
   if _hook_once_per_session "knowledge-load-warned"; then
     _hook_warn 'knowledge_load can consume significant context window on large documents. Prefer knowledge_filtered_search for targeted lookups.'
   fi

@@ -601,10 +601,12 @@ To add a new managed agent runtime:
   a path filter, and warns once on exact `knowledge_load` leaf-tool calls
   because large docs can consume significant context. The circuit breaker is
   half-open: 60 seconds after the last failure or probe, the next call goes
-  through as a probe. The block message says when that retry is allowed and
-  quotes the last failing tool and the start of its error, since repeated
-  failures are often bad arguments rather than a down server; after two
-  failed probes it calls the server probably down.
+  through as a probe. The counter is per server and shared by every agent in
+  the session. The block message says when that retry is allowed and quotes
+  the last failing tool and the start of its error, since the blocked agent
+  may never have seen it and repeated failures are often bad arguments
+  rather than a down server. The expensive-call warnings are skipped for a
+  blocked call.
 - `agent-hook-post-mcp` tracks MCP failure streaks for that circuit breaker:
   a success resets it, a failure (including a failed probe) counts, records
   the tool and error, and restarts the cooldown.
