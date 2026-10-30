@@ -208,6 +208,28 @@
         "matcher": ""
       }
     ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "StopCancelled": [
+      {
+        "hooks": [
+          {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=grok AGENTGUARD_SESSION_ID=\"${GROK_SESSION_ID:-}\" agent-hook-telemetry",
+            "timeout": 10,
+            "type": "command"
+          }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
         "hooks": [

@@ -289,8 +289,9 @@ _agentguard_telemetry_now_us _HOOK_TELEMETRY_START_US
 _hook_codex_process_key() {
   case "${AGENTGUARD_NAME:-}" in
     codex) ;;
-    claude | gemini | grok) return 1 ;;
+    claude | gemini | grok | muse) return 1 ;;
     *)
+      [ -z "${GEMINI_PROJECT_DIR:-}" ] || return 1
       [ -n "${CODEX_THREAD_ID:-}" ] || [ "${CODEX_INTERNAL_ORIGINATOR_OVERRIDE:-}" = "codex" ] ||
         [ "${AGENTGUARD_PROCESS_DETECT:-1}" != "0" ] || return 1
       ;;
@@ -1035,12 +1036,13 @@ _hook_stop_continues() {
 # every tool call, so a substring prefilter skips jq for ordinary payloads.
 _hook_turn_aborted() {
   case "${_HOOK_INPUT:-}" in
-    *StopFailure* | *Interrupt*) ;;
+    *StopFailure* | *StopCancelled* | *Interrupt*) ;;
     *) return 1 ;;
   esac
   command -v jq >/dev/null 2>&1 || return 1
   printf '%s' "$_HOOK_INPUT" | jq -e '
-    ((.hook_event_name // .hookEventName) | . == "StopFailure" or . == "Interrupt")
+    ((.hook_event_name // .hookEventName) |
+      . == "StopFailure" or . == "StopCancelled" or . == "Interrupt")
     and (.agent_id // .agentId) == null
     and .reason != "superseded"
   ' >/dev/null 2>&1
@@ -1080,6 +1082,11 @@ _hook_activity_is_foreground() {
     jq -e 'has("transcript_path") and .transcript_path == null' >/dev/null 2>&1; then
     return 1
   fi
+  # Muse child tools lack an agent_id. SubagentStart marks their own session
+  # state before those tools run, so they cannot impersonate root activity.
+  if [ "$_busy_agent_name" = muse ] && [ -e "$_HOOK_STATE_DIR/muse-child-session" ]; then
+    return 1
+  fi
   _HOOK_ACTIVITY_FOREGROUND=1
 }
 
@@ -1092,27 +1099,183 @@ _hook_activity_is_foreground() {
 # pane but not its terminal, so it cannot set or clear the outer agent's mark.
 # Optional and best effort: without the command, or outside tmux, nothing is
 # marked.
+_hook_team_parent_state_dir() (
+  # A child's key can select a different writable tier from its parent.
+  # Resolve the parent's tier without changing the caller's hook state.
+  _hook_resolve_state_root "$1" || return 1
+  printf '%s\n' "$_HOOK_STATE_ROOT/$1"
+)
+
+_hook_team_busy() {
+  local actor="$1" action="$2" agent_name payload state_dir session_key owner_map parent_file mapped=''
+  command -v term-pane-mark >/dev/null 2>&1 || return 1
+  _hook_agent_name agent_name
+  case "$agent_name" in codex | claude | grok | muse) ;; *) return 1 ;; esac
+  if [ "$actor" = root ]; then
+    _hook_activity_is_foreground || return 1
+  fi
+  _hook_hm_read_input
+  state_dir="$_HOOK_STATE_DIR"
+  session_key="$_HOOK_SESSION_KEY"
+  if [ "$agent_name" = muse ]; then
+    owner_map="$(_hook_team_parent_state_dir "muse-owner.$PPID")/session" || return 1
+    if [ "$actor" = child ]; then
+      parent_file="$_HOOK_STATE_DIR/muse-parent-session"
+      if [ ! -f "$parent_file" ] && [ "$action" = set ] &&
+        printf '%s' "${_HOOK_INPUT:-}" | jq -e '
+          (.hook_event_name // .hookEventName) == "SubagentStart"
+          and (.child_session_id == .session_id)
+          and (.subagent_id | type == "string" and test("^[0-9A-Fa-f-]{36}$"))
+        ' >/dev/null 2>&1; then
+        IFS= read -r mapped <"$owner_map" 2>/dev/null || mapped=''
+        if _hook_session_key_safe "$mapped"; then
+          _hook_busy_cache_publish "$parent_file" "$mapped" || true
+        fi
+      fi
+      IFS= read -r session_key <"$parent_file" 2>/dev/null || return 1
+      _hook_session_key_safe "$session_key" || return 1
+      state_dir=$(_hook_team_parent_state_dir "$session_key") || return 1
+    fi
+  fi
+  # Teardown of an ordinary direct mark must still use the direct provider
+  # path. Creating empty team state here would suppress that clear.
+  if [ "$actor" = root ] && [ "$action" = end ] &&
+    [ ! -e "$state_dir/busy-team/state.json" ]; then
+    return 1
+  fi
+  # Claude and Grok already have safe per-turn marks. Enter aggregate mode
+  # only when a root Stop actually reports background work; normal turns keep
+  # their existing token and attention behavior.
+  if [ "$agent_name" = claude ] || [ "$agent_name" = grok ]; then
+    if [ ! -e "$state_dir/busy-team/state.json" ]; then
+      case "${_HOOK_INPUT:-}" in
+        *'"background_tasks"'* | *'"backgroundTasks"'*) ;;
+        *) return 1 ;;
+      esac
+      if [ "$actor" != root ] || [ "$action" != clear ] ||
+        ! printf '%s' "${_HOOK_INPUT:-}" | jq -e --arg agent "$agent_name" '
+          (.background_tasks // .backgroundTasks // []) |
+          any(.type == "subagent" or ($agent == "claude" and .type == "teammate"))
+        ' >/dev/null 2>&1; then
+        return 1
+      fi
+    fi
+  fi
+  command -v python3 >/dev/null 2>&1 || {
+    [ ! -e "$state_dir/busy-team/state.json" ] && return 1
+    return 2
+  }
+  [ -r "$_HOOK_BIN_DIR/../lib/agentguard/busy-team.py" ] || {
+    [ ! -e "$state_dir/busy-team/state.json" ] && return 1
+    return 2
+  }
+  _hook_turn_identity
+  if { [ "$agent_name" = codex ] || [ "$agent_name" = muse ]; } && [ "$action" != end ] &&
+    [ "$_HOOK_TURN_KIND" != tagged ]; then
+    return 1
+  fi
+  payload="${_HOOK_INPUT:-}"
+  [ -n "$payload" ] || payload='{}'
+  printf '%s' "$payload" | python3 "$_HOOK_BIN_DIR/../lib/agentguard/busy-team.py" \
+    "$state_dir" "$session_key" "$PPID" "$agent_name" "$actor" "$action" \
+    >/dev/null 2>&1 && {
+    if [ "$agent_name" = muse ] && [ "$actor" = root ]; then
+      if [ "$action" = set ]; then
+        _hook_busy_cache_publish "$owner_map" "$session_key" || return 2
+      elif [ "$action" = end ]; then
+        IFS= read -r mapped <"$owner_map" 2>/dev/null || mapped=''
+        [ "$mapped" != "$session_key" ] || rm -f -- "$owner_map" 2>/dev/null || true
+      fi
+    fi
+    return 0
+  }
+  # A failed transition may already own the stable team token. Do not mix it
+  # with a direct per-turn marker; the next hook can retry pending state. A
+  # broken Python before first publication retains the original provider path.
+  [ -e "$state_dir/busy-team/state.json" ] || return 1
+  return 2
+}
+
+_hook_busy_cache_publish() (
+  local cache_file="$1" value="$2" candidate=''
+  _hook_mkstate "${cache_file%/*}" || return 1
+  candidate=$(mktemp "${cache_file%/*}/.busy-mark-turn.XXXXXX") || return 1
+  trap '[ -z "$candidate" ] || rm -f -- "$candidate"' EXIT
+  printf '%s\n' "$value" >"$candidate" || return 1
+  mv -f -- "$candidate" "$cache_file" || return 1
+  candidate=''
+)
+
 _hook_pane_busy() {
-  local token='' mark_status=0
+  local token='' mark_status=0 cached='' cache_file team_status=0 busy_agent='' prompt_id=''
   local -a mark_args
   command -v term-pane-mark >/dev/null 2>&1 || return 0
   _hook_activity_is_foreground || return 0
   _hook_hm_read_input
   _hook_turn_identity
   token="$_HOOK_TURN_TOKEN"
-  mark_args=("$1" busy --owner "$PPID")
-  [ -z "$token" ] || mark_args+=(--token "$token")
-  term-pane-mark "${mark_args[@]}" >/dev/null 2>&1 || mark_status=$?
-  # Providers update independently. An older marker rejects unknown flags
-  # before changing state, so preserve its original foreground-only contract.
-  if [ "$mark_status" = 64 ] && [ -n "$token" ] && [ "${2:-}" != token-only ]; then
-    # The synchronous notifier may have stalled while a newer prompt failed
-    # rearm and published a fence. Revalidate at the actual compatibility
-    # boundary; only the modern token-aware clear remains safe after that.
-    if [ "$1" = clear ] && _hook_attention_managed && ! _hook_attention_is_current; then
-      return 0
+  _hook_agent_name busy_agent
+  if [ "$_HOOK_TURN_KIND" = legacy ]; then
+    case "$busy_agent" in
+      claude | grok)
+        case "${_HOOK_INPUT:-}" in
+          *'"prompt_id"'* | *'"promptId"'*)
+            prompt_id=$(printf '%s' "${_HOOK_INPUT:-}" | jq -r \
+              '.prompt_id // .promptId // empty' 2>/dev/null) || prompt_id=''
+            ;;
+        esac
+        if [ -n "$prompt_id" ]; then
+          token="p:${#_HOOK_SESSION_KEY}:$_HOOK_SESSION_KEY:$prompt_id"
+          if [ "${#token}" -gt 256 ] || [[ ! "$token" =~ ^[A-Za-z0-9:._-]+$ ]]; then
+            token=''
+          fi
+        fi
+        ;;
+    esac
+  fi
+  cache_file="$_HOOK_STATE_DIR/busy-mark-turn"
+  if [ -f "$cache_file" ]; then
+    IFS= read -r cached <"$cache_file" || true
+  fi
+  # The cache only avoids another provider call during the same turn. Its
+  # content is the identity, not a boolean, so a late Stop cannot disarm a
+  # newer turn. A failed cache write merely costs another provider call.
+  if [ "$1" = set ] && [ "$cached" = "$_HOOK_TURN_KIND:$token" ]; then
+    return 0
+  fi
+  if _hook_team_busy root "$1"; then
+    :
+  else
+    team_status=$?
+  fi
+  if [ "$team_status" = 2 ]; then
+    if [ "$1" = set ] && [ "$cached" = "$_HOOK_TURN_KIND:$token" ]; then
+      rm -f -- "$cache_file" 2>/dev/null || true
     fi
-    term-pane-mark "$1" busy --owner "$PPID" >/dev/null 2>&1 || true
+    return 0
+  fi
+  if [ "$team_status" = 1 ]; then
+    mark_args=("$1" busy --owner "$PPID")
+    [ -z "$token" ] || mark_args+=(--token "$token")
+    term-pane-mark "${mark_args[@]}" >/dev/null 2>&1 || mark_status=$?
+    # Providers update independently. An older marker rejects unknown flags
+    # before changing state, so preserve its original foreground-only contract.
+    if [ "$mark_status" = 64 ] && [ -n "$token" ] && [ "${2:-}" != token-only ]; then
+      # The synchronous notifier may have stalled while a newer prompt failed
+      # rearm and published a fence. Revalidate at the actual compatibility
+      # boundary; only the modern token-aware clear remains safe after that.
+      if [ "$1" = clear ] && _hook_attention_managed && ! _hook_attention_is_current; then
+        return 0
+      fi
+      mark_status=0
+      term-pane-mark "$1" busy --owner "$PPID" >/dev/null 2>&1 || mark_status=$?
+    fi
+  fi
+  if [ "$1" = set ] && [ "$mark_status" = 0 ]; then
+    _hook_busy_cache_publish "$cache_file" "$_HOOK_TURN_KIND:$token" || true
+  elif [ "$1" = clear ] && [ "$mark_status" = 0 ] &&
+    [ "$cached" = "$_HOOK_TURN_KIND:$token" ]; then
+    rm -f -- "$cache_file" 2>/dev/null || true
   fi
 }
 

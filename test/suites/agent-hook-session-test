@@ -597,6 +597,14 @@ _install_hook_fixture "$MOCK_BUSY_DIR" agent-hook-prompt-submit agent-hook-stop 
 cat >"$MOCK_BUSY_DIR/bin/term-pane-mark" <<'MOCK'
 #!/usr/bin/env bash
 if [[ ${TERM_PANE_MARK_LEGACY:-0} == 1 && "$*" == *'--token '* ]]; then exit 64; fi
+if [[ -n ${TERM_PANE_MARK_FAIL_ONCE:-} && ! -e $TERM_PANE_MARK_FAIL_ONCE ]]; then
+  : >"$TERM_PANE_MARK_FAIL_ONCE"
+  exit 1
+fi
+if [[ -n ${TERM_PANE_MARK_DELAY_ONCE:-} && ! -e $TERM_PANE_MARK_DELAY_ONCE ]]; then
+  : >"$TERM_PANE_MARK_DELAY_ONCE"
+  sleep 1.2
+fi
 printf '%s\n' "$*" >>"$TERM_PANE_MARK_LOG"
 if [[ -n ${TERM_PANE_MARK_STATE:-} ]]; then
   action=$1
@@ -720,6 +728,305 @@ for native_agent in claude codex gemini grok muse opencode; do
       'clear busy' "$(tail -n +"$((native_mark_line + 1))" "$native_log")"
   done
 done
+
+# A teammate notification can start a new foreground turn without a prompt
+# hook. The matcher-less telemetry hook still sees its tools, including ones
+# not covered by the Bash/Edit/MCP guards.
+busy_log="$MOCK_BUSY_DIR/notification-turn.log"
+busy_session="$TEST_SID-notification-turn"
+_busy_hook agent-hook-prompt-submit codex "$busy_log" \
+  "{\"session_id\":\"$busy_session\",\"turn_id\":\"A\",\"prompt\":\"Work.\"}" >/dev/null
+_busy_hook agent-hook-stop codex "$busy_log" \
+  "{\"session_id\":\"$busy_session\",\"turn_id\":\"A\"}" >/dev/null
+busy_before=$(wc -l <"$busy_log" | tr -d ' ')
+busy_tool="{\"session_id\":\"$busy_session\",\"turn_id\":\"B\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"functions.wait_agent\"}"
+_busy_hook agent-hook-telemetry codex "$busy_log" "$busy_tool" >/dev/null
+_assert_contains 'busy: notification-started tool rearms the mark' \
+  'set busy' "$(tail -n +"$((busy_before + 1))" "$busy_log")"
+busy_after=$(wc -l <"$busy_log" | tr -d ' ')
+_busy_hook agent-hook-telemetry codex "$busy_log" "$busy_tool" >/dev/null
+_assert_eq 'busy: repeated tools do not re-mark one turn' \
+  "$busy_after" "$(wc -l <"$busy_log" | tr -d ' ')"
+
+retry_log="$MOCK_BUSY_DIR/provider-retry.log"
+retry_failure="$MOCK_BUSY_DIR/provider-retry.failed"
+retry_session="$TEST_SID-provider-retry"
+retry_tool="{\"session_id\":\"$retry_session\",\"turn_id\":\"retry\",\"hook_event_name\":\"PreToolUse\"}"
+TERM_PANE_MARK_FAIL_ONCE="$retry_failure" _busy_hook agent-hook-telemetry codex \
+  "$retry_log" "$retry_tool" >/dev/null
+_assert_file_missing 'busy: failed mark does not reach provider log' "$retry_log"
+_busy_hook agent-hook-telemetry codex "$retry_log" "$retry_tool" >/dev/null
+_assert_contains 'busy: next tool retries a failed provider mark' 'set busy' "$(cat "$retry_log")"
+
+_busy_hook agent-hook-stop codex "$busy_log" \
+  "{\"session_id\":\"$busy_session\",\"turn_id\":\"B\"}" >/dev/null
+_assert_contains 'busy: notification-started Stop clears its own mark' \
+  'clear busy' "$(tail -n +"$((busy_after + 1))" "$busy_log")"
+
+# A root Stop can occur while its children still run. The pane must stay busy
+# until the last child turn ends; a later turn of the same child has no new
+# SubagentStart, so its first tool must rearm the team mark.
+team_log="$MOCK_BUSY_DIR/team-turns.log"
+team_state="$MOCK_BUSY_DIR/team-turns.state"
+team_session="$TEST_SID-team-turns"
+TERM_PANE_MARK_STATE="$team_state" _busy_hook agent-hook-prompt-submit codex "$team_log" \
+  "{\"session_id\":\"$team_session\",\"turn_id\":\"root-a\",\"prompt\":\"Work.\"}" >/dev/null
+TERM_PANE_MARK_STATE="$team_state" _busy_hook agent-hook-telemetry codex "$team_log" \
+  "{\"session_id\":\"$team_session\",\"turn_id\":\"child-a\",\"agent_id\":\"reviewer\",\"transcript_path\":\"/tmp/team.jsonl\",\"hook_event_name\":\"SubagentStart\"}" >/dev/null
+TERM_PANE_MARK_STATE="$team_state" _busy_hook agent-hook-stop codex "$team_log" \
+  "{\"session_id\":\"$team_session\",\"turn_id\":\"root-a\"}" >/dev/null
+_assert_file_exists 'busy: root Stop retains active child work' "$team_state"
+TERM_PANE_MARK_STATE="$team_state" _busy_hook agent-hook-telemetry codex "$team_log" \
+  "{\"session_id\":\"$team_session\",\"turn_id\":\"child-a\",\"agent_id\":\"reviewer\",\"transcript_path\":\"/tmp/team.jsonl\",\"hook_event_name\":\"SubagentStop\"}" >/dev/null
+_assert_file_missing 'busy: last child Stop clears team mark' "$team_state"
+TERM_PANE_MARK_STATE="$team_state" _busy_hook agent-hook-telemetry codex "$team_log" \
+  "{\"session_id\":\"$team_session\",\"turn_id\":\"child-b\",\"agent_id\":\"reviewer\",\"transcript_path\":\"/tmp/team.jsonl\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"functions.exec\"}" >/dev/null
+_assert_file_exists 'busy: child follow-up tool rearms team mark' "$team_state"
+TERM_PANE_MARK_STATE="$team_state" _busy_hook agent-hook-telemetry codex "$team_log" \
+  "{\"session_id\":\"$team_session\",\"turn_id\":\"child-b\",\"agent_id\":\"reviewer\",\"transcript_path\":\"/tmp/team.jsonl\",\"hook_event_name\":\"SubagentStop\"}" >/dev/null
+_assert_file_missing 'busy: child follow-up Stop clears team mark' "$team_state"
+
+# A child Stop retires only its own turn, and an old root Stop cannot replace
+# newer root work. SessionEnd clears a team even when a child never reported
+# its Stop (for example after an interrupted backend).
+team_log="$MOCK_BUSY_DIR/team-overlap.log"
+team_state="$MOCK_BUSY_DIR/team-overlap.state"
+team_session="$TEST_SID-team-overlap"
+TERM_PANE_MARK_STATE="$team_state" _busy_hook agent-hook-prompt-submit codex "$team_log" \
+  "{\"session_id\":\"$team_session\",\"turn_id\":\"root-a\",\"prompt\":\"Work.\"}" >/dev/null
+for child in alpha beta; do
+  TERM_PANE_MARK_STATE="$team_state" _busy_hook agent-hook-telemetry codex "$team_log" \
+    "{\"session_id\":\"$team_session\",\"turn_id\":\"$child-a\",\"agent_id\":\"$child\",\"transcript_path\":\"/tmp/team.jsonl\",\"hook_event_name\":\"SubagentStart\"}" >/dev/null
+done
+TERM_PANE_MARK_STATE="$team_state" _busy_hook agent-hook-stop codex "$team_log" \
+  "{\"session_id\":\"$team_session\",\"turn_id\":\"root-a\"}" >/dev/null
+TERM_PANE_MARK_STATE="$team_state" _busy_hook agent-hook-telemetry codex "$team_log" \
+  "{\"session_id\":\"$team_session\",\"turn_id\":\"alpha-a\",\"agent_id\":\"alpha\",\"transcript_path\":\"/tmp/team.jsonl\",\"hook_event_name\":\"SubagentStop\"}" >/dev/null
+_assert_file_exists 'busy: another active child keeps the team mark' "$team_state"
+TERM_PANE_MARK_STATE="$team_state" _busy_hook agent-hook-prompt-submit codex "$team_log" \
+  "{\"session_id\":\"$team_session\",\"turn_id\":\"root-b\",\"prompt\":\"More.\"}" >/dev/null
+TERM_PANE_MARK_STATE="$team_state" _busy_hook agent-hook-stop codex "$team_log" \
+  "{\"session_id\":\"$team_session\",\"turn_id\":\"root-a\"}" >/dev/null
+_assert_file_exists 'busy: late root Stop preserves newer work' "$team_state"
+TERM_PANE_MARK_STATE="$team_state" _busy_hook agent-hook-stop codex "$team_log" \
+  "{\"session_id\":\"$team_session\",\"turn_id\":\"root-b\"}" >/dev/null
+_assert_file_exists 'busy: remaining child outlives root turn' "$team_state"
+TERM_PANE_MARK_STATE="$team_state" _busy_hook agent-hook-session-end codex "$team_log" \
+  "{\"session_id\":\"$team_session\",\"transcript_path\":\"/tmp/team.jsonl\"}" >/dev/null
+_assert_file_missing 'busy: SessionEnd clears an unfinished team' "$team_state"
+
+# Claude and Grok report the authoritative in-flight task list at root Stop.
+# Claude also reports the parent list at SubagentStop; Grok's idle notification
+# is its documented backstop once the session settles.
+first_team_log="$MOCK_BUSY_DIR/first-team.log"
+first_team_state="$MOCK_BUSY_DIR/first-team.state"
+first_team_session="$TEST_SID-first-team"
+TERM_PANE_MARK_STATE="$first_team_state" _busy_hook agent-hook-prompt-submit claude \
+  "$first_team_log" "{\"session_id\":\"$first_team_session\",\"prompt_id\":\"first\",\"prompt\":\"Work.\"}" "$first_team_session" >/dev/null
+TERM_PANE_MARK_STATE="$first_team_state" _busy_hook agent-hook-stop claude \
+  "$first_team_log" "{\"session_id\":\"$first_team_session\",\"prompt_id\":\"first\",\"background_tasks\":[{\"id\":\"worker\",\"type\":\"subagent\"}]}" "$first_team_session" >/dev/null
+_assert_eq 'busy: first Claude background Stop enters team mode' \
+  "team:$first_team_session" "$(cat "$first_team_state")"
+TERM_PANE_MARK_STATE="$first_team_state" _busy_hook agent-hook-telemetry claude \
+  "$first_team_log" "{\"session_id\":\"$first_team_session\",\"prompt_id\":\"first\",\"agent_id\":\"worker\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[]}" "$first_team_session" >/dev/null
+_assert_file_missing 'busy: first Claude team clears when its child ends' "$first_team_state"
+
+old_child_log="$MOCK_BUSY_DIR/old-child.log"
+old_child_state="$MOCK_BUSY_DIR/old-child.state"
+old_child_session="$TEST_SID-old-child"
+TERM_PANE_MARK_STATE="$old_child_state" _busy_hook agent-hook-prompt-submit claude \
+  "$old_child_log" "{\"session_id\":\"$old_child_session\",\"prompt_id\":\"a\",\"prompt\":\"Work.\"}" "$old_child_session" >/dev/null
+TERM_PANE_MARK_STATE="$old_child_state" _busy_hook agent-hook-stop claude \
+  "$old_child_log" "{\"session_id\":\"$old_child_session\",\"prompt_id\":\"a\",\"background_tasks\":[{\"id\":\"worker\",\"type\":\"subagent\"}]}" "$old_child_session" >/dev/null
+TERM_PANE_MARK_STATE="$old_child_state" _busy_hook agent-hook-prompt-submit claude \
+  "$old_child_log" "{\"session_id\":\"$old_child_session\",\"prompt_id\":\"b\",\"prompt\":\"More.\"}" "$old_child_session" >/dev/null
+TERM_PANE_MARK_STATE="$old_child_state" _busy_hook agent-hook-stop claude \
+  "$old_child_log" "{\"session_id\":\"$old_child_session\",\"prompt_id\":\"b\",\"background_tasks\":[{\"id\":\"worker\",\"type\":\"subagent\"}]}" "$old_child_session" >/dev/null
+TERM_PANE_MARK_STATE="$old_child_state" _busy_hook agent-hook-telemetry claude \
+  "$old_child_log" "{\"session_id\":\"$old_child_session\",\"prompt_id\":\"a\",\"agent_id\":\"worker\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[]}" "$old_child_session" >/dev/null
+_assert_file_missing 'busy: older Claude child finishing after a newer Stop clears team' \
+  "$old_child_state"
+
+stale_child_log="$MOCK_BUSY_DIR/stale-child.log"
+stale_child_state="$MOCK_BUSY_DIR/stale-child.state"
+stale_child_session="$TEST_SID-stale-child"
+TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-prompt-submit claude \
+  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"prompt\":\"Work.\"}" "$stale_child_session" >/dev/null
+TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-stop claude \
+  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"background_tasks\":[{\"id\":\"one\",\"type\":\"subagent\"},{\"id\":\"two\",\"type\":\"subagent\"}]}" "$stale_child_session" >/dev/null
+TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-telemetry claude \
+  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"agent_id\":\"two\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[]}" "$stale_child_session" >/dev/null
+TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-telemetry claude \
+  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"agent_id\":\"one\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[{\"id\":\"two\",\"type\":\"subagent\"}]}" "$stale_child_session" >/dev/null
+TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-stop claude \
+  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"background_tasks\":[{\"id\":\"two\",\"type\":\"subagent\"}]}" "$stale_child_session" >/dev/null
+_assert_file_missing 'busy: late same-prompt snapshots cannot revive completed tasks' \
+  "$stale_child_state"
+TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-prompt-submit claude \
+  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Continue.\"}" "$stale_child_session" >/dev/null
+TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-telemetry claude \
+  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"agent_id\":\"other\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[{\"id\":\"two\",\"type\":\"subagent\"}]}" "$stale_child_session" >/dev/null
+TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-stop claude \
+  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"background_tasks\":[{\"id\":\"two\",\"type\":\"subagent\"}]}" "$stale_child_session" >/dev/null
+_assert_file_exists 'busy: later request can observe a resumed task ID' \
+  "$stale_child_state"
+TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-telemetry claude \
+  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"agent_id\":\"other\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[]}" "$stale_child_session" >/dev/null
+_assert_file_missing 'busy: resumed task ID clears after current completion' \
+  "$stale_child_state"
+
+retry_team_log="$MOCK_BUSY_DIR/retry-team.log"
+retry_team_state="$MOCK_BUSY_DIR/retry-team.state"
+retry_team_failure="$MOCK_BUSY_DIR/retry-team.failed"
+retry_team_session="$TEST_SID-retry-team"
+TERM_PANE_MARK_STATE="$retry_team_state" _busy_hook agent-hook-prompt-submit claude \
+  "$retry_team_log" "{\"session_id\":\"$retry_team_session\",\"prompt_id\":\"first\",\"prompt\":\"Work.\"}" "$retry_team_session" >/dev/null
+TERM_PANE_MARK_STATE="$retry_team_state" TERM_PANE_MARK_FAIL_ONCE="$retry_team_failure" \
+  _busy_hook agent-hook-stop claude "$retry_team_log" \
+  "{\"session_id\":\"$retry_team_session\",\"prompt_id\":\"first\",\"background_tasks\":[{\"id\":\"worker\",\"type\":\"subagent\"}]}" "$retry_team_session" >/dev/null
+TERM_PANE_MARK_STATE="$retry_team_state" _busy_hook agent-hook-telemetry claude \
+  "$retry_team_log" "{\"session_id\":\"$retry_team_session\",\"prompt_id\":\"first\",\"agent_id\":\"worker\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[]}" "$retry_team_session" >/dev/null
+_assert_file_missing 'busy: failed team set retries before final clear' "$retry_team_state"
+
+retry_end_log="$MOCK_BUSY_DIR/retry-end.log"
+retry_end_state="$MOCK_BUSY_DIR/retry-end.state"
+retry_end_session="$TEST_SID-retry-end"
+TERM_PANE_MARK_STATE="$retry_end_state" _busy_hook agent-hook-prompt-submit claude \
+  "$retry_end_log" "{\"session_id\":\"$retry_end_session\",\"prompt_id\":\"first\",\"prompt\":\"Work.\"}" "$retry_end_session" >/dev/null
+TERM_PANE_MARK_STATE="$retry_end_state" \
+  TERM_PANE_MARK_FAIL_ONCE="$MOCK_BUSY_DIR/retry-end-first.failed" \
+  _busy_hook agent-hook-stop claude "$retry_end_log" \
+  "{\"session_id\":\"$retry_end_session\",\"prompt_id\":\"first\",\"background_tasks\":[{\"id\":\"worker\",\"type\":\"subagent\"}]}" "$retry_end_session" >/dev/null
+TERM_PANE_MARK_STATE="$retry_end_state" \
+  TERM_PANE_MARK_FAIL_ONCE="$MOCK_BUSY_DIR/retry-end-second.failed" \
+  _busy_hook agent-hook-session-end claude "$retry_end_log" \
+  "{\"session_id\":\"$retry_end_session\"}" "$retry_end_session" >/dev/null
+_assert_file_missing 'busy: SessionEnd recovers direct mark after failed team transition' \
+  "$retry_end_state"
+
+claude_team_log="$MOCK_BUSY_DIR/claude-team.log"
+claude_team_state="$MOCK_BUSY_DIR/claude-team.state"
+claude_team_session="$TEST_SID-claude-team"
+TERM_PANE_MARK_STATE="$claude_team_state" _busy_hook agent-hook-prompt-submit claude \
+  "$claude_team_log" "{\"session_id\":\"$claude_team_session\",\"prompt_id\":\"root-a\",\"prompt\":\"Work.\"}" "$claude_team_session" >/dev/null
+TERM_PANE_MARK_STATE="$claude_team_state" _busy_hook agent-hook-stop claude \
+  "$claude_team_log" "{\"session_id\":\"$claude_team_session\",\"prompt_id\":\"root-a\",\"background_tasks\":[{\"id\":\"child-a\",\"type\":\"subagent\",\"status\":\"running\"}]}" "$claude_team_session" >/dev/null
+_assert_file_exists 'busy: Claude root Stop retains background subagent' "$claude_team_state"
+TERM_PANE_MARK_STATE="$claude_team_state" _busy_hook agent-hook-prompt-submit claude \
+  "$claude_team_log" "{\"session_id\":\"$claude_team_session\",\"prompt_id\":\"root-b\",\"prompt\":\"More.\"}" "$claude_team_session" >/dev/null
+TERM_PANE_MARK_STATE="$claude_team_state" _busy_hook agent-hook-stop claude \
+  "$claude_team_log" "{\"session_id\":\"$claude_team_session\",\"prompt_id\":\"root-a\",\"background_tasks\":[]}" "$claude_team_session" >/dev/null
+TERM_PANE_MARK_STATE="$claude_team_state" _busy_hook agent-hook-stop claude \
+  "$claude_team_log" "{\"session_id\":\"$claude_team_session\",\"prompt_id\":\"root-b\",\"background_tasks\":[{\"id\":\"child-a\",\"type\":\"subagent\",\"status\":\"running\"},{\"id\":\"child-b\",\"type\":\"subagent\",\"status\":\"running\"}]}" "$claude_team_session" >/dev/null
+_assert_file_exists 'busy: stale Claude Stop snapshot cannot erase child of newer turn' \
+  "$claude_team_state"
+TERM_PANE_MARK_STATE="$claude_team_state" _busy_hook agent-hook-telemetry claude \
+  "$claude_team_log" "{\"session_id\":\"$claude_team_session\",\"prompt_id\":\"root-a\",\"agent_id\":\"child-a\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[]}" "$claude_team_session" >/dev/null
+_assert_file_exists 'busy: old Claude child snapshot cannot erase a newer team' \
+  "$claude_team_state"
+TERM_PANE_MARK_STATE="$claude_team_state" _busy_hook agent-hook-stop claude \
+  "$claude_team_log" "{\"session_id\":\"$claude_team_session\",\"prompt_id\":\"root-a\",\"background_tasks\":[]}" "$claude_team_session" >/dev/null
+_assert_file_exists 'busy: old Claude root snapshot cannot erase a completed newer turn' \
+  "$claude_team_state"
+TERM_PANE_MARK_STATE="$claude_team_state" _busy_hook agent-hook-telemetry claude \
+  "$claude_team_log" "{\"session_id\":\"$claude_team_session\",\"prompt_id\":\"root-b\",\"agent_id\":\"child-b\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[]}" "$claude_team_session" >/dev/null
+_assert_file_missing 'busy: Claude parent task snapshot clears finished team' "$claude_team_state"
+
+claude_shell_log="$MOCK_BUSY_DIR/claude-shell-only.log"
+claude_shell_state="$MOCK_BUSY_DIR/claude-shell-only.state"
+claude_shell_session="$TEST_SID-claude-shell-only"
+TERM_PANE_MARK_STATE="$claude_shell_state" _busy_hook agent-hook-prompt-submit claude \
+  "$claude_shell_log" "{\"session_id\":\"$claude_shell_session\",\"prompt_id\":\"root-a\",\"prompt\":\"Work.\"}" "$claude_shell_session" >/dev/null
+TERM_PANE_MARK_STATE="$claude_shell_state" _busy_hook agent-hook-stop claude \
+  "$claude_shell_log" "{\"session_id\":\"$claude_shell_session\",\"prompt_id\":\"root-a\",\"background_tasks\":[{\"id\":\"shell-a\",\"type\":\"shell\",\"status\":\"running\"}]}" "$claude_shell_session" >/dev/null
+_assert_file_missing 'busy: detached shell alone does not mean agent is working' \
+  "$claude_shell_state"
+
+grok_team_log="$MOCK_BUSY_DIR/grok-team.log"
+grok_team_state="$MOCK_BUSY_DIR/grok-team.state"
+grok_team_session="$TEST_SID-grok-team"
+TERM_PANE_MARK_STATE="$grok_team_state" _busy_hook agent-hook-prompt-submit grok \
+  "$grok_team_log" "{\"sessionId\":\"$grok_team_session\",\"promptId\":\"root-a\",\"prompt\":\"Work.\"}" "$grok_team_session" >/dev/null
+TERM_PANE_MARK_STATE="$grok_team_state" _busy_hook agent-hook-stop grok \
+  "$grok_team_log" "{\"sessionId\":\"$grok_team_session\",\"promptId\":\"root-a\",\"backgroundTasks\":[{\"id\":\"child-a\",\"type\":\"subagent\",\"status\":\"running\"},{\"id\":\"child-b\",\"type\":\"subagent\",\"status\":\"running\"}]}" "$grok_team_session" >/dev/null
+_assert_file_exists 'busy: Grok root Stop retains background subagent' "$grok_team_state"
+_assert_eq 'busy: first Grok background Stop enters team mode' \
+  "team:$grok_team_session" "$(cat "$grok_team_state")"
+TERM_PANE_MARK_STATE="$grok_team_state" _busy_hook agent-hook-telemetry grok \
+  "$grok_team_log" "{\"sessionId\":\"$grok_team_session\",\"subagentType\":\"reviewer\",\"hook_event_name\":\"SubagentStop\",\"backgroundTasks\":[]}" "$grok_team_session" >/dev/null
+_assert_file_exists 'busy: Grok child-scoped empty list cannot clear sibling work' \
+  "$grok_team_state"
+TERM_PANE_MARK_STATE="$grok_team_state" _busy_hook agent-hook-telemetry grok \
+  "$grok_team_log" "{\"sessionId\":\"$grok_team_session\",\"hook_event_name\":\"Notification\",\"notificationType\":\"idle_prompt\"}" "$grok_team_session" >/dev/null
+_assert_file_exists 'busy: Grok idle ping does not erase running background work' \
+  "$grok_team_state"
+TERM_PANE_MARK_STATE="$grok_team_state" _busy_hook agent-hook-telemetry grok \
+  "$grok_team_log" "{\"sessionId\":\"$grok_team_session\",\"promptId\":\"root-b\",\"hook_event_name\":\"PreToolUse\",\"toolName\":\"read_file\"}" "$grok_team_session" >/dev/null
+TERM_PANE_MARK_STATE="$grok_team_state" _busy_hook agent-hook-stop grok \
+  "$grok_team_log" "{\"sessionId\":\"$grok_team_session\",\"promptId\":\"root-b\",\"backgroundTasks\":[]}" "$grok_team_session" >/dev/null
+_assert_file_missing 'busy: Grok auto-wake Stop with empty task list settles team' \
+  "$grok_team_state"
+
+grok_cancel_log="$MOCK_BUSY_DIR/grok-cancel.log"
+grok_cancel_state="$MOCK_BUSY_DIR/grok-cancel.state"
+grok_cancel_session="$TEST_SID-grok-cancel"
+TERM_PANE_MARK_STATE="$grok_cancel_state" _busy_hook agent-hook-prompt-submit grok \
+  "$grok_cancel_log" "{\"sessionId\":\"$grok_cancel_session\",\"promptId\":\"turn-a\",\"prompt\":\"Work.\"}" "$grok_cancel_session" >/dev/null
+TERM_PANE_MARK_STATE="$grok_cancel_state" _busy_hook agent-hook-telemetry grok \
+  "$grok_cancel_log" "{\"sessionId\":\"$grok_cancel_session\",\"promptId\":\"turn-a\",\"hook_event_name\":\"StopCancelled\"}" "$grok_cancel_session" >/dev/null
+_assert_file_missing 'busy: Grok cancellation clears its turn' "$grok_cancel_state"
+TERM_PANE_MARK_STATE="$grok_cancel_state" _busy_hook agent-hook-prompt-submit grok \
+  "$grok_cancel_log" "{\"sessionId\":\"$grok_cancel_session\",\"promptId\":\"turn-a\",\"prompt\":\"Work.\"}" "$grok_cancel_session" >/dev/null
+TERM_PANE_MARK_STATE="$grok_cancel_state" _busy_hook agent-hook-prompt-submit grok \
+  "$grok_cancel_log" "{\"sessionId\":\"$grok_cancel_session\",\"promptId\":\"turn-b\",\"prompt\":\"More.\"}" "$grok_cancel_session" >/dev/null
+TERM_PANE_MARK_STATE="$grok_cancel_state" _busy_hook agent-hook-telemetry grok \
+  "$grok_cancel_log" "{\"sessionId\":\"$grok_cancel_session\",\"promptId\":\"turn-a\",\"hook_event_name\":\"StopCancelled\"}" "$grok_cancel_session" >/dev/null
+_assert_file_exists 'busy: late Grok cancellation preserves newer turn' "$grok_cancel_state"
+
+for native_agent in claude grok muse; do
+  native_log="$MOCK_BUSY_DIR/notification-root-$native_agent.log"
+  native_session="$TEST_SID-notification-root-$native_agent"
+  case "$native_agent" in
+    grok)
+      native_prompt="{\"sessionId\":\"$native_session\",\"promptId\":\"root-a\",\"prompt\":\"Work.\"}"
+      native_stop="{\"sessionId\":\"$native_session\",\"promptId\":\"root-a\"}"
+      native_tool="{\"sessionId\":\"$native_session\",\"hookEventName\":\"PreToolUse\",\"toolName\":\"read_file\"}"
+      ;;
+    *)
+      native_prompt="{\"session_id\":\"$native_session\",\"turn_id\":\"root-a\",\"prompt\":\"Work.\"}"
+      native_stop="{\"session_id\":\"$native_session\",\"turn_id\":\"root-a\"}"
+      native_tool="{\"session_id\":\"$native_session\",\"turn_id\":\"root-b\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"read_file\"}"
+      ;;
+  esac
+  _busy_hook agent-hook-prompt-submit "$native_agent" "$native_log" "$native_prompt" \
+    "$native_session" >/dev/null
+  _busy_hook agent-hook-stop "$native_agent" "$native_log" "$native_stop" \
+    "$native_session" >/dev/null
+  native_before=$(wc -l <"$native_log" | tr -d ' ')
+  AGENTGUARD_TELEMETRY=0 _busy_hook agent-hook-telemetry "$native_agent" "$native_log" \
+    "$native_tool" "$native_session" >/dev/null
+  _assert_contains "busy: $native_agent root tool rearms with audit disabled" \
+    'set busy' "$(tail -n +"$((native_before + 1))" "$native_log")"
+done
+
+muse_child_log="$MOCK_BUSY_DIR/muse-child-tool.log"
+muse_child_session="$TEST_SID-muse-child"
+_busy_hook agent-hook-telemetry muse "$muse_child_log" \
+  "{\"session_id\":\"$muse_child_session\",\"child_session_id\":\"$muse_child_session\",\"subagent_id\":\"reviewer\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStart\"}" "$muse_child_session" >/dev/null
+_busy_hook agent-hook-telemetry muse "$muse_child_log" \
+  "{\"session_id\":\"$muse_child_session\",\"turn_id\":\"child-a\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"read_file\"}" "$muse_child_session" >/dev/null
+_assert_file_missing 'busy: Muse child tool cannot leave a root mark stuck' "$muse_child_log"
+python3 "$AGENTGUARD_ROOT/test/muse-busy-team.py" "$MOCK_BUSY_DIR" \
+  "$TEST_SID-muse-team"
+_assert_eq 'busy: Muse parent and child turns share one owned mark' 0 "$?"
+python3 "$AGENTGUARD_ROOT/test/busy-team-owner.py" "$MOCK_BUSY_DIR" \
+  "$TEST_SID-owner" "$AGENTGUARD_ROOT/lib/agentguard/busy-team.py"
+_assert_eq 'busy: late SessionEnd cannot clear a resumed team' 0 "$?"
+
+ephemeral_child_log="$MOCK_BUSY_DIR/codex-ephemeral-child.log"
+_busy_hook agent-hook-telemetry codex "$ephemeral_child_log" \
+  '{"session_id":"ephemeral-child","turn_id":"child-a","agent_id":"reviewer","transcript_path":null,"hook_event_name":"SubagentStart"}' >/dev/null
+_assert_file_missing 'busy: Codex ephemeral child does not mark the pane' "$ephemeral_child_log"
 
 # Notification admission must agree with busy ownership, including children
 # hosted inside the foreground process. These invoke real hooks; only the tty
@@ -906,16 +1213,16 @@ _busy_hook agent-hook-stop codex "$busy_log" '{"transcript_path":"/tmp/rollout.j
 _assert_file_content "busy: a Codex session with a transcript clears the mark" \
   "$(_busy_mark "$busy_log" clear)" "$busy_log"
 
-# Turn identity travels with both endpoints. An old Stop must not clear the
-# next turn, and a child thread must not share its parent's generation.
+# Codex uses one team token across its root and child turns; the serialized
+# state tracks each exact turn so an old Stop cannot clear newer work.
 for lifecycle in prompt-submit stop; do
   busy_log="$MOCK_BUSY_DIR/codex-turn-$lifecycle.log"
   action='clear'
   [[ $lifecycle != prompt-submit ]] || action='set'
   _busy_hook "agent-hook-$lifecycle" codex "$busy_log" \
     '{"session_id":"thread-a","turn_id":"turn-b","prompt":"Work.","transcript_path":"/tmp/rollout.jsonl"}' >/dev/null
-  _assert_file_content "busy: $lifecycle carries exact thread and turn identity" \
-    "$(_busy_mark "$busy_log" "$action") --token 8:thread-a:turn-b" "$busy_log"
+  _assert_file_content "busy: $lifecycle uses the session team token" \
+    "$(_busy_mark "$busy_log" "$action") --token team:thread-a" "$busy_log"
 done
 
 # Delimiters inside valid IDs must not alias another session/turn pair.
@@ -930,7 +1237,7 @@ TERM_PANE_MARK_STATE="$collision_state" _busy_hook agent-hook-stop codex \
   "$MOCK_BUSY_DIR/collision-late-stop.log" \
   '{"session_id":"a:b","turn_id":"c","transcript_path":"/tmp/a"}' >/dev/null
 _assert_file_content "busy: delimiter-colliding old Stop cannot clear the newer pair" \
-  '1:a:b:c' "$collision_state"
+  'team:a' "$collision_state"
 
 busy_log="$MOCK_BUSY_DIR/codex-unsafe-turn.log"
 _busy_hook agent-hook-prompt-submit codex "$busy_log" \
@@ -1017,10 +1324,48 @@ done
 for end_payload in '' '{"session_id":"sess-busy-end"}'; do
   busy_log="$MOCK_BUSY_DIR/session-end.log"
   _busy_hook agent-hook-session-end claude "$busy_log" "$end_payload" >/dev/null
-  _assert_file_content "busy: session end ${end_payload:-without a payload} clears the mark" \
-    "$(_busy_mark "$busy_log" clear)" "$busy_log"
+  _assert_contains "busy: session end ${end_payload:-without a payload} clears the mark" \
+    'clear busy' "$(cat "$busy_log")"
   rm -f "$busy_log"
 done
+
+tagged_end_log="$MOCK_BUSY_DIR/tagged-session-end.log"
+tagged_end_state="$MOCK_BUSY_DIR/tagged-session-end.state"
+tagged_end_session="$TEST_SID-tagged-end"
+TERM_PANE_MARK_STATE="$tagged_end_state" _busy_hook agent-hook-prompt-submit claude \
+  "$tagged_end_log" "{\"session_id\":\"$tagged_end_session\",\"prompt_id\":\"last-turn\",\"prompt\":\"Work.\"}" "$tagged_end_session" >/dev/null
+_assert_file_exists 'busy: tagged session owns a mark before abrupt end' "$tagged_end_state"
+TERM_PANE_MARK_STATE="$tagged_end_state" _busy_hook agent-hook-session-end claude \
+  "$tagged_end_log" "{\"session_id\":\"$tagged_end_session\"}" "$tagged_end_session" >/dev/null
+_assert_file_missing 'busy: prompt-less session end removes its tagged mark' "$tagged_end_state"
+
+failed_clear_log="$MOCK_BUSY_DIR/failed-clear.log"
+failed_clear_state="$MOCK_BUSY_DIR/failed-clear.state"
+failed_clear_once="$MOCK_BUSY_DIR/failed-clear.once"
+failed_clear_session="$TEST_SID-failed-clear"
+TERM_PANE_MARK_STATE="$failed_clear_state" _busy_hook agent-hook-prompt-submit claude \
+  "$failed_clear_log" "{\"session_id\":\"$failed_clear_session\",\"prompt_id\":\"last\",\"prompt\":\"Work.\"}" "$failed_clear_session" >/dev/null
+TERM_PANE_MARK_STATE="$failed_clear_state" TERM_PANE_MARK_FAIL_ONCE="$failed_clear_once" \
+  _busy_hook agent-hook-stop claude "$failed_clear_log" \
+  "{\"session_id\":\"$failed_clear_session\",\"prompt_id\":\"last\"}" "$failed_clear_session" >/dev/null
+_assert_file_exists 'busy: failed direct clear leaves mark for retry' "$failed_clear_state"
+TERM_PANE_MARK_STATE="$failed_clear_state" _busy_hook agent-hook-session-end claude \
+  "$failed_clear_log" "{\"session_id\":\"$failed_clear_session\"}" "$failed_clear_session" >/dev/null
+_assert_file_missing 'busy: SessionEnd retries the exact failed clear' "$failed_clear_state"
+
+late_end_log="$MOCK_BUSY_DIR/late-session-end.log"
+late_end_state="$MOCK_BUSY_DIR/late-session-end.state"
+late_end_a="$TEST_SID-late-end-a"
+late_end_b="$TEST_SID-late-end-b"
+TERM_PANE_MARK_STATE="$late_end_state" _busy_hook agent-hook-prompt-submit claude \
+  "$late_end_log" "{\"session_id\":\"$late_end_a\",\"prompt_id\":\"a\",\"prompt\":\"Work.\"}" "$late_end_a" >/dev/null
+TERM_PANE_MARK_STATE="$late_end_state" _busy_hook agent-hook-prompt-submit claude \
+  "$late_end_log" "{\"session_id\":\"$late_end_b\",\"prompt_id\":\"b\",\"prompt\":\"Work.\"}" "$late_end_b" >/dev/null
+late_end_want=$(cat "$late_end_state")
+TERM_PANE_MARK_STATE="$late_end_state" _busy_hook agent-hook-session-end claude \
+  "$late_end_log" "{\"session_id\":\"$late_end_a\"}" "$late_end_a" >/dev/null
+_assert_eq 'busy: late old SessionEnd preserves another session mark' \
+  "$late_end_want" "$(cat "$late_end_state")"
 
 # StopFailure and Interrupt end a turn without Stop; only telemetry sees them.
 _install_hook_fixture "$MOCK_BUSY_DIR" agent-hook-telemetry
