@@ -403,7 +403,7 @@ _RUN_HOOK_ENV=(
 )
 _run_hook_env "$POST_EDIT" '{"tool_input":{"file_path":"/tmp/test/evil.py"}}'
 _assert_exit "hook post: traversal id does not crash" 0 "$HOOK_EXIT"
-_assert_file_missing "hook post: no traversal dir" \
+_assert_path_missing "hook post: no traversal dir" \
   "$TEST_TMPDIR/agentguard/evil-churn-post-$$"
 
 echo "=== churn-bypass: session start clears stale markers ==="

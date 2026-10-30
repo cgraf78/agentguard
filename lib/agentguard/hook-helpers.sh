@@ -1110,8 +1110,11 @@ _hook_muse_child_end() {
   [ "${AGENTGUARD_NAME:-}" = muse ] || return 0
   _hook_hm_read_input
   _hook_muse_child_id _muse_child_id || return 0
-  rm -f -- "$_HOOK_STATE_DIR/muse-child/child.$_muse_child_id" 2>/dev/null || true
+  # An owning child keeps its entry with its sticky marker: the entry both
+  # preserves follow-up routing and marks the dir as child-owned, so later
+  # prompts know not to reap tracking that is still live.
   [ "$_muse_child_id" != "$_HOOK_SESSION_KEY" ] || return 0
+  rm -f -- "$_HOOK_STATE_DIR/muse-child/child.$_muse_child_id" 2>/dev/null || true
   if _hook_muse_child_active; then
     return 0
   fi
@@ -1132,6 +1135,47 @@ _hook_muse_child_reap() {
   [ -d "$_HOOK_STATE_DIR" ] || return 0
   rm -rf -- "$_HOOK_STATE_DIR/muse-child" 2>/dev/null || true
   rm -f -- "$_HOOK_STATE_DIR/muse-child-session" 2>/dev/null || true
+}
+
+# A new root prompt retires the previous turn, whose children the host
+# already resolved: Muse cancels turn-scoped children when the main run
+# completes, and a cancelled child delivers no SubagentStop. Drop their
+# tracking so one missed Stop cannot veto every later turn. Runs before
+# the foreground admission check, since a stale veto is exactly what it
+# clears; skipped for child prompts and for state dirs owned by a child
+# (sticky owner entry present), where the marker still routes follow-ups.
+_hook_muse_child_reap_turn() {
+  local _muse_child_prompt_session='' _muse_child_stale=''
+  [ "${AGENTGUARD_NAME:-}" = muse ] || return 0
+  _hook_hm_read_input
+  [ -n "${_HOOK_INPUT:-}" ] || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  _muse_child_prompt_session=$(printf '%s' "$_HOOK_INPUT" |
+    jq -r '(.session_id | strings) // empty' 2>/dev/null) || return 0
+  [ -n "$_muse_child_prompt_session" ] || return 0
+  [ "$_muse_child_prompt_session" = "$_HOOK_SESSION_KEY" ] || return 0
+  [ -d "$_HOOK_STATE_DIR" ] || return 0
+  if [ -e "$_HOOK_STATE_DIR/muse-child/child.$_HOOK_SESSION_KEY" ]; then
+    # Child-owned dir: the owner tracking stays sticky for follow-up
+    # routing; only visiting entries are retired.
+    for _muse_child_stale in "$_HOOK_STATE_DIR/muse-child"/child.*; do
+      if [ ! -e "$_muse_child_stale" ]; then
+        continue
+      fi
+      if [ "$_muse_child_stale" = "$_HOOK_STATE_DIR/muse-child/child.$_HOOK_SESSION_KEY" ]; then
+        continue
+      fi
+      rm -f -- "$_muse_child_stale" 2>/dev/null || true
+    done
+    return 0
+  fi
+  rm -rf -- "$_HOOK_STATE_DIR/muse-child" 2>/dev/null || true
+  rm -f -- "$_HOOK_STATE_DIR/muse-child-session" 2>/dev/null || true
+  rm -f -- "$_HOOK_STATE_DIR/muse-child-turn" 2>/dev/null || true
+  # Hook-side first: the team close re-checks foreground admission, which
+  # a stale veto would fail. Closing the team retires children the host
+  # cancelled without a Stop; the prompt's own set below reopens it.
+  _hook_team_busy root end || true
 }
 
 # Return whether this lifecycle event belongs to foreground work. Busy marks,
