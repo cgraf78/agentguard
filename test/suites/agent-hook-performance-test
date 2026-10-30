@@ -34,15 +34,69 @@ AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/
 # event); warmup runs are excluded from both the medians and the
 # pooled maximum, as they always were.
 #
-# Cost bound: a breached assertion runs 3 batches of (2 warmups +
-# `iterations` samples), each run capped by the per-run timeout, so one
-# assertion costs at most 3 * (2 + iterations) * timeout (~66s at the
-# defaults of 9 samples and a 2s timeout, ~11 minutes if all ten timed
-# assertions breach). Never call this from a backgrounded or parallel
-# context: a wall-clock median is only meaningful when the suite owns
-# the host, which is why `test/agentguard-test` runs this suite
-# exclusively, ahead of the parallel pool and last among the exclusive
-# suites.
+# The 2026-10-30 incident was exactly that gap: a CentOS Stream
+# runner measured pre-bash hook medians of 266.4ms against a 250ms
+# budget on all 27 samples, while the same run's Ubuntu job measured
+# 64.1ms and the same head's push-run CentOS job measured 64.1ms —
+# a job-long ~4x host slowdown, not a hook regression. The absolute
+# budget therefore also scales by a same-host spawn calibration:
+# each assertion first times `bash -c true` (same env, cwd, warmups,
+# sample shape; median of three batch medians, like the hook vote)
+# and multiplies the budget by max(1, calibration / reference),
+# clamped at 10x, where the reference is the typical spawn latency
+# on a healthy hosted runner (3.0ms, a single-host local
+# measurement; override with AGENTGUARD_PERF_SPAWN_REF_MS, validated
+# numeric, finite, and > 0 before any calibration spawn, else
+# exit 2). The factor never tightens the budget below its stated
+# value, so a fast host judges the hook exactly as before.
+#
+# Limits of this calibration, stated plainly:
+# - The probe is a timing proxy, not the hook interpreter: it runs
+#   `bash` resolved via ambient PATH, while hooks run via their
+#   shebang and the launcher's fixed interpreter list (Homebrew bash
+#   on macOS, `-p` mode not replicated). The probe executes no hook
+#   code, only the `true` builtin, and the hook itself is still
+#   invoked by absolute path — but the verdict trusts the timing of
+#   a PATH-selected binary, bounded by the 10x clamp.
+# - No spawn measurement exists from the 2026-10-30 CentOS job, so
+#   "this would have rescued that run" is inference from the
+#   hook-median ratio, not evidence: the model assumes hook cost
+#   scales with spawn cost. A fixed-cost regression is diluted by
+#   the factor (a +236ms regression on a 4x host passes a 4x-scaled
+#   budget), and slowness arriving after calibration is not rescued
+#   at all; load during calibration inflates budgets in the
+#   false-pass direction.
+# - The 3.0ms reference sits inside the calibration noise band
+#   (single-host batches measured 1.8-4.3ms), so a healthy platform
+#   with higher spawn (macOS fork/exec, older kernels) sees
+#   permanent budget inflation; the factor is printed on every
+#   PASS/FAIL line so that inflation is visible, and per-platform
+#   baselines are future work.
+# - Per-sample caps stay absolute (see below), so a host slower
+#   than ~6x may still fail on a tail cap even when its medians
+#   pass.
+# This is not a retry and not a raised budget: the measurement
+# itself is made host-relative, so runner speed cancels out of the
+# median verdict. The residual trade-off is unchanged in kind:
+# timing alone cannot tell a hook regression that coincides with
+# host slowness from host slowness alone, and a regression confined
+# to one batch can still be outvoted — both accepted above.
+#
+# Cost bound: a breached assertion runs calibration (3 batches) plus
+# 3 hook batches of (2 warmups + `iterations` samples), each run
+# capped by the per-run timeout, so one assertion costs at most
+# 6 * (2 + iterations) * timeout (~132s at the defaults of 9
+# samples and a 2s timeout, ~22 minutes if all ten timed
+# assertions breach).
+# A passing assertion costs calibration plus one hook batch. Small
+# AGENTGUARD_PERF_ITERATIONS degrades the calibration (median of
+# three singletons at 1); the default 9 is assumed. Calibration on
+# an extremely slow host times out to exit 2, fail-closed — the
+# timeout-shaped hole in the rescue. Never call this from a
+# backgrounded or parallel context: a wall-clock median is only
+# meaningful when the suite owns the host, which is why
+# `test/agentguard-test` runs this suite exclusively, ahead of the
+# parallel pool and last among the exclusive suites.
 _assert_hook_median_under() {
   local desc="$1" hook="$2" input="$3"
   local max_ms="${4:-${AGENTGUARD_PERF_MAX_MEDIAN_MS:-250}}"
@@ -51,6 +105,7 @@ _assert_hook_median_under() {
 
   output=$(
     python3 - "$hook" "$input" "$max_ms" "$max_sample_ms" "$TEST_TMPDIR" "$TEST_SID" <<'PY'
+import math
 import os
 import statistics
 import subprocess
@@ -95,12 +150,12 @@ for key in (
 cwd = os.environ.get("AGENTGUARD_ROOT")
 payload = hook_input.encode()
 
-def run_once():
+def run_once_for(cmd, data, label):
     started = time.perf_counter()
     try:
         completed = subprocess.run(
-            [hook],
-            input=payload,
+            cmd,
+            input=data,
             cwd=cwd,
             env=env,
             stdout=subprocess.DEVNULL,
@@ -109,32 +164,84 @@ def run_once():
             check=False,
         )
     except subprocess.TimeoutExpired:
-        print(f"timed out after {timeout:.1f}s")
+        print(f"{label} timed out after {timeout:.1f}s")
+        sys.exit(2)
+    except OSError as error:
+        # A missing or unexecutable interpreter is a harness failure,
+        # not a slow hook: fail closed instead of a bare traceback.
+        print(f"{label} failed to spawn: {error}")
         sys.exit(2)
 
     elapsed_ms = (time.perf_counter() - started) * 1000
     if completed.returncode != 0:
-        print(f"hook exited {completed.returncode} after {elapsed_ms:.1f}ms")
+        print(f"{label} exited {completed.returncode} after {elapsed_ms:.1f}ms")
         sys.exit(2)
     return elapsed_ms
 
-def run_batch():
+def run_batch_for(cmd, data, label):
     # Two warmup runs per batch, excluded from the samples (as the
     # original single-batch harness did), then `iterations` samples.
     # Every batch — the first and both confirmation batches — reuses
     # the same iteration count.
     for _ in range(2):
-        run_once()
-    samples = [run_once() for _ in range(iterations)]
+        run_once_for(cmd, data, label)
+    samples = [run_once_for(cmd, data, label) for _ in range(iterations)]
     return statistics.median(samples), max(samples)
+
+def run_batch():
+    return run_batch_for([hook], payload, "hook")
+
+# Host-relative calibration. Spawn latency is itself noisy (a few
+# ms of jitter is a large fraction of a ~3ms spawn), so — like the
+# hook medians — the calibration is the median of three batch
+# medians, not a single batch: one contention window cannot set the
+# factor alone. The factor is clamped at 10x: beyond that the host
+# is too wedged for timing to judge anything, and an unbounded
+# factor would let a bad calibration (a PATH shim, a load spike)
+# inflate every budget into vacuity. The clamp is reported in the
+# calibration note.
+spawn_ref_raw = os.environ.get("AGENTGUARD_PERF_SPAWN_REF_MS", "3.0")
+try:
+    spawn_ref_ms = float(spawn_ref_raw)
+except ValueError:
+    spawn_ref_ms = 0.0
+if not math.isfinite(spawn_ref_ms) or spawn_ref_ms <= 0:
+    print(
+        "invalid perf override: "
+        f"AGENTGUARD_PERF_SPAWN_REF_MS={spawn_ref_raw}"
+    )
+    sys.exit(2)
+calibration_batches = [
+    run_batch_for(["bash", "-c", "true"], b"", "calibration")[0]
+    for _ in range(3)
+]
+calibration_ms = statistics.median(calibration_batches)
+raw_factor = calibration_ms / spawn_ref_ms
+host_factor = min(10.0, max(1.0, raw_factor))
+effective_max_ms = max_ms * host_factor
+# Per-sample caps stay absolute: they guard against single
+# pathological samples, which are not spawn-proportional the way a
+# median is. A median-derived factor is the wrong scaler for a
+# maximum, so scaling the cap would let a multi-second spike pass
+# on a slow host. The trade-off is that on a host slower than ~6x,
+# a typical maximum can exceed the absolute cap and fail the
+# assertion even though its medians pass — the median verdict is
+# rescued, the tail guard is not.
+cap_ms = max_sample_limit_ms
+calibration_note = (
+    f"spawn calibration {calibration_ms:.1f}ms, host factor {host_factor:.2f}x, "
+    f"effective budget {effective_max_ms:.1f}ms"
+)
+if host_factor < raw_factor:
+    calibration_note += " (factor clamped at 10.00x)"
 
 median_ms, max_sample_ms = run_batch()
 summary = (
-    f"median {median_ms:.1f}ms <= {max_ms:.1f}ms "
-    f"(max sample {max_sample_ms:.1f}ms, n={iterations})"
+    f"median {median_ms:.1f}ms <= {effective_max_ms:.1f}ms "
+    f"({calibration_note}; max sample {max_sample_ms:.1f}ms, n={iterations})"
 )
-within_tail_limit = max_sample_limit_ms <= 0 or max_sample_ms <= max_sample_limit_ms
-if median_ms <= max_ms and within_tail_limit:
+within_tail_limit = cap_ms <= 0 or max_sample_ms <= cap_ms
+if median_ms <= effective_max_ms and within_tail_limit:
     print(summary)
     sys.exit(0)
 if not within_tail_limit:
@@ -160,7 +267,8 @@ except SystemExit:
     # context the bare error line would otherwise destroy, then let
     # the original exit status stand.
     print(
-        f"initial median {median_ms:.1f}ms vs {max_ms:.1f}ms budget; "
+        f"initial median {median_ms:.1f}ms vs {effective_max_ms:.1f}ms budget "
+        f"({calibration_note}); "
         f"confirmation aborted, batch medians so far "
         f"[{', '.join(f'{value:.1f}' for value in batch_medians)}]ms "
         f"(hook error or timeout reported above)"
@@ -168,23 +276,23 @@ except SystemExit:
     raise
 median_of_medians_ms = statistics.median(batch_medians)
 within_tail_limit = (
-    max_sample_limit_ms <= 0 or pooled_max_ms <= max_sample_limit_ms
+    cap_ms <= 0 or pooled_max_ms <= cap_ms
 )
 # Neutral wording on this path: the first batch breached by
 # definition, so no statistic is printed with a "<=" it does not
 # satisfy; the _pass/_fail prefix carries the verdict.
 print(
-    f"initial median {median_ms:.1f}ms vs {max_ms:.1f}ms budget "
-    f"(max sample {max_sample_ms:.1f}ms, n={iterations}); "
+    f"initial median {median_ms:.1f}ms vs {effective_max_ms:.1f}ms budget "
+    f"({calibration_note}; max sample {max_sample_ms:.1f}ms, n={iterations}); "
     f"confirmation batch medians "
     f"[{', '.join(f'{value:.1f}' for value in batch_medians)}]ms, "
     f"median-of-medians {median_of_medians_ms:.1f}ms "
-    f"vs {max_ms:.1f}ms budget "
+    f"vs {effective_max_ms:.1f}ms budget "
     f"(pooled max sample {pooled_max_ms:.1f}ms, n={iterations * 3})"
 )
 sys.exit(
     0
-    if median_of_medians_ms <= max_ms and within_tail_limit
+    if median_of_medians_ms <= effective_max_ms and within_tail_limit
     else 1
 )
 PY
