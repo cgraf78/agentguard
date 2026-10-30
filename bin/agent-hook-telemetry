@@ -61,7 +61,7 @@ _hook_read_input || true
 # the pane helper caches the turn identity to avoid touching tmux per tool.
 if command -v term-pane-mark >/dev/null 2>&1; then
   case "${_HOOK_INPUT:-}" in
-    *PreToolUse* | *SubagentStart* | *SubagentStop*)
+    *PreToolUse* | *SubagentStart* | *SubagentStop* | *StopFailure* | *idle_prompt*)
       _busy_event=$(printf '%s' "$_HOOK_INPUT" | jq -r '.hook_event_name // .hookEventName // empty' 2>/dev/null)
       case "$_busy_event" in
         PreToolUse)
@@ -112,7 +112,7 @@ if command -v term-pane-mark >/dev/null 2>&1; then
             _hook_muse_child_begin || true
             rm -f -- "$_HOOK_STATE_DIR/muse-child-turn" 2>/dev/null || true
           fi
-          case "${AGENTGUARD_NAME:-}" in codex | muse) _hook_team_busy child set || true ;; esac
+          case "${AGENTGUARD_NAME:-}" in codex | claude | muse) _hook_team_busy child set || true ;; esac
           ;;
         SubagentStop)
           if [ "${AGENTGUARD_NAME:-}" = muse ]; then
@@ -120,6 +120,23 @@ if command -v term-pane-mark >/dev/null 2>&1; then
             _hook_muse_child_end || true
           fi
           case "${AGENTGUARD_NAME:-}" in codex | claude | muse) _hook_team_busy child clear || true ;; esac
+          ;;
+        StopFailure)
+          # A failed Claude child turn ends without its SubagentStop. The
+          # root's StopFailure is settled below with the other aborted turns.
+          if [ "${AGENTGUARD_NAME:-}" = claude ] && printf '%s' "$_HOOK_INPUT" |
+            jq -e '(.agent_id // "") != ""' >/dev/null 2>&1; then
+            _hook_team_busy child clear || true
+          fi
+          ;;
+        Notification)
+          # Claude sends its idle prompt only once the parent is idle and no
+          # subagent or teammate is working, which backstops a missed child
+          # Stop. The pane helper ignores a child's notification.
+          if [ "${AGENTGUARD_NAME:-}" = claude ] && printf '%s' "$_HOOK_INPUT" |
+            jq -e '.notification_type == "idle_prompt"' >/dev/null 2>&1; then
+            _hook_pane_busy idle
+          fi
           ;;
       esac
       ;;

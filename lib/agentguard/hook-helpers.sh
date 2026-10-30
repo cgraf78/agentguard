@@ -1239,6 +1239,7 @@ _hook_team_parent_state_dir() (
 
 _hook_team_busy() {
   local actor="$1" action="$2" agent_name payload state_dir session_key owner_map parent_file mapped=''
+  local root_key=''
   command -v term-pane-mark >/dev/null 2>&1 || return 1
   _hook_agent_name agent_name
   case "$agent_name" in codex | claude | grok | muse) ;; *) return 1 ;; esac
@@ -1274,22 +1275,26 @@ _hook_team_busy() {
     [ ! -e "$state_dir/busy-team/state.json" ]; then
     return 1
   fi
-  # Claude and Grok already have safe per-turn marks. Enter aggregate mode
-  # only when a root Stop actually reports background work; normal turns keep
-  # their existing token and attention behavior.
-  if [ "$agent_name" = claude ] || [ "$agent_name" = grok ]; then
-    if [ ! -e "$state_dir/busy-team/state.json" ]; then
-      case "${_HOOK_INPUT:-}" in
-        *'"background_tasks"'* | *'"backgroundTasks"'*) ;;
-        *) return 1 ;;
-      esac
-      if [ "$actor" != root ] || [ "$action" != clear ] ||
-        ! printf '%s' "${_HOOK_INPUT:-}" | jq -e --arg agent "$agent_name" '
-          (.background_tasks // .backgroundTasks // []) |
-          any(.type == "subagent" or ($agent == "claude" and .type == "teammate"))
-        ' >/dev/null 2>&1; then
-        return 1
-      fi
+  # Claude and Grok already have safe per-turn marks, so turns without child
+  # work keep their existing token and attention behavior. Claude enters
+  # aggregate mode at a child's SubagentStart, because its task snapshots list
+  # an idle teammate as running, and leaves it once the team is empty. Grok
+  # enters it when a root Stop reports background work.
+  if [ "$agent_name" = claude ] && [ ! -e "$state_dir/busy-team/state.json" ]; then
+    [ "$actor" = child ] && [ "$action" = set ] || return 1
+    # busy-team.py compares this with the parent's live direct mark, so a team
+    # created mid-turn inherits the parent's turn.
+    _hook_busy_turn_key root_key
+  elif [ "$agent_name" = grok ] && [ ! -e "$state_dir/busy-team/state.json" ]; then
+    case "${_HOOK_INPUT:-}" in
+      *'"background_tasks"'* | *'"backgroundTasks"'*) ;;
+      *) return 1 ;;
+    esac
+    if [ "$actor" != root ] || [ "$action" != clear ] ||
+      ! printf '%s' "${_HOOK_INPUT:-}" | jq -e '
+        (.background_tasks // .backgroundTasks // []) | any(.type == "subagent")
+      ' >/dev/null 2>&1; then
+      return 1
     fi
   fi
   command -v python3 >/dev/null 2>&1 || {
@@ -1309,7 +1314,7 @@ _hook_team_busy() {
   [ -n "$payload" ] || payload='{}'
   printf '%s' "$payload" | python3 "$_HOOK_BIN_DIR/../lib/agentguard/busy-team.py" \
     "$state_dir" "$session_key" "$PPID" "$agent_name" "$actor" "$action" \
-    >/dev/null 2>&1 && {
+    ${root_key:+"$root_key"} >/dev/null 2>&1 && {
     if [ "$agent_name" = muse ] && [ "$actor" = root ]; then
       if [ "$action" = set ]; then
         _hook_busy_cache_publish "$owner_map" "$session_key" || return 2
@@ -1337,33 +1342,55 @@ _hook_busy_cache_publish() (
   candidate=''
 )
 
-_hook_pane_busy() {
-  local token='' mark_status=0 cached='' cache_file team_status=0 busy_agent='' prompt_id=''
-  local -a mark_args
-  command -v term-pane-mark >/dev/null 2>&1 || return 0
-  _hook_activity_is_foreground || return 0
+# Store this payload's direct busy-mark token in the variable named by $1, and
+# leave the cache key (kind:token) in _HOOK_BUSY_TURN_KEY. Claude and Grok
+# have no turn ID, so their prompt ID scopes the token to one request.
+_hook_busy_turn_token() {
+  local _busy_token _busy_agent='' _busy_prompt=''
   _hook_hm_read_input
   _hook_turn_identity
-  token="$_HOOK_TURN_TOKEN"
-  _hook_agent_name busy_agent
+  _busy_token="$_HOOK_TURN_TOKEN"
+  _hook_agent_name _busy_agent
   if [ "$_HOOK_TURN_KIND" = legacy ]; then
-    case "$busy_agent" in
+    case "$_busy_agent" in
       claude | grok)
         case "${_HOOK_INPUT:-}" in
           *'"prompt_id"'* | *'"promptId"'*)
-            prompt_id=$(printf '%s' "${_HOOK_INPUT:-}" | jq -r \
-              '.prompt_id // .promptId // empty' 2>/dev/null) || prompt_id=''
+            _busy_prompt=$(printf '%s' "${_HOOK_INPUT:-}" | jq -r \
+              '.prompt_id // .promptId // empty' 2>/dev/null) || _busy_prompt=''
             ;;
         esac
-        if [ -n "$prompt_id" ]; then
-          token="p:${#_HOOK_SESSION_KEY}:$_HOOK_SESSION_KEY:$prompt_id"
-          if [ "${#token}" -gt 256 ] || [[ ! "$token" =~ ^[A-Za-z0-9:._-]+$ ]]; then
-            token=''
+        if [ -n "$_busy_prompt" ]; then
+          _busy_token="p:${#_HOOK_SESSION_KEY}:$_HOOK_SESSION_KEY:$_busy_prompt"
+          if [ "${#_busy_token}" -gt 256 ] || [[ ! "$_busy_token" =~ ^[A-Za-z0-9:._-]+$ ]]; then
+            _busy_token=''
           fi
         fi
         ;;
     esac
   fi
+  _HOOK_BUSY_TURN_KEY="$_HOOK_TURN_KIND:$_busy_token"
+  printf -v "$1" '%s' "$_busy_token"
+}
+
+# Store the cache key that a live direct mark for this payload's turn leaves
+# in busy-mark-turn, in the variable named by $1.
+_hook_busy_turn_key() {
+  local _busy_key_token
+  _hook_busy_turn_token _busy_key_token
+  printf -v "$1" '%s' "$_HOOK_BUSY_TURN_KEY"
+}
+
+# $1 is set, clear, or idle. Idle is Claude's report that the parent and every
+# child agent are idle: it clears the direct mark like clear, and also retires
+# team children whose Stop never arrived.
+_hook_pane_busy() {
+  local token='' mark_status=0 cached='' cache_file team_status=0 mark_action="$1" busy_agent=''
+  local -a mark_args
+  command -v term-pane-mark >/dev/null 2>&1 || return 0
+  _hook_activity_is_foreground || return 0
+  _hook_busy_turn_token token
+  [ "$1" != idle ] || mark_action=clear
   cache_file="$_HOOK_STATE_DIR/busy-mark-turn"
   if [ -f "$cache_file" ]; then
     IFS= read -r cached <"$cache_file" || true
@@ -1371,7 +1398,7 @@ _hook_pane_busy() {
   # The cache only avoids another provider call during the same turn. Its
   # content is the identity, not a boolean, so a late Stop cannot disarm a
   # newer turn. A failed cache write merely costs another provider call.
-  if [ "$1" = set ] && [ "$cached" = "$_HOOK_TURN_KIND:$token" ]; then
+  if [ "$1" = set ] && [ "$cached" = "$_HOOK_BUSY_TURN_KEY" ]; then
     return 0
   fi
   if _hook_team_busy root "$1"; then
@@ -1380,13 +1407,13 @@ _hook_pane_busy() {
     team_status=$?
   fi
   if [ "$team_status" = 2 ]; then
-    if [ "$1" = set ] && [ "$cached" = "$_HOOK_TURN_KIND:$token" ]; then
+    if [ "$1" = set ] && [ "$cached" = "$_HOOK_BUSY_TURN_KEY" ]; then
       rm -f -- "$cache_file" 2>/dev/null || true
     fi
     return 0
   fi
   if [ "$team_status" = 1 ]; then
-    mark_args=("$1" busy --owner "$PPID")
+    mark_args=("$mark_action" busy --owner "$PPID")
     [ -z "$token" ] || mark_args+=(--token "$token")
     term-pane-mark "${mark_args[@]}" >/dev/null 2>&1 || mark_status=$?
     # Providers update independently. An older marker rejects unknown flags
@@ -1395,18 +1422,26 @@ _hook_pane_busy() {
       # The synchronous notifier may have stalled while a newer prompt failed
       # rearm and published a fence. Revalidate at the actual compatibility
       # boundary; only the modern token-aware clear remains safe after that.
-      if [ "$1" = clear ] && _hook_attention_managed && ! _hook_attention_is_current; then
+      if [ "$mark_action" = clear ] && _hook_attention_managed && ! _hook_attention_is_current; then
         return 0
       fi
       mark_status=0
-      term-pane-mark "$1" busy --owner "$PPID" >/dev/null 2>&1 || mark_status=$?
+      term-pane-mark "$mark_action" busy --owner "$PPID" >/dev/null 2>&1 || mark_status=$?
     fi
   fi
   if [ "$1" = set ] && [ "$mark_status" = 0 ]; then
-    _hook_busy_cache_publish "$cache_file" "$_HOOK_TURN_KIND:$token" || true
-  elif [ "$1" = clear ] && [ "$mark_status" = 0 ] &&
-    [ "$cached" = "$_HOOK_TURN_KIND:$token" ]; then
+    _hook_busy_cache_publish "$cache_file" "$_HOOK_BUSY_TURN_KEY" || true
+  elif [ "$mark_action" = clear ] && [ "$mark_status" = 0 ] &&
+    [ "$cached" = "$_HOOK_BUSY_TURN_KEY" ]; then
     rm -f -- "$cache_file" 2>/dev/null || true
+  fi
+  # A Claude child may have created a team while this direct clear ran. The
+  # cache is gone by now, so that team either saw the cleared turn or already
+  # exists here; settling it too keeps it from holding the finished turn.
+  if [ "$team_status" = 1 ] && [ "$mark_action" = clear ] &&
+    [ -e "$_HOOK_STATE_DIR/busy-team/state.json" ]; then
+    _hook_agent_name busy_agent
+    [ "$busy_agent" != claude ] || _hook_team_busy root "$1" || true
   fi
 }
 
