@@ -1915,10 +1915,12 @@ _hook_mcp_failures_read() {
 # Write the circuit-breaker record with failure count $1, last failing tool
 # $2, and error text $3, stamped now. Line breaks would shift the fields.
 _hook_mcp_failures_write() {
-  local now='' tool="${2:-}" error="${3:-}"
+  # $'...' inside a quoted ${...//pattern} is literal text in Bash 3.2, so
+  # the line breaks go through variables.
+  local now='' tool="${2:-}" error="${3:-}" nl=$'\n' cr=$'\r'
   _hook_now now || now=''
-  tool="${tool//[$'\n\r']/ }"
-  error="${error//[$'\n\r']/ }"
+  tool="${tool//[$nl$cr]/ }"
+  error="${error//[$nl$cr]/ }"
   _hook_mkstate "${_HOOK_MCP_FAIL_FILE%/*}" || return 0
   _hook_write_atomic "$_HOOK_MCP_FAIL_FILE" "$1"$'\n'"$now"$'\n'"$tool"$'\n'"$error" || true
 }
