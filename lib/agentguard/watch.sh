@@ -83,35 +83,6 @@ _hook_watch_tool_id() {
   printf -v "$2" '%s' "${_ti_dir//\//+}"
 }
 
-# Store the current epoch in the variable named by $1. Bash 4.2+ formats it
-# without a fork; Bash 3.2 asks date(1). Only record and re-arm call this.
-_hook_watch_now() {
-  local _watch_now=''
-  if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] ||
-    { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 2 ]; }; then
-    printf -v _watch_now '%(%s)T' -1
-  else
-    _watch_now=$(date +%s 2>/dev/null) || _watch_now=''
-  fi
-  case "$_watch_now" in
-    '' | *[!0-9]*) return 1 ;;
-  esac
-  printf -v "$1" '%s' "$_watch_now"
-}
-
-# Replace file $1 with content $2 atomically, so a concurrent Stop reads the
-# old record or the new one, never a torn one. The temporary name carries `~`
-# like the producer's, and a failure leaves the previous record in place.
-_hook_watch_write() {
-  local file="$1" tmp="$1~$$"
-  [ ! -d "$file" ] || return 1
-  if printf '%s\n' "$2" 2>/dev/null >"$tmp" && mv -f -- "$tmp" "$file" 2>/dev/null; then
-    return 0
-  fi
-  rm -f -- "$tmp" 2>/dev/null
-  return 1
-}
-
 # The session's watch dir; fails when no session state dir is known.
 _hook_watch_session_dir() {
   [ -n "${_HOOK_STATE_DIR:-}" ] || return 1
@@ -378,7 +349,7 @@ _hook_watch_read_tool() {
 # label $5.
 _hook_watch_write_key() {
   [ -d "$1/keys" ] || _hook_mkstate "$1/keys" || return 1
-  _hook_watch_write "$1/keys/$2" "$3 $4"$'\n'"$5"
+  _hook_write_atomic "$1/keys/$2" "$3 $4"$'\n'"$5"
 }
 
 # --- Public API ---
@@ -400,7 +371,7 @@ _hook_watch_record() {
   [ "$scope" = - ] || _hook_watch_name_ok "$scope" || return 1
   _hook_watch_name_ok "$argv" || return 1
   _hook_watch_session_dir base || return 1
-  _hook_watch_now now || return 1
+  _hook_now now || return 1
   base="$base/$id"
   [ -d "$base" ] || _hook_mkstate "$base" || return 1
   # One line each: a newline would shift every later field.
@@ -409,7 +380,7 @@ _hook_watch_record() {
   # The tool file rarely changes; rewriting it only when it does saves an mv.
   if ! _hook_watch_read_tool "$base/tool" || [ "$_HOOK_WATCH_TOOL_DIR" != "$tool_dir" ] ||
     [ "$_HOOK_WATCH_TOOL_ARGV" != "$argv" ] || [ "$_HOOK_WATCH_TOOL_HINT" != "$hint" ]; then
-    _hook_watch_write "$base/tool" "$tool_dir"$'\n'"$argv"$'\n'"$hint" || return 1
+    _hook_write_atomic "$base/tool" "$tool_dir"$'\n'"$argv"$'\n'"$hint" || return 1
   fi
   _hook_watch_write_key "$base" "$key" "$now" "$scope" "$label"
 }
@@ -457,7 +428,7 @@ _hook_watch_rearm() {
   for scope in "$@"; do
     [ "$scope" != ALL ] || all=1
   done
-  _hook_watch_now now || return 1
+  _hook_now now || return 1
   # Without trusted producer state a terminal key cannot be told apart, so
   # every matching key re-arms; enforcement itself still fails open later.
   _hook_watch_roots "$tool_dir" || _HOOK_WATCH_DIRS=()
@@ -497,7 +468,7 @@ _hook_watch_rearm_key() {
     _hook_watch_read_key "$base/forgotten/$key" || return 0
     revive=1
   fi
-  _hook_watch_now now || return 1
+  _hook_now now || return 1
   _hook_watch_write_key "$base" "$key" "$now" "$_HOOK_WATCH_KEY_SCOPE" \
     "$_HOOK_WATCH_KEY_LABEL" || return 0
   [ "$revive" = 0 ] || rm -f -- "$base/forgotten/$key" 2>/dev/null

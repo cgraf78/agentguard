@@ -133,6 +133,32 @@ _assert_contains "hook counter: increment advances numeric count" "after_increme
 _assert_contains "hook counter: reset removes file" "reset=missing" "$counter_out"
 
 echo ""
+echo "=== hook-helpers: _hook_now and _hook_write_atomic ==="
+
+now_out=$(
+  source "$HELPERS"
+  _hook_now now_value && printf 'now=%s\n' "$now_value"
+  write_file="$counter_dir/atomic/record"
+  mkdir -p "${write_file%/*}"
+  _hook_write_atomic "$write_file" $'first\nsecond' && printf 'written=%s\n' "$(tr '\n' '|' <"$write_file")"
+  mkdir -p "$counter_dir/atomic/dir"
+  _hook_write_atomic "$counter_dir/atomic/dir" x || printf 'dir=refused\n'
+  for leftover in "${write_file%/*}"/*~*; do
+    [ -e "$leftover" ] && printf 'leftover=%s\n' "$leftover"
+  done
+)
+now_value=$(printf '%s\n' "$now_out" | sed -n 's/^now=//p')
+date_value=$(date +%s)
+if [ -n "$now_value" ] && [ "$((date_value - now_value))" -ge 0 ] && [ "$((date_value - now_value))" -le 5 ]; then
+  _pass "hook_now: current epoch"
+else
+  _fail "hook_now: current epoch (got '$now_value', date says $date_value)"
+fi
+_assert_contains "hook_write_atomic: content plus newline" "written=first|second|" "$now_out"
+_assert_contains "hook_write_atomic: refuses a directory" "dir=refused" "$now_out"
+_assert_not_contains "hook_write_atomic: no temporary left" "leftover=" "$now_out"
+
+echo ""
 echo "=== hook-helpers: state markers ==="
 
 marker_dir=$(_tmpdir)

@@ -9,6 +9,17 @@ reads an MCP hook JSON payload from standard input. It blocks MCP servers after
 repeated failures, warns on expensive or under-scoped MCP calls, and then lets
 local extensions add environment-specific MCP policy.
 .PP
+After three consecutive failures of one server, calls to it are blocked
+until 60 seconds have passed since the last failure or retry probe. Then
+the next call goes through as a probe:
+.BR agent-hook-post-mcp (1)
+closes the breaker if it succeeds and restarts the cooldown if it fails.
+The counter is per server and shared by every agent in the session. The
+block message reports the seconds until the next probe, quotes the last
+failing tool and the first 400 characters of its error, and says how to tell
+bad arguments from an unavailable server by that error. A blocked call gets
+none of the warnings below.
+.PP
 The base policy warns on exact
 .B search_files
 leaf-tool calls without a path filter and warns once on exact

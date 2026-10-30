@@ -48,6 +48,225 @@ _run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__tool","tool_input":{}}'
 _assert_eq "garbage file: exit 0" "0" "$HOOK_EXIT"
 
 # ---------------------------------------------------------------------------
+# Tests: agent-hook-pre-mcp — half-open breaker cooldown
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== pre-mcp: half-open breaker ==="
+
+MCP_FAIL_FILE="$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv"
+MCP_CALL='{"tool_name":"mcp__srv__tool","tool_input":{}}'
+
+# Write a breaker record: count $1, stamped $2 seconds ago.
+_mcp_record() {
+  mkdir -p "${MCP_FAIL_FILE%/*}"
+  printf '%s\n%s\n' "$1" "$(($(date +%s) - $2))" >"$MCP_FAIL_FILE"
+}
+
+_mcp_record_line() {
+  sed -n "${1}p" "$MCP_FAIL_FILE" 2>/dev/null
+}
+
+# The retry delay the block message reports, in seconds.
+_mcp_wait() {
+  printf '%s' "$HOOK_STDERR" | sed -n 's/.*one retry is allowed in \([0-9]*\)s.*/\1/p'
+}
+
+_assert_wait_between() {
+  local name="$1" low="$2" high="$3" wait
+  wait=$(_mcp_wait)
+  if [ -n "$wait" ] && [ "$wait" -ge "$low" ] && [ "$wait" -le "$high" ]; then
+    _pass "$name"
+  else
+    _fail "$name (wait '$wait' not in [$low, $high]; stderr: $HOOK_STDERR)"
+  fi
+}
+
+# Within the cooldown: blocked, with the time until the retry and a hint that
+# the failures may be the caller's arguments.
+_reset_state
+_mcp_record 3 20
+_run_hook "$PRE_MCP" "$MCP_CALL"
+_assert_eq "within cooldown: blocked" "2" "$HOOK_EXIT"
+_assert_wait_between "within cooldown: reports remaining seconds" 33 41
+_assert_contains "within cooldown: advice is conditional on the error" \
+  "If the error points at your arguments" "$HOOK_STDERR"
+_assert_contains "within cooldown: says the counter is shared" \
+  "failures from any agent in this session count" "$HOOK_STDERR"
+_assert_not_contains "within cooldown: no earlier-retries note" "Retries after earlier pauses" "$HOOK_STDERR"
+_assert_eq "within cooldown: count kept" "3" "$(_mcp_record_line 1)"
+
+# Past the cooldown: one probe goes through and re-stamps the record, so a
+# second call right after it waits a full cooldown again.
+_reset_state
+_mcp_record 3 61
+before=$(date +%s)
+_run_hook "$PRE_MCP" "$MCP_CALL"
+_assert_eq "after cooldown: probe allowed" "0" "$HOOK_EXIT"
+_assert_not_contains "after cooldown: probe not blocked" "BLOCKED" "$HOOK_STDERR"
+_assert_eq "after cooldown: probe keeps count" "3" "$(_mcp_record_line 1)"
+stamp=$(_mcp_record_line 2)
+if [ -n "$stamp" ] && [ "$stamp" -ge "$before" ]; then
+  _pass "after cooldown: probe re-stamps record"
+else
+  _fail "after cooldown: probe re-stamps record (stamp '$stamp' < $before)"
+fi
+_run_hook "$PRE_MCP" "$MCP_CALL"
+_assert_eq "after probe: next call blocked" "2" "$HOOK_EXIT"
+_assert_wait_between "after probe: full cooldown again" 53 60
+
+# A successful probe closes the breaker.
+_reset_state
+_mcp_record 3 61
+_run_hook "$PRE_MCP" "$MCP_CALL"
+_assert_eq "probe success: probe allowed" "0" "$HOOK_EXIT"
+_run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":false}'
+_assert_file_missing "probe success: record removed" "$MCP_FAIL_FILE"
+_run_hook "$PRE_MCP" "$MCP_CALL"
+_assert_eq "probe success: later calls pass" "0" "$HOOK_EXIT"
+
+# A failed probe re-opens it for a full cooldown.
+_reset_state
+_mcp_record 3 61
+_run_hook "$PRE_MCP" "$MCP_CALL"
+_assert_eq "probe failure: probe allowed" "0" "$HOOK_EXIT"
+_run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":true}'
+_assert_eq "probe failure: count incremented" "4" "$(_mcp_record_line 1)"
+_run_hook "$PRE_MCP" "$MCP_CALL"
+_assert_eq "probe failure: blocked again" "2" "$HOOK_EXIT"
+_assert_wait_between "probe failure: full cooldown" 53 60
+
+# A count-only record (older AgentGuard) starts its cooldown at first sight
+# instead of blocking forever or letting the call through.
+_reset_state
+mkdir -p "${MCP_FAIL_FILE%/*}"
+echo 3 >"$MCP_FAIL_FILE"
+_run_hook "$PRE_MCP" "$MCP_CALL"
+_assert_eq "count-only record: blocked" "2" "$HOOK_EXIT"
+_assert_wait_between "count-only record: full cooldown" 54 60
+stamp=$(_mcp_record_line 2)
+case "$stamp" in
+  '' | *[!0-9]*) _fail "count-only record: stamped (line 2 '$stamp')" ;;
+  *) _pass "count-only record: stamped" ;;
+esac
+
+# A stamp in the future (the clock went backwards) restarts the cooldown now
+# rather than holding the breaker open until the clock catches up.
+_reset_state
+_mcp_record 3 -7200
+_run_hook "$PRE_MCP" "$MCP_CALL"
+_assert_eq "future stamp: blocked" "2" "$HOOK_EXIT"
+_assert_wait_between "future stamp: full cooldown, not hours" 54 60
+stamp=$(_mcp_record_line 2)
+if [ -n "$stamp" ] && [ "$stamp" -le "$(date +%s)" ]; then
+  _pass "future stamp: re-stamped now"
+else
+  _fail "future stamp: re-stamped now (stamp '$stamp')"
+fi
+
+# Corrupt records never raise an arithmetic error (which would fail the hook
+# closed on every later call), and a bad stamp gets a fresh cooldown. Rows:
+# name|record lines (`NOW` is the current epoch)|expected exit.
+while IFS='|' read -r _name _record _expected; do
+  _reset_state
+  mkdir -p "${MCP_FAIL_FILE%/*}"
+  printf '%b\n' "${_record//NOW/$(date +%s)}" >"$MCP_FAIL_FILE"
+  _run_hook "$PRE_MCP" "$MCP_CALL"
+  _assert_eq "$_name: exit" "$_expected" "$HOOK_EXIT"
+  _assert_not_contains "$_name: no internal error" "internal error" "$HOOK_STDERR"
+  [ "$_expected" = 0 ] || _assert_wait_between "$_name: fresh cooldown" 54 60
+done <<'ROWS'
+leading-zero epoch, long past|3\n0999|0
+overlong epoch|3\n99999999999999999999|2
+garbage epoch|3\nsoon|2
+leading-zero count|08\nNOW|2
+overlong count|99999999999999999999\nNOW|0
+ROWS
+
+# post-mcp reads a leading-zero count as decimal too.
+_reset_state
+mkdir -p "${MCP_FAIL_FILE%/*}"
+printf '08\n%s\n' "$(date +%s)" >"$MCP_FAIL_FILE"
+_run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":true}'
+_assert_eq "leading-zero count: post-mcp increments" "9" "$(_mcp_record_line 1)"
+
+# The block names the last failing tool and the start of its error, which
+# usually says whether the arguments or the server are at fault.
+_reset_state
+_run_hook "$POST_MCP" '{"tool_name":"mcp__srv__search","tool_result_is_error":true}'
+_run_hook "$POST_MCP" '{"tool_name":"mcp__srv__search","tool_result_is_error":true}'
+_mcp_error_payload=$(jq -nc --arg e "tool failed: '/tmp/x' is not in the subpath of '/repo'"$'\n'"second line" \
+  '{"tool_name":"mcp__srv__search","hook_event_name":"PostToolUseFailure","error":$e}')
+_run_hook "$POST_MCP" "$_mcp_error_payload"
+_assert_eq "last failure: tool recorded" "search" "$(_mcp_record_line 3)"
+_assert_eq "last failure: error kept on one line" \
+  "tool failed: '/tmp/x' is not in the subpath of '/repo' second line" "$(_mcp_record_line 4)"
+_run_hook "$PRE_MCP" "$MCP_CALL"
+_assert_eq "last failure: blocked" "2" "$HOOK_EXIT"
+_assert_contains "last failure: names the tool and error" \
+  "Last failure (search): tool failed: '/tmp/x' is not in the subpath" "$HOOK_STDERR"
+
+# Codex reports the error inside the CallToolResult content.
+_reset_state
+_run_hook "$POST_MCP" '{"tool_name":"mcp__srv__lookup","tool_response":{"isError":true,"content":[{"type":"text","text":"target directory src/x does not exist"}]}}'
+_assert_eq "content error: text extracted" "target directory src/x does not exist" "$(_mcp_record_line 4)"
+
+# Long errors are cut to 400 characters plus an ellipsis; shorter ones are
+# kept whole.
+_reset_state
+_mcp_long_error=$(printf 'e%.0s' $(seq 1 500))
+_run_hook "$POST_MCP" "$(jq -nc --arg e "$_mcp_long_error" '{"tool_name":"mcp__srv__tool","hook_event_name":"PostToolUseFailure","error":$e}')"
+_mcp_kept=$(_mcp_record_line 4)
+_assert_eq "long error: cut to 400 characters plus ellipsis" "403" "${#_mcp_kept}"
+_assert_eq "long error: ends with an ellipsis" "..." "${_mcp_kept: -3}"
+_reset_state
+_mcp_exact_error=$(printf 'e%.0s' $(seq 1 400))
+_run_hook "$POST_MCP" "$(jq -nc --arg e "$_mcp_exact_error" '{"tool_name":"mcp__srv__tool","hook_event_name":"PostToolUseFailure","error":$e}')"
+_assert_eq "400-character error: kept whole" "$_mcp_exact_error" "$(_mcp_record_line 4)"
+
+# A probe keeps the last failure in the re-stamped record.
+_reset_state
+mkdir -p "${MCP_FAIL_FILE%/*}"
+printf '3\n%s\nsearch\nbad path\n' "$(($(date +%s) - 61))" >"$MCP_FAIL_FILE"
+_run_hook "$PRE_MCP" "$MCP_CALL"
+_assert_eq "probe re-stamp: allowed" "0" "$HOOK_EXIT"
+_assert_eq "probe re-stamp: tool kept" "search" "$(_mcp_record_line 3)"
+_assert_eq "probe re-stamp: error kept" "bad path" "$(_mcp_record_line 4)"
+
+# The advice never turns into a verdict by count: an argument error repeats
+# as reliably as an outage. From five failures (two failed probes) the block
+# only adds that earlier retries failed too.
+_reset_state
+_mcp_record 4 0
+_run_hook "$PRE_MCP" "$MCP_CALL"
+_assert_not_contains "one failed probe: no earlier-retries note" "Retries after earlier pauses" "$HOOK_STDERR"
+_mcp_record 5 0
+_run_hook "$PRE_MCP" "$MCP_CALL"
+_assert_eq "two failed probes: blocked" "2" "$HOOK_EXIT"
+_assert_contains "two failed probes: earlier retries noted" "Retries after earlier pauses failed too." "$HOOK_STDERR"
+_assert_contains "two failed probes: advice still conditional" \
+  "If the error points at your arguments" "$HOOK_STDERR"
+
+# The expensive-op warnings stay quiet when the breaker blocks the call, so
+# they do not read like its cause; the knowledge_load once-marker is not
+# spent either.
+_reset_state
+_mcp_record 3 0
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__search_files","tool_input":{"query":"x"}}'
+_assert_eq "blocked search_files: blocked" "2" "$HOOK_EXIT"
+_assert_not_contains "blocked search_files: no path warning" "without a path filter" "$HOOK_STDERR"
+_run_hook "$PRE_MCP" '{"tool_name":"mcp__srv__knowledge_load","tool_input":{"url":"https://example.com"}}'
+_assert_not_contains "blocked knowledge_load: no warning" "knowledge_load can consume" "$HOOK_STDERR"
+_assert_file_missing "blocked knowledge_load: once-marker unspent" \
+  "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/knowledge-load-warned"
+
+# Below the threshold the cooldown does not apply.
+_reset_state
+_mcp_record 2 0
+_run_hook "$PRE_MCP" "$MCP_CALL"
+_assert_eq "2 recent failures: allowed" "0" "$HOOK_EXIT"
+
+# ---------------------------------------------------------------------------
 # Tests: agent-hook-pre-mcp — server name extraction
 # ---------------------------------------------------------------------------
 
@@ -270,15 +489,20 @@ fi
 # Failed call → fail file with count 1
 _run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":true}'
 if [ -f "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv" ]; then
-  count=$(cat "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv")
+  count=$(sed -n 1p "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv")
   _assert_eq "first failure: count 1" "1" "$count"
+  stamp=$(sed -n 2p "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv")
+  case "$stamp" in
+    '' | *[!0-9]*) _fail "first failure: stamped (line 2 '$stamp')" ;;
+    *) _pass "first failure: stamped" ;;
+  esac
 else
   _fail "first failure: fail file created"
 fi
 
 # Second failure → count 2
 _run_hook "$POST_MCP" '{"tool_name":"mcp__srv__tool","tool_result_is_error":true}'
-count=$(cat "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv")
+count=$(sed -n 1p "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-srv")
 _assert_eq "second failure: count 2" "2" "$count"
 
 # Success after failures → resets counter
@@ -293,8 +517,8 @@ fi
 _run_hook "$POST_MCP" '{"tool_name":"mcp__alpha__tool","tool_result_is_error":true}'
 _run_hook "$POST_MCP" '{"tool_name":"mcp__beta__tool","tool_result_is_error":true}'
 _run_hook "$POST_MCP" '{"tool_name":"mcp__alpha__tool","tool_result_is_error":true}'
-count_a=$(cat "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-alpha")
-count_b=$(cat "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-beta")
+count_a=$(sed -n 1p "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-alpha")
+count_b=$(sed -n 1p "$TEST_TMPDIR/agentguard/hook-state/$TEST_SID/mcp-failures-beta")
 _assert_eq "independent servers: alpha=2" "2" "$count_a"
 _assert_eq "independent servers: beta=1" "1" "$count_b"
 

@@ -48,16 +48,55 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
 _hook_parse_mcp
 
 # --- Consecutive failure circuit breaker ---
+# Three consecutive failures open the breaker. Blocked calls never reach
+# post-mcp, so only time can close it again: once 60 s have passed since the
+# last failure or probe, the next call re-stamps the record and goes through
+# as a half-open probe; post-mcp's verdict on it resets (success) or re-arms
+# (failure) the breaker. Calls racing the probe may probe too, which is
+# harmless; the re-stamp makes the call after a probe whose post hook never
+# ran (an interrupt, a denial by another hook) wait out another cooldown. A
+# record without a usable epoch (written by an older AgentGuard, corrupt, or
+# stamped by a clock that has since gone backwards) starts its cooldown now.
+# Without a clock no cooldown can be timed, so the breaker stays closed.
 if [ -f "$_HOOK_MCP_FAIL_FILE" ]; then
-  count=$(_hook_counter_read "$_HOOK_MCP_FAIL_FILE")
-  if [ "$count" -ge 3 ]; then
-    _hook_block "MCP server '$_HOOK_MCP_SERVER' has failed $count consecutive times this session. The server appears to be down — continuing to call it will produce errors. Try a different approach or ask the user to check the MCP server."
+  _hook_mcp_failures_read
+  if [ "$_HOOK_MCP_FAILS" -ge 3 ]; then
+    _mcp_cooldown=60
+    _mcp_now=''
+    _hook_now _mcp_now || _mcp_now=''
+    _mcp_wait=0
+    _mcp_stamp=0
+    if [ -z "$_mcp_now" ]; then
+      :
+    elif [ -n "$_HOOK_MCP_FAIL_EPOCH" ] && [ "$_mcp_now" -ge "$_HOOK_MCP_FAIL_EPOCH" ]; then
+      _mcp_wait=$((_mcp_cooldown - (_mcp_now - _HOOK_MCP_FAIL_EPOCH)))
+      [ "$_mcp_wait" -gt 0 ] || _mcp_stamp=1
+    else
+      _mcp_wait="$_mcp_cooldown"
+      _mcp_stamp=1
+    fi
+    [ "$_mcp_stamp" = 0 ] ||
+      _hook_mcp_failures_write "$_HOOK_MCP_FAILS" "$_HOOK_MCP_FAIL_TOOL" "$_HOOK_MCP_FAIL_ERROR"
+    if [ "$_mcp_wait" -gt 0 ]; then
+      _mcp_last=''
+      [ -z "$_HOOK_MCP_FAIL_TOOL" ] ||
+        _mcp_last=" Last failure ($_HOOK_MCP_FAIL_TOOL)${_HOOK_MCP_FAIL_ERROR:+: $_HOOK_MCP_FAIL_ERROR}."
+      # The third failure opens the breaker, so from five on at least two
+      # probes have failed too. That is a fact, not a verdict: an argument
+      # error repeats just as reliably as an outage, so the advice stays
+      # conditional on what the error says.
+      _mcp_retries=''
+      [ "$_HOOK_MCP_FAILS" -lt 5 ] || _mcp_retries=' Retries after earlier pauses failed too.'
+      _hook_block "MCP server '$_HOOK_MCP_SERVER' has failed $_HOOK_MCP_FAILS consecutive times this session (failures from any agent in this session count), so its calls are paused; one retry is allowed in ${_mcp_wait}s.$_mcp_last$_mcp_retries If the error points at your arguments (for example a path outside the server's root, or a target that does not exist), fix them before retrying; if it says the server is unreachable or the connection closed, the server is probably down: try a different approach or ask the user to check it."
+    fi
   fi
 fi
 
 # --- Expensive operation guards ---
+# Skipped when the breaker blocks the call: next to the block they would read
+# like its cause.
 
-if [ "$_HOOK_MCP_TOOL_NAME" = "search_files" ]; then
+if [ -z "$_HOOK_BLOCKED" ] && [ "$_HOOK_MCP_TOOL_NAME" = "search_files" ]; then
   has_path=$(printf '%s' "$_HOOK_INPUT" | jq -r '
     .tool_input
     | (.target_directories // .path // .directory // .paths // empty)
@@ -69,7 +108,7 @@ if [ "$_HOOK_MCP_TOOL_NAME" = "search_files" ]; then
   fi
 fi
 
-if [ "$_HOOK_MCP_TOOL_NAME" = "knowledge_load" ]; then
+if [ -z "$_HOOK_BLOCKED" ] && [ "$_HOOK_MCP_TOOL_NAME" = "knowledge_load" ]; then
   if _hook_once_per_session "knowledge-load-warned"; then
     _hook_warn 'knowledge_load can consume significant context window on large documents. Prefer knowledge_filtered_search for targeted lookups.'
   fi

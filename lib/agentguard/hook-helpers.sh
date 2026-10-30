@@ -1138,6 +1138,36 @@ _hook_edit_churn_file() {
   printf '%s/edit-churn/%s\n' "$_HOOK_STATE_DIR" "$key"
 }
 
+# Store the current epoch in the variable named by $1. Bash 4.2+ formats it
+# without a fork; Bash 3.2 asks date(1).
+_hook_now() {
+  local _hook_now_value=''
+  if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] ||
+    { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 2 ]; }; then
+    printf -v _hook_now_value '%(%s)T' -1
+  else
+    _hook_now_value=$(date +%s 2>/dev/null) || _hook_now_value=''
+  fi
+  case "$_hook_now_value" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  printf -v "$1" '%s' "$_hook_now_value"
+}
+
+# Replace file $1 with content $2 and a newline atomically, so a concurrent
+# reader (a Stop hook, a parallel MCP call) sees the old record or the new
+# one, never a torn one. The temporary name carries `~` like the watch
+# producer's, and a failure leaves the previous record in place.
+_hook_write_atomic() {
+  local file="$1" tmp="$1~$$"
+  [ ! -d "$file" ] || return 1
+  if printf '%s\n' "$2" 2>/dev/null >"$tmp" && mv -f -- "$tmp" "$file" 2>/dev/null; then
+    return 0
+  fi
+  rm -f -- "$tmp" 2>/dev/null
+  return 1
+}
+
 _hook_counter_read() {
   local file="$1" count=''
   if [ -f "$file" ]; then
@@ -1850,6 +1880,49 @@ _hook_parse_mcp() {
   # The server name names a state file. Gemini documents it as arbitrary
   # user-controlled text, so a `/` must not reach the path.
   _HOOK_MCP_FAIL_FILE="$_HOOK_STATE_DIR/mcp-failures-${_HOOK_MCP_SERVER//\//_}"
+}
+
+# The MCP circuit-breaker record in _HOOK_MCP_FAIL_FILE, one field per line:
+# the consecutive failure count (first, where _hook_counter_read finds it),
+# the epoch of the last failure or half-open probe, and the last failing
+# tool and the start of its error text. Older AgentGuard wrote the count
+# alone, so a missing or invalid epoch reads as empty. Sets _HOOK_MCP_FAILS,
+# _HOOK_MCP_FAIL_EPOCH, _HOOK_MCP_FAIL_TOOL, and _HOOK_MCP_FAIL_ERROR.
+_hook_mcp_failures_read() {
+  local count='' epoch='' tool='' error=''
+  if [ -f "$_HOOK_MCP_FAIL_FILE" ]; then
+    {
+      IFS= read -r count && IFS= read -r epoch && IFS= read -r tool &&
+        IFS= read -r error
+    } 2>/dev/null <"$_HOOK_MCP_FAIL_FILE"
+  fi
+  # Base 10 after a length check: a leading zero would otherwise be octal
+  # (`08` an arithmetic error, which fails the hook closed on every later
+  # call), and more than 15 digits would overflow.
+  case "$count" in
+    '' | *[!0-9]* | ????????????????*) count=0 ;;
+  esac
+  case "$epoch" in
+    '' | *[!0-9]* | ????????????????*) epoch='' ;;
+    *) epoch=$((10#$epoch)) ;;
+  esac
+  _HOOK_MCP_FAILS=$((10#$count))
+  _HOOK_MCP_FAIL_EPOCH="$epoch"
+  _HOOK_MCP_FAIL_TOOL="$tool"
+  _HOOK_MCP_FAIL_ERROR="$error"
+}
+
+# Write the circuit-breaker record with failure count $1, last failing tool
+# $2, and error text $3, stamped now. Line breaks would shift the fields.
+_hook_mcp_failures_write() {
+  # $'...' inside a quoted ${...//pattern} is literal text in Bash 3.2, so
+  # the line breaks go through variables.
+  local now='' tool="${2:-}" error="${3:-}" nl=$'\n' cr=$'\r'
+  _hook_now now || now=''
+  tool="${tool//[$nl$cr]/ }"
+  error="${error//[$nl$cr]/ }"
+  _hook_mkstate "${_HOOK_MCP_FAIL_FILE%/*}" || return 0
+  _hook_write_atomic "$_HOOK_MCP_FAIL_FILE" "$1"$'\n'"$now"$'\n'"$tool"$'\n'"$error" || true
 }
 
 # Loads the command classifier on first use. Hooks that classify only some
