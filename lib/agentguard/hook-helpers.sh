@@ -1137,13 +1137,14 @@ _hook_muse_child_reap() {
   rm -f -- "$_HOOK_STATE_DIR/muse-child-session" 2>/dev/null || true
 }
 
-# A new root prompt retires the previous turn, whose children the host
-# already resolved: Muse cancels turn-scoped children when the main run
-# completes, and a cancelled child delivers no SubagentStop. Drop their
-# tracking so one missed Stop cannot veto every later turn. Runs before
-# the foreground admission check, since a stale veto is exactly what it
-# clears; skipped for child prompts and for state dirs owned by a child
-# (sticky owner entry present), where the marker still routes follow-ups.
+# A new root prompt retires the previous turn, and a turn abort retires
+# the killed turn, whose children the host already resolved: Muse cancels
+# turn-scoped children when the main run ends, and a cancelled child
+# delivers no SubagentStop. Drop their tracking so one missed Stop cannot
+# veto every later turn. Runs before the foreground admission check, since
+# a stale veto is exactly what it clears; skipped for child prompts and
+# for state dirs owned by a child (sticky owner entry present), where the
+# marker still routes follow-ups.
 _hook_muse_child_reap_turn() {
   local _muse_child_prompt_session='' _muse_child_stale=''
   [ "${AGENTGUARD_NAME:-}" = muse ] || return 0

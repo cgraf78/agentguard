@@ -1707,6 +1707,80 @@ AGENTGUARD_TELEMETRY_DIR="$MOCK_BUSY_DIR/telemetry" \
 _assert_file_missing "busy: telemetry for a payload mentioning an abort keeps the mark" \
   "$busy_log"
 
+# An Esc-cancelled turn delivers no SubagentStop for its children; the
+# Interrupt must retire their tracking itself, or the stale veto blocks
+# its own clear and the spinner survives the interrupt.
+abortveto_log="$MOCK_BUSY_DIR/muse-abort-veto.log"
+abortveto_session="$TEST_SID-muse-abort-veto"
+abortveto_state="$TEST_TMPDIR/agentguard/hook-state/$abortveto_session"
+abortveto_child="$TEST_SID-muse-abort-veto-child"
+_busy_hook agent-hook-prompt-submit muse "$abortveto_log" \
+  "{\"session_id\":\"$abortveto_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Work.\"}" "$abortveto_session" >/dev/null
+printf '%s\n' "$abortveto_session" >"$abortveto_state/muse-parent-session"
+AGENTGUARD_TELEMETRY_DIR="$MOCK_BUSY_DIR/telemetry" \
+  _busy_hook agent-hook-telemetry muse "$abortveto_log" \
+  "{\"session_id\":\"$abortveto_child\",\"child_session_id\":\"$abortveto_child\",\"subagent_id\":\"$abortveto_child\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStart\"}" "$abortveto_session" >/dev/null
+_assert_file_exists 'busy: interrupted child raises the veto before abort' \
+  "$abortveto_state/muse-child-session"
+jq -e --arg child "$abortveto_child" '.children | has($child)' \
+  "$abortveto_state/busy-team/state.json" >/dev/null 2>&1
+_assert_eq 'busy: interrupted child records its team entry before abort' 0 "$?"
+abortveto_before=$(wc -l <"$abortveto_log" | tr -d ' ')
+AGENTGUARD_TELEMETRY_DIR="$MOCK_BUSY_DIR/telemetry" \
+  _busy_hook agent-hook-telemetry muse "$abortveto_log" \
+  "{\"session_id\":\"$abortveto_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"Interrupt\"}" "$abortveto_session" >/dev/null
+_assert_file_missing 'busy: Interrupt reaps the veto of a cancelled child' \
+  "$abortveto_state/muse-child-session"
+_assert_path_missing 'busy: Interrupt reaps entries of a cancelled child' \
+  "$abortveto_state/muse-child"
+jq -e '.children | length == 0' "$abortveto_state/busy-team/state.json" >/dev/null 2>&1
+_assert_eq 'busy: Interrupt retires the cancelled team entry' 0 "$?"
+jq -e '.ended == true' "$abortveto_state/busy-team/state.json" >/dev/null 2>&1
+_assert_eq 'busy: Interrupt ends the killed team rather than clearing it' 0 "$?"
+_assert_contains 'busy: Interrupt clears the mark past a cancelled child' \
+  'clear busy' "$(tail -n +"$((abortveto_before + 1))" "$abortveto_log")"
+AGENTGUARD_TELEMETRY_DIR="$MOCK_BUSY_DIR/telemetry" \
+  _busy_hook agent-hook-telemetry muse "$abortveto_log" \
+  "{\"session_id\":\"$abortveto_child\",\"child_session_id\":\"$abortveto_child\",\"subagent_id\":\"$abortveto_child\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStop\"}" "$abortveto_session" >/dev/null
+_assert_eq 'busy: late Stop after abort reaping exits cleanly' 0 "$?"
+_assert_file_missing 'busy: late Stop after abort reaping resurrects no veto' \
+  "$abortveto_state/muse-child-session"
+
+# A superseded Interrupt replaces nothing: with no genuine abort the
+# tracking stays for the steering turn that follows.
+abortsafe_log="$MOCK_BUSY_DIR/muse-abort-safe.log"
+abortsafe_session="$TEST_SID-muse-abort-safe"
+abortsafe_state="$TEST_TMPDIR/agentguard/hook-state/$abortsafe_session"
+abortsafe_child="$TEST_SID-muse-abort-safe-child"
+_busy_hook agent-hook-prompt-submit muse "$abortsafe_log" \
+  "{\"session_id\":\"$abortsafe_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Work.\"}" "$abortsafe_session" >/dev/null
+AGENTGUARD_TELEMETRY_DIR="$MOCK_BUSY_DIR/telemetry" \
+  _busy_hook agent-hook-telemetry muse "$abortsafe_log" \
+  "{\"session_id\":\"$abortsafe_child\",\"child_session_id\":\"$abortsafe_child\",\"subagent_id\":\"skill-reminder\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStart\"}" "$abortsafe_session" >/dev/null
+AGENTGUARD_TELEMETRY_DIR="$MOCK_BUSY_DIR/telemetry" \
+  _busy_hook agent-hook-telemetry muse "$abortsafe_log" \
+  "{\"session_id\":\"$abortsafe_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"Interrupt\",\"reason\":\"superseded\"}" "$abortsafe_session" >/dev/null
+_assert_file_exists 'busy: superseded Interrupt keeps the child veto' \
+  "$abortsafe_state/muse-child-session"
+_assert_file_exists 'busy: superseded Interrupt keeps the child entry' \
+  "$abortsafe_state/muse-child/child.$abortsafe_child"
+
+# In a child-owned dir the owner tracking stays sticky across the abort
+# so follow-up tools still route as child work.
+abortowner_log="$MOCK_BUSY_DIR/muse-abort-owner.log"
+abortowner_session="$TEST_SID-muse-abort-owner"
+abortowner_state="$TEST_TMPDIR/agentguard/hook-state/$abortowner_session"
+AGENTGUARD_TELEMETRY_DIR="$MOCK_BUSY_DIR/telemetry" \
+  _busy_hook agent-hook-telemetry muse "$abortowner_log" \
+  "{\"session_id\":\"$abortowner_session\",\"child_session_id\":\"$abortowner_session\",\"subagent_id\":\"$abortowner_session\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStart\"}" "$abortowner_session" >/dev/null
+AGENTGUARD_TELEMETRY_DIR="$MOCK_BUSY_DIR/telemetry" \
+  _busy_hook agent-hook-telemetry muse "$abortowner_log" \
+  "{\"session_id\":\"$abortowner_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"Interrupt\"}" "$abortowner_session" >/dev/null
+_assert_file_exists 'busy: owner-dir Interrupt keeps the owner entry' \
+  "$abortowner_state/muse-child/child.$abortowner_session"
+_assert_file_exists 'busy: owner-dir Interrupt keeps the sticky veto' \
+  "$abortowner_state/muse-child-session"
+
 # The mark is optional: without term-pane-mark a hook still answers normally.
 # Drop every PATH entry that provides it (this suite's no-op stub, a host
 # install) and keep the rest, whose layout differs by platform (Termux).

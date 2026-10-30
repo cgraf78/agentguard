@@ -130,6 +130,11 @@ fi
 # only hook wired to them, so it also ends the agent's busy pane mark. That is
 # a terminal display effect, not a guard, so the observe-only contract holds.
 if _hook_turn_aborted; then
+  if [ "${AGENTGUARD_NAME:-}" = muse ]; then
+    # The killed turn's children deliver no SubagentStop; retire their
+    # tracking first, or the stale veto blocks this very clear.
+    _hook_muse_child_reap_turn || true
+  fi
   _hook_pane_busy clear
 fi
 
