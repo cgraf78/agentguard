@@ -97,7 +97,7 @@ if command -v term-pane-mark >/dev/null 2>&1; then
           ;;
         SubagentStart)
           if [ "${AGENTGUARD_NAME:-}" = muse ] && _hook_mkstate "$_HOOK_STATE_DIR"; then
-            : >"$_HOOK_STATE_DIR/muse-child-session" 2>/dev/null || true
+            _hook_muse_child_begin || true
             rm -f -- "$_HOOK_STATE_DIR/muse-child-turn" 2>/dev/null || true
           fi
           case "${AGENTGUARD_NAME:-}" in codex | muse) _hook_team_busy child set || true ;; esac
@@ -105,6 +105,7 @@ if command -v term-pane-mark >/dev/null 2>&1; then
         SubagentStop)
           if [ "${AGENTGUARD_NAME:-}" = muse ]; then
             rm -f -- "$_HOOK_STATE_DIR/muse-child-turn" 2>/dev/null || true
+            _hook_muse_child_end || true
           fi
           case "${AGENTGUARD_NAME:-}" in codex | claude | muse) _hook_team_busy child clear || true ;; esac
           ;;

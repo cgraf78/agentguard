@@ -593,7 +593,8 @@ echo "=== busy pane mark ==="
 
 MOCK_BUSY_DIR=$(_tmpdir)
 _install_hook_fixture "$MOCK_BUSY_DIR" agent-hook-prompt-submit agent-hook-stop \
-  agent-hook-notification agent-hook-session-end agent-hook-telemetry
+  agent-hook-notification agent-hook-session-end agent-hook-session-start \
+  agent-hook-telemetry
 cat >"$MOCK_BUSY_DIR/bin/term-pane-mark" <<'MOCK'
 #!/usr/bin/env bash
 if [[ ${TERM_PANE_MARK_LEGACY:-0} == 1 && "$*" == *'--token '* ]]; then exit 64; fi
@@ -1016,6 +1017,139 @@ _busy_hook agent-hook-telemetry muse "$muse_child_log" \
 _busy_hook agent-hook-telemetry muse "$muse_child_log" \
   "{\"session_id\":\"$muse_child_session\",\"turn_id\":\"child-a\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"read_file\"}" "$muse_child_session" >/dev/null
 _assert_file_missing 'busy: Muse child tool cannot leave a root mark stuck' "$muse_child_log"
+
+# Production Muse runs every hook under one session key (MUSE_SESSION_ID), so
+# root and child hooks share one state dir. Payload shapes below mirror
+# captured production envelopes: child Start/Stop carry both session ids
+# plus a subagent name, child tools carry the child session id only. A
+# finished child must release the foreground veto there; otherwise the
+# first subagent of a session silences every later bell and freezes the
+# busy mark on. Team-mark mapping cannot resolve here — _busy_hook wraps
+# each call in a fresh process, so the PPID-keyed owner map never hits —
+# which pins child tools as team no-ops, as in production for named
+# internal children.
+shared_log="$MOCK_BUSY_DIR/muse-shared-child.log"
+shared_session="$TEST_SID-muse-shared"
+shared_child_a="$TEST_SID-muse-shared-child-a"
+shared_child_b="$TEST_SID-muse-shared-child-b"
+shared_state="$TEST_TMPDIR/agentguard/hook-state/$shared_session"
+_busy_hook agent-hook-prompt-submit muse "$shared_log" \
+  "{\"session_id\":\"$shared_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Work.\"}" "$shared_session" >/dev/null
+_assert_contains 'busy: shared-key Muse root prompt sets its mark' \
+  'set busy' "$(cat "$shared_log")"
+_busy_hook agent-hook-telemetry muse "$shared_log" \
+  "{\"session_id\":\"$shared_child_a\",\"child_session_id\":\"$shared_child_a\",\"subagent_id\":\"skill-reminder\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStart\"}" "$shared_session" >/dev/null
+_busy_hook agent-hook-telemetry muse "$shared_log" \
+  "{\"session_id\":\"$shared_child_b\",\"child_session_id\":\"$shared_child_b\",\"subagent_id\":\"skill-reminder\",\"turn_id\":\"child-b\",\"hook_event_name\":\"SubagentStart\"}" "$shared_session" >/dev/null
+_assert_file_exists 'busy: visiting Muse Starts raise the veto' \
+  "$shared_state/muse-child-session"
+shared_before=$(wc -l <"$shared_log" | tr -d ' ')
+_busy_hook agent-hook-telemetry muse "$shared_log" \
+  "{\"session_id\":\"$shared_child_a\",\"turn_id\":\"child-a\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"read_file\"}" "$shared_session" >/dev/null
+_assert_eq 'busy: shared-key Muse child tool leaves the root mark alone' \
+  "$shared_before" "$(wc -l <"$shared_log" | tr -d ' ')"
+_busy_hook agent-hook-telemetry muse "$shared_log" \
+  "{\"session_id\":\"$shared_child_a\",\"child_session_id\":\"$shared_child_a\",\"subagent_id\":\"skill-reminder\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStop\"}" "$shared_session" >/dev/null
+shared_before=$(wc -l <"$shared_log" | tr -d ' ')
+_busy_hook agent-hook-stop muse "$shared_log" \
+  "{\"session_id\":\"$shared_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"Stop\"}" "$shared_session" >/dev/null
+_assert_file_missing 'busy: root Stop stays silent while a child still runs' \
+  "$shared_log.notify"
+_assert_not_contains 'busy: root Stop retains the mark while a child still runs' \
+  'clear busy' "$(tail -n +"$((shared_before + 1))" "$shared_log")"
+_busy_hook agent-hook-telemetry muse "$shared_log" \
+  "{\"session_id\":\"$shared_child_b\",\"child_session_id\":\"$shared_child_b\",\"subagent_id\":\"skill-reminder\",\"turn_id\":\"child-b\",\"hook_event_name\":\"SubagentStop\"}" "$shared_session" >/dev/null
+_assert_file_missing 'busy: last shared-key child Stop releases the veto' \
+  "$shared_state/muse-child-session"
+shared_before=$(wc -l <"$shared_log" | tr -d ' ')
+_busy_hook agent-hook-stop muse "$shared_log" \
+  "{\"session_id\":\"$shared_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"Stop\"}" "$shared_session" >/dev/null
+_assert_eq 'busy: drained Muse children restore the completion bell' 1 \
+  "$(wc -l <"$shared_log.notify" | tr -d ' ')"
+_assert_contains 'busy: drained Muse children restore the busy clear' \
+  'clear busy' "$(tail -n +"$((shared_before + 1))" "$shared_log")"
+shared_before=$(wc -l <"$shared_log" | tr -d ' ')
+_busy_hook agent-hook-prompt-submit muse "$shared_log" \
+  "{\"session_id\":\"$shared_session\",\"turn_id\":\"root-b\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"More.\"}" "$shared_session" >/dev/null
+_assert_contains 'busy: next Muse turn rearms after the drain' \
+  'set busy' "$(tail -n +"$((shared_before + 1))" "$shared_log")"
+
+# The complement: a child that owns its state dir keeps the historical
+# sticky veto after its Stop, so follow-up tools without a new
+# SubagentStart still route as child work (see muse-busy-team.py).
+owner_log="$MOCK_BUSY_DIR/muse-owner-child.log"
+owner_session="$TEST_SID-muse-owner"
+owner_state="$TEST_TMPDIR/agentguard/hook-state/$owner_session"
+_busy_hook agent-hook-telemetry muse "$owner_log" \
+  "{\"session_id\":\"$owner_session\",\"child_session_id\":\"$owner_session\",\"subagent_id\":\"$owner_session\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStart\"}" "$owner_session" >/dev/null
+_busy_hook agent-hook-telemetry muse "$owner_log" \
+  "{\"session_id\":\"$owner_session\",\"child_session_id\":\"$owner_session\",\"subagent_id\":\"$owner_session\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStop\"}" "$owner_session" >/dev/null
+_assert_file_exists 'busy: owning Muse Stop keeps its sticky veto' \
+  "$owner_state/muse-child-session"
+
+# Untrackable child ids fail closed: the veto holds and no entry — escaped
+# or otherwise — is written. A later well-formed visiting Stop still heals.
+badid_log="$MOCK_BUSY_DIR/muse-badid.log"
+badid_session="$TEST_SID-muse-badid"
+badid_state="$TEST_TMPDIR/agentguard/hook-state/$badid_session"
+for badid_fields in \
+  '"child_session_id":"../escape","session_id":"../escape"' \
+  '"child_session_id":"a/b","session_id":"a/b"' \
+  '"child_session_id":"","session_id":123' \
+  '"child_session_id":"a\nb","session_id":"a\nb"' \
+  '"child_session_id":null'; do
+  _busy_hook agent-hook-telemetry muse "$badid_log" \
+    "{\"hook_event_name\":\"SubagentStart\",$badid_fields}" "$badid_session" >/dev/null
+done
+_assert_file_exists 'busy: untracked Muse Start still vetoes' \
+  "$badid_state/muse-child-session"
+_assert_file_missing 'busy: unsafe child ids create no entries' \
+  "$badid_state/muse-child"
+_assert_file_missing 'busy: unsafe child ids escape no files' \
+  "$badid_state/escape"
+_busy_hook agent-hook-telemetry muse "$badid_log" \
+  '{"hook_event_name":"SubagentStop","child_session_id":"../escape","session_id":"../escape"}' "$badid_session" >/dev/null
+_assert_file_exists 'busy: unsafe child Stop cannot drain the veto' \
+  "$badid_state/muse-child-session"
+_busy_hook agent-hook-telemetry muse "$badid_log" \
+  "{\"hook_event_name\":\"SubagentStart\",\"child_session_id\":\"$badid_session-healer\",\"session_id\":\"$badid_session-healer\"}" "$badid_session" >/dev/null
+_busy_hook agent-hook-telemetry muse "$badid_log" \
+  "{\"hook_event_name\":\"SubagentStop\",\"child_session_id\":\"$badid_session-healer\",\"session_id\":\"$badid_session-healer\"}" "$badid_session" >/dev/null
+_assert_file_missing 'busy: valid visiting Stop heals after unsafe ids' \
+  "$badid_state/muse-child-session"
+
+# A pre-fix bare veto (no entries dir) drains on the first visiting Stop,
+# so upgraded sessions recover instead of staying silent forever.
+legacy_log="$MOCK_BUSY_DIR/muse-legacy.log"
+legacy_session="$TEST_SID-muse-legacy"
+legacy_state="$TEST_TMPDIR/agentguard/hook-state/$legacy_session"
+legacy_child="$TEST_SID-muse-legacy-child"
+mkdir -p "$legacy_state"
+: >"$legacy_state/muse-child-session"
+_busy_hook agent-hook-telemetry muse "$legacy_log" \
+  "{\"session_id\":\"$legacy_child\",\"child_session_id\":\"$legacy_child\",\"subagent_id\":\"skill-reminder\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStop\"}" "$legacy_session" >/dev/null
+_assert_file_missing 'busy: visiting Stop heals a pre-fix bare veto' \
+  "$legacy_state/muse-child-session"
+_busy_hook agent-hook-prompt-submit muse "$legacy_log" \
+  "{\"session_id\":\"$legacy_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Work.\"}" "$legacy_session" >/dev/null
+_busy_hook agent-hook-stop muse "$legacy_log" \
+  "{\"session_id\":\"$legacy_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"Stop\"}" "$legacy_session" >/dev/null
+_assert_eq 'busy: healed session rings its completion bell' 1 \
+  "$(wc -l <"$legacy_log.notify" | tr -d ' ')"
+
+# SessionStart reaps crashed runs: entries and vetoes cannot predate the
+# session, so anything left behind belongs to a dead incarnation.
+reap_log="$MOCK_BUSY_DIR/muse-reap.log"
+reap_session="$TEST_SID-muse-reap"
+reap_state="$TEST_TMPDIR/agentguard/hook-state/$reap_session"
+mkdir -p "$reap_state/muse-child"
+: >"$reap_state/muse-child/child.stale-child"
+: >"$reap_state/muse-child-session"
+_busy_hook agent-hook-session-start muse "$reap_log" '{}' "$reap_session" >/dev/null
+_assert_file_missing 'busy: session start reaps stale child entries' \
+  "$reap_state/muse-child"
+_assert_file_missing 'busy: session start reaps a stale veto' \
+  "$reap_state/muse-child-session"
 python3 "$AGENTGUARD_ROOT/test/muse-busy-team.py" "$MOCK_BUSY_DIR" \
   "$TEST_SID-muse-team"
 _assert_eq 'busy: Muse parent and child turns share one owned mark' 0 "$?"
