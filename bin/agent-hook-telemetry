@@ -68,7 +68,19 @@ if command -v term-pane-mark >/dev/null 2>&1; then
           _busy_child=$(printf '%s' "$_HOOK_INPUT" | jq -r '.agent_id // .agentId // empty' 2>/dev/null)
           if [ -z "$_busy_child" ] && [ "${AGENTGUARD_NAME:-}" = muse ] &&
             [ -e "$_HOOK_STATE_DIR/muse-child-session" ]; then
-            _busy_child=$(printf '%s' "$_HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+            _busy_sid=$(printf '%s' "$_HOOK_INPUT" | jq -r '(.session_id | strings) // empty' 2>/dev/null)
+            # A shared-dir tool carrying the root session id is foreground
+            # work even while a child is active; only a visiting child id,
+            # or a dir owned by a child (sticky owner entry), routes as
+            # child work. Anything else stays untracked and veto-held. The
+            # owner branch is pinned by the muse-busy-team.py follow-up
+            # rearm, which routes without a fresh SubagentStart.
+            if [ -n "$_busy_sid" ] && [ "$_busy_sid" != "$_HOOK_SESSION_KEY" ]; then
+              _busy_child="$_busy_sid"
+            elif [ -n "$_busy_sid" ] &&
+              [ -e "$_HOOK_STATE_DIR/muse-child/child.$_HOOK_SESSION_KEY" ]; then
+              _busy_child="$_busy_sid"
+            fi
           fi
           if [ -n "$_busy_child" ] && { [ "${AGENTGUARD_NAME:-}" = codex ] ||
             [ "${AGENTGUARD_NAME:-}" = muse ]; }; then

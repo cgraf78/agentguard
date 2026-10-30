@@ -1074,6 +1074,68 @@ _busy_hook agent-hook-prompt-submit muse "$shared_log" \
 _assert_contains 'busy: next Muse turn rearms after the drain' \
   'set busy' "$(tail -n +"$((shared_before + 1))" "$shared_log")"
 
+# A foreground tool that runs while a child is active must still route as
+# root work: with a shared state dir the veto marker alone cannot tell a
+# root tool from a child tool, and routing it as a child records the
+# session as its own team child — an entry nothing ever removes, so the
+# busy mark survives every later Stop. Pre-create the parent mapping that
+# _busy_hook's per-call wrappers cannot establish (each hook runs under a
+# fresh wrapper pid, so the PPID-keyed owner map never hits even for UUID
+# children), so the team path is genuinely exercised; the reminder-shaped
+# child id is equivalent downstream of that seam.
+route_log="$MOCK_BUSY_DIR/muse-route.log"
+route_session="$TEST_SID-muse-route"
+route_state="$TEST_TMPDIR/agentguard/hook-state/$route_session"
+route_child="$TEST_SID-muse-route-child"
+_busy_hook agent-hook-prompt-submit muse "$route_log" \
+  "{\"session_id\":\"$route_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Work.\"}" "$route_session" >/dev/null
+printf '%s\n' "$route_session" >"$route_state/muse-parent-session"
+_busy_hook agent-hook-telemetry muse "$route_log" \
+  "{\"session_id\":\"$route_child\",\"child_session_id\":\"$route_child\",\"subagent_id\":\"skill-reminder\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStart\"}" "$route_session" >/dev/null
+route_before=$(wc -l <"$route_log" | tr -d ' ')
+_busy_hook agent-hook-telemetry muse "$route_log" \
+  "{\"session_id\":\"$route_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"read_file\"}" "$route_session" >/dev/null
+_assert_eq 'busy: foreground tool during child activity marks nothing new' \
+  "$route_before" "$(wc -l <"$route_log" | tr -d ' ')"
+jq -e --arg session "$route_session" '.children | has($session) | not' \
+  "$route_state/busy-team/state.json" >/dev/null 2>&1
+_assert_eq 'busy: foreground tool during child activity records no self-child' 0 "$?"
+jq -e --arg child "$route_child" '.children | has($child)' \
+  "$route_state/busy-team/state.json" >/dev/null 2>&1
+_assert_eq 'busy: active child keeps its team entry' 0 "$?"
+_busy_hook agent-hook-telemetry muse "$route_log" \
+  "{\"session_id\":\"$route_child\",\"child_session_id\":\"$route_child\",\"subagent_id\":\"skill-reminder\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStop\"}" "$route_session" >/dev/null
+route_before=$(wc -l <"$route_log" | tr -d ' ')
+_busy_hook agent-hook-stop muse "$route_log" \
+  "{\"session_id\":\"$route_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"Stop\"}" "$route_session" >/dev/null
+_assert_contains 'busy: Stop after routed tools clears the mark' \
+  'clear busy' "$(tail -n +"$((route_before + 1))" "$route_log")"
+
+# Untrackable tool identities stay veto-held instead of recording garbage
+# team children: a numeric session id must not become a child key, and a
+# missing one must stay silent.
+routestr_log="$MOCK_BUSY_DIR/muse-route-str.log"
+routestr_session="$TEST_SID-muse-route-str"
+routestr_state="$TEST_TMPDIR/agentguard/hook-state/$routestr_session"
+routestr_child="$TEST_SID-muse-route-str-child"
+_busy_hook agent-hook-prompt-submit muse "$routestr_log" \
+  "{\"session_id\":\"$routestr_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Work.\"}" "$routestr_session" >/dev/null
+printf '%s\n' "$routestr_session" >"$routestr_state/muse-parent-session"
+_busy_hook agent-hook-telemetry muse "$routestr_log" \
+  "{\"session_id\":\"$routestr_child\",\"child_session_id\":\"$routestr_child\",\"subagent_id\":\"skill-reminder\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStart\"}" "$routestr_session" >/dev/null
+routestr_before=$(wc -l <"$routestr_log" | tr -d ' ')
+_busy_hook agent-hook-telemetry muse "$routestr_log" \
+  '{"session_id":123,"turn_id":"root-a","hook_event_name":"PreToolUse","tool_name":"read_file"}' "$routestr_session" >/dev/null
+_assert_eq 'busy: numeric session id marks nothing new' \
+  "$routestr_before" "$(wc -l <"$routestr_log" | tr -d ' ')"
+jq -e --arg child "$routestr_child" '.children == {($child): "child-a"}' \
+  "$routestr_state/busy-team/state.json" >/dev/null 2>&1
+_assert_eq 'busy: numeric session id records no team child' 0 "$?"
+_busy_hook agent-hook-telemetry muse "$routestr_log" \
+  '{"turn_id":"root-a","hook_event_name":"PreToolUse","tool_name":"read_file"}' "$routestr_session" >/dev/null
+_assert_eq 'busy: missing session id stays veto-held' \
+  "$routestr_before" "$(wc -l <"$routestr_log" | tr -d ' ')"
+
 # The complement: a child that owns its state dir keeps the historical
 # sticky veto after its Stop, so follow-up tools without a new
 # SubagentStart still route as child work (see muse-busy-team.py).
@@ -1086,6 +1148,8 @@ _busy_hook agent-hook-telemetry muse "$owner_log" \
   "{\"session_id\":\"$owner_session\",\"child_session_id\":\"$owner_session\",\"subagent_id\":\"$owner_session\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStop\"}" "$owner_session" >/dev/null
 _assert_file_exists 'busy: owning Muse Stop keeps its sticky veto' \
   "$owner_state/muse-child-session"
+_assert_file_exists 'busy: owning Muse Stop keeps its child entry' \
+  "$owner_state/muse-child/child.$owner_session"
 
 # Untrackable child ids fail closed: the veto holds and no entry — escaped
 # or otherwise — is written. A later well-formed visiting Stop still heals.
@@ -1103,7 +1167,7 @@ for badid_fields in \
 done
 _assert_file_exists 'busy: untracked Muse Start still vetoes' \
   "$badid_state/muse-child-session"
-_assert_file_missing 'busy: unsafe child ids create no entries' \
+_assert_path_missing 'busy: unsafe child ids create no entries' \
   "$badid_state/muse-child"
 _assert_file_missing 'busy: unsafe child ids escape no files' \
   "$badid_state/escape"
@@ -1146,16 +1210,124 @@ mkdir -p "$reap_state/muse-child"
 : >"$reap_state/muse-child/child.stale-child"
 : >"$reap_state/muse-child-session"
 _busy_hook agent-hook-session-start muse "$reap_log" '{}' "$reap_session" >/dev/null
-_assert_file_missing 'busy: session start reaps stale child entries' \
+_assert_path_missing 'busy: session start reaps stale child entries' \
   "$reap_state/muse-child"
 _assert_file_missing 'busy: session start reaps a stale veto' \
   "$reap_state/muse-child-session"
+
+# A child the host cancels at turn end delivers no SubagentStop; the next
+# root prompt retires the previous turn's tracking so one missed Stop
+# cannot veto every later turn.
+reapturn_log="$MOCK_BUSY_DIR/muse-reap-turn.log"
+reapturn_session="$TEST_SID-muse-reap-turn"
+reapturn_state="$TEST_TMPDIR/agentguard/hook-state/$reapturn_session"
+reapturn_child="$TEST_SID-muse-reap-turn-child"
+_busy_hook agent-hook-prompt-submit muse "$reapturn_log" \
+  "{\"session_id\":\"$reapturn_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Work.\"}" "$reapturn_session" >/dev/null
+_busy_hook agent-hook-telemetry muse "$reapturn_log" \
+  "{\"session_id\":\"$reapturn_child\",\"child_session_id\":\"$reapturn_child\",\"subagent_id\":\"skill-reminder\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStart\"}" "$reapturn_session" >/dev/null
+_assert_file_exists 'busy: stuck child raises the veto before reaping' \
+  "$reapturn_state/muse-child-session"
+_busy_hook agent-hook-stop muse "$reapturn_log" \
+  "{\"session_id\":\"$reapturn_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"Stop\"}" "$reapturn_session" >/dev/null
+_assert_file_missing 'busy: Stop stays silent while the stuck child holds the veto' \
+  "$reapturn_log.notify"
+reapturn_before=$(wc -l <"$reapturn_log" | tr -d ' ')
+_busy_hook agent-hook-prompt-submit muse "$reapturn_log" \
+  "{\"session_id\":\"$reapturn_session\",\"turn_id\":\"root-b\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"More.\"}" "$reapturn_session" >/dev/null
+_assert_file_missing 'busy: new root prompt reaps the veto of a missed Stop' \
+  "$reapturn_state/muse-child-session"
+_assert_path_missing 'busy: new root prompt reaps entries of a missed Stop' \
+  "$reapturn_state/muse-child"
+_assert_contains 'busy: reaped turn rearms its mark' \
+  'set busy' "$(tail -n +"$((reapturn_before + 1))" "$reapturn_log")"
+_busy_hook agent-hook-stop muse "$reapturn_log" \
+  "{\"session_id\":\"$reapturn_session\",\"turn_id\":\"root-b\",\"hook_event_name\":\"Stop\"}" "$reapturn_session" >/dev/null
+_assert_eq 'busy: reaped turn rings its completion bell' 1 \
+  "$(wc -l <"$reapturn_log.notify" | tr -d ' ')"
+_busy_hook agent-hook-telemetry muse "$reapturn_log" \
+  "{\"session_id\":\"$reapturn_child\",\"child_session_id\":\"$reapturn_child\",\"subagent_id\":\"skill-reminder\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStop\"}" "$reapturn_session" >/dev/null
+_assert_eq 'busy: late Stop after reaping exits cleanly' 0 "$?"
+_assert_file_missing 'busy: late Stop after reaping resurrects no veto' \
+  "$reapturn_state/muse-child-session"
+_assert_path_missing 'busy: late Stop after reaping resurrects no entries' \
+  "$reapturn_state/muse-child"
+_busy_hook agent-hook-telemetry muse "$reapturn_log" \
+  "{\"session_id\":\"$reapturn_child\",\"child_session_id\":\"$reapturn_child\",\"subagent_id\":\"skill-reminder\",\"turn_id\":\"child-b\",\"hook_event_name\":\"SubagentStart\"}" "$reapturn_session" >/dev/null
+_busy_hook agent-hook-telemetry muse "$reapturn_log" \
+  "{\"session_id\":\"$reapturn_child\",\"child_session_id\":\"$reapturn_child\",\"subagent_id\":\"skill-reminder\",\"turn_id\":\"child-b\",\"hook_event_name\":\"SubagentStop\"}" "$reapturn_session" >/dev/null
+_assert_file_missing 'busy: lifecycle after reaping still drains' \
+  "$reapturn_state/muse-child-session"
+
+# The mapped variant: a team-recorded child cancelled without a Stop must
+# not retain the mark past the turn that reaps it.
+reapteam_log="$MOCK_BUSY_DIR/muse-reap-team.log"
+reapteam_session="$TEST_SID-muse-reap-team"
+reapteam_state="$TEST_TMPDIR/agentguard/hook-state/$reapteam_session"
+reapteam_child="$TEST_SID-muse-reap-team-child"
+_busy_hook agent-hook-prompt-submit muse "$reapteam_log" \
+  "{\"session_id\":\"$reapteam_session\",\"turn_id\":\"root-a\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Work.\"}" "$reapteam_session" >/dev/null
+printf '%s\n' "$reapteam_session" >"$reapteam_state/muse-parent-session"
+_busy_hook agent-hook-telemetry muse "$reapteam_log" \
+  "{\"session_id\":\"$reapteam_child\",\"child_session_id\":\"$reapteam_child\",\"subagent_id\":\"$reapteam_child\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStart\"}" "$reapteam_session" >/dev/null
+jq -e --arg child "$reapteam_child" '.children | has($child)' \
+  "$reapteam_state/busy-team/state.json" >/dev/null 2>&1
+_assert_eq 'busy: mapped child records its team entry' 0 "$?"
+_busy_hook agent-hook-prompt-submit muse "$reapteam_log" \
+  "{\"session_id\":\"$reapteam_session\",\"turn_id\":\"root-b\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"More.\"}" "$reapteam_session" >/dev/null
+jq -e '.children | length == 0' "$reapteam_state/busy-team/state.json" >/dev/null 2>&1
+_assert_eq 'busy: reaping prompt retires the cancelled team entry' 0 "$?"
+reapteam_before=$(wc -l <"$reapteam_log" | tr -d ' ')
+_busy_hook agent-hook-stop muse "$reapteam_log" \
+  "{\"session_id\":\"$reapteam_session\",\"turn_id\":\"root-b\",\"hook_event_name\":\"Stop\"}" "$reapteam_session" >/dev/null
+_assert_contains 'busy: Stop after team reaping clears the mark' \
+  'clear busy' "$(tail -n +"$((reapteam_before + 1))" "$reapteam_log")"
+
+# A visiting entry in a child-owned dir is still retired; only the owner
+# tracking itself stays sticky.
+ownvisit_log="$MOCK_BUSY_DIR/muse-owner-visit.log"
+ownvisit_session="$TEST_SID-muse-owner-visit"
+ownvisit_state="$TEST_TMPDIR/agentguard/hook-state/$ownvisit_session"
+ownvisit_child="$TEST_SID-muse-owner-visit-child"
+_busy_hook agent-hook-telemetry muse "$ownvisit_log" \
+  "{\"session_id\":\"$ownvisit_session\",\"child_session_id\":\"$ownvisit_session\",\"subagent_id\":\"$ownvisit_session\",\"turn_id\":\"child-a\",\"hook_event_name\":\"SubagentStart\"}" "$ownvisit_session" >/dev/null
+_busy_hook agent-hook-telemetry muse "$ownvisit_log" \
+  "{\"session_id\":\"$ownvisit_child\",\"child_session_id\":\"$ownvisit_child\",\"subagent_id\":\"$ownvisit_child\",\"turn_id\":\"child-b\",\"hook_event_name\":\"SubagentStart\"}" "$ownvisit_session" >/dev/null
+_busy_hook agent-hook-prompt-submit muse "$ownvisit_log" \
+  "{\"session_id\":\"$ownvisit_session\",\"turn_id\":\"root-b\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"More.\"}" "$ownvisit_session" >/dev/null
+_assert_file_exists 'busy: owner-dir prompt keeps the owner entry' \
+  "$ownvisit_state/muse-child/child.$ownvisit_session"
+_assert_file_missing 'busy: owner-dir prompt retires visiting entries' \
+  "$ownvisit_state/muse-child/child.$ownvisit_child"
+_assert_file_exists 'busy: owner-dir prompt keeps the sticky veto' \
+  "$ownvisit_state/muse-child-session"
+
+# A leftover self-child from before the routing fix is pruned by the next
+# root set instead of retaining the mark forever. Driven through a
+# notification-started turn (tool without a prompt) so the prompt-time
+# team wipe cannot mask the prune itself.
+prune_log="$MOCK_BUSY_DIR/muse-prune.log"
+prune_session="$TEST_SID-muse-prune"
+prune_state="$TEST_TMPDIR/agentguard/hook-state/$prune_session"
+mkdir -p "$prune_state/busy-team"
+printf '{"root":"old","last_root":"old","children":{"%s":"old"},"finished":[],"ended":false,"pending":false}' \
+  "$prune_session" >"$prune_state/busy-team/state.json"
+_busy_hook agent-hook-telemetry muse "$prune_log" \
+  "{\"session_id\":\"$prune_session\",\"turn_id\":\"notif-a\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"read_file\"}" "$prune_session" >/dev/null
+jq -e --arg session "$prune_session" '.children | has($session) | not' \
+  "$prune_state/busy-team/state.json" >/dev/null 2>&1
+_assert_eq 'busy: root set prunes a self-child' 0 "$?"
+_assert_eq 'busy: root set still records its turn' 'notif-a' \
+  "$(jq -r '.root' "$prune_state/busy-team/state.json")"
 python3 "$AGENTGUARD_ROOT/test/muse-busy-team.py" "$MOCK_BUSY_DIR" \
   "$TEST_SID-muse-team"
 _assert_eq 'busy: Muse parent and child turns share one owned mark' 0 "$?"
 python3 "$AGENTGUARD_ROOT/test/busy-team-owner.py" "$MOCK_BUSY_DIR" \
   "$TEST_SID-owner" "$AGENTGUARD_ROOT/lib/agentguard/busy-team.py"
 _assert_eq 'busy: late SessionEnd cannot clear a resumed team' 0 "$?"
+python3 "$AGENTGUARD_ROOT/test/busy-team-self.py" "$MOCK_BUSY_DIR" \
+  "$TEST_SID-self" "$AGENTGUARD_ROOT/lib/agentguard/busy-team.py"
+_assert_eq 'busy: team rejects and prunes self-children' 0 "$?"
 
 ephemeral_child_log="$MOCK_BUSY_DIR/codex-ephemeral-child.log"
 _busy_hook agent-hook-telemetry codex "$ephemeral_child_log" \

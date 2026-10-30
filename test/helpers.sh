@@ -165,6 +165,24 @@ _assert_file_missing() {
   fi
 }
 
+_assert_path_exists() {
+  local desc="$1" path="$2"
+  if [[ -e "$path" ]]; then
+    _pass "$desc"
+  else
+    _fail "$desc (path not found: $path)"
+  fi
+}
+
+_assert_path_missing() {
+  local desc="$1" path="$2"
+  if [[ ! -e "$path" ]]; then
+    _pass "$desc"
+  else
+    _fail "$desc (path should not exist: $path)"
+  fi
+}
+
 _assert_file_content() {
   local desc="$1" expected="$2" path="$3"
   if [[ -f "$path" ]]; then

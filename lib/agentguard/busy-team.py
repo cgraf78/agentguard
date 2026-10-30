@@ -212,6 +212,11 @@ def run() -> int:
                     state["last_root"] = turn
                     state["ended"] = False
                     state["owner"] = owner
+                    if agent == "muse":
+                        # Reap a legacy self-child: no legitimate path
+                        # records the session as its own child, and the
+                        # entry would retain the mark past every Stop.
+                        state["children"].pop(session_key, None)
                     if agent == "claude" and payload.get("hook_event_name") == "UserPromptSubmit":
                         # A later user request can resume an existing task
                         # ID. Keep tombstones only within one request.
@@ -238,6 +243,10 @@ def run() -> int:
                                 for task in snapshot
                                 if task not in state["finished"]
                             }
+                    if owns_turn and agent == "muse":
+                        # Self-entries are never legitimate; drop them with
+                        # the owning turn instead of retaining the mark.
+                        state["children"].pop(session_key, None)
                     if state.get("owner") is None:
                         state["owner"] = owner
             elif agent == "claude":
@@ -263,7 +272,10 @@ def run() -> int:
                     for task in missing:
                         del state["children"][task]
             elif action == "set":
-                state["children"][child] = turn
+                if agent == "muse" and child == session_key:
+                    pass  # A session cannot be its own child; ignore.
+                else:
+                    state["children"][child] = turn
             elif state["children"].get(child) == turn:
                 del state["children"][child]
             after = (
