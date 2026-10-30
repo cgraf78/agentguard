@@ -156,6 +156,7 @@ telemetry_only_events = {
         "StopFailure",
         "Interrupt",
     ],
+    "grok": ["StopFailure", "StopCancelled"],
 }
 tool_events = {
     "PreToolUse", "PostToolUse", "PostToolUseFailure", "PermissionRequest",

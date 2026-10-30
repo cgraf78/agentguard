@@ -47,7 +47,21 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
 # END GENERATED LAUNCHER BOOTSTRAP
 
 # The agent is exiting, so whatever turn it was in is over.
+_hook_team_busy root end || true
 _hook_pane_busy clear
+# Teardown callbacks may omit the final prompt ID. Recover this session's
+# exact last token; a late end must not erase another session's mark.
+if command -v term-pane-mark >/dev/null 2>&1 && _hook_activity_is_foreground; then
+  _busy_cache="$_HOOK_STATE_DIR/busy-mark-turn"
+  if [ -f "$_busy_cache" ]; then
+    IFS= read -r _busy_cached <"$_busy_cache" || true
+    _busy_token="${_busy_cached#*:}"
+    if [ "$_busy_token" != "$_busy_cached" ] && [ -n "$_busy_token" ] &&
+      [[ "$_busy_token" =~ ^[A-Za-z0-9:._-]+$ ]]; then
+      term-pane-mark clear busy --owner "$PPID" --token "$_busy_token" >/dev/null 2>&1 || true
+    fi
+  fi
+fi
 _hook_read_input || exit 0
 sid=$(printf '%s' "$_HOOK_INPUT" | jq -r '.session_id // .sessionId // empty')
 tp=$(printf '%s' "$_HOOK_INPUT" | jq -r '.transcript_path // .transcriptPath // empty')

@@ -109,6 +109,7 @@ _install_hook_fixture() {
 
   mkdir -p "$install_dir/bin" "$install_dir/lib/agentguard"
   cp "$AGENTGUARD_ROOT"/lib/agentguard/*.sh "$install_dir/lib/agentguard/"
+  cp "$AGENTGUARD_ROOT"/lib/agentguard/busy-team.py "$install_dir/lib/agentguard/"
   for hook in "$@"; do
     cp "$BIN_DIR/$hook" "$install_dir/bin/$hook"
     chmod +x "$install_dir/bin/$hook"

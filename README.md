@@ -343,9 +343,11 @@ context when its config is available through `HIVE_MEMORY_CONFIG`, an absolute
 `XDG_CONFIG_HOME`, or `~/.config`; `sl`, `git`, and `jj` enable repository
 status context; `term-notify-sound` plays the `agent-hook-stop` and
 `agent-hook-notification` terminal notifications; `term-pane-mark` marks the
-agent's tmux pane busy from a submitted prompt until the turn ends, changed
-only by the pane terminal's foreground agent so agents it launches cannot
-clear it early (both commands come from
+agent's tmux pane busy from a submitted prompt or the first tool of a
+notification-started turn. Background child work keeps the pane busy when the
+host exposes a reliable parent task snapshot or child turn identity. The
+pane terminal's foreground agent owns the mark, so launched agents cannot
+clear it independently (both commands come from
 [tmux-tools](https://github.com/cgraf78/tmux-tools)); and
 `claude-templates` enables a Claude-specific maintenance hook when that
 command is installed.
@@ -357,6 +359,9 @@ in a detached backend, which cannot identify an attached TUI from process
 ancestry; such hooks deliberately mark no pane. Interactive `codex --no-daemon`
 keeps the hook parent in the foreground terminal and supports this integration
 without guessing a session-to-terminal association.
+Grok team completion relies on its next parent Stop reporting the current
+background task list; the child Stop payload has no stable task ID to match
+against that list.
 
 The launcher trust boundary includes the fixed platform Bash, awk, and env
 paths and the absolute Bash candidate files above. Termux uses its

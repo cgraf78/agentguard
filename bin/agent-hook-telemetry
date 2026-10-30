@@ -47,24 +47,83 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
 }
 # END GENERATED LAUNCHER BOOTSTRAP
 
-_agentguard_telemetry_enabled || {
+if ! _agentguard_telemetry_enabled && ! command -v term-pane-mark >/dev/null 2>&1; then
   printf '{}\n'
   exit 0
-}
+fi
 
 # Without a payload there is nothing to audit beyond the invocation itself;
 # the trap still records that, so fall through rather than exiting early.
 _hook_read_input || true
 
+# A message from a teammate can start a foreground turn without a prompt
+# submit. PreToolUse is the first universal hook that can observe that work;
+# the pane helper caches the turn identity to avoid touching tmux per tool.
+if command -v term-pane-mark >/dev/null 2>&1; then
+  case "${_HOOK_INPUT:-}" in
+    *PreToolUse* | *SubagentStart* | *SubagentStop*)
+      _busy_event=$(printf '%s' "$_HOOK_INPUT" | jq -r '.hook_event_name // .hookEventName // empty' 2>/dev/null)
+      case "$_busy_event" in
+        PreToolUse)
+          _busy_child=$(printf '%s' "$_HOOK_INPUT" | jq -r '.agent_id // .agentId // empty' 2>/dev/null)
+          if [ -z "$_busy_child" ] && [ "${AGENTGUARD_NAME:-}" = muse ] &&
+            [ -e "$_HOOK_STATE_DIR/muse-child-session" ]; then
+            _busy_child=$(printf '%s' "$_HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+          fi
+          if [ -n "$_busy_child" ] && { [ "${AGENTGUARD_NAME:-}" = codex ] ||
+            [ "${AGENTGUARD_NAME:-}" = muse ]; }; then
+            _busy_turn=$(printf '%s' "$_HOOK_INPUT" | jq -r '.turn_id // .turnId // empty' 2>/dev/null)
+            _busy_cached=''
+            _busy_cache_file="$_HOOK_STATE_DIR/busy-team/child.$_busy_child"
+            if [ "${AGENTGUARD_NAME:-}" = muse ]; then
+              _busy_cache_file="$_HOOK_STATE_DIR/muse-child-turn"
+            fi
+            case "$_busy_child" in
+              *[!A-Za-z0-9._-]* | '') ;;
+              *)
+                if [ -f "$_busy_cache_file" ]; then
+                  IFS= read -r _busy_cached <"$_busy_cache_file" || true
+                fi
+                ;;
+            esac
+            if [ -z "$_busy_turn" ] || [ "$_busy_cached" != "$_busy_turn" ]; then
+              if _hook_team_busy child set && [ "${AGENTGUARD_NAME:-}" = muse ]; then
+                _hook_busy_cache_publish "$_busy_cache_file" "$_busy_turn" || true
+              fi
+            fi
+          elif [ -z "$_busy_child" ]; then
+            _hook_pane_busy set
+          fi
+          ;;
+        SubagentStart)
+          if [ "${AGENTGUARD_NAME:-}" = muse ] && _hook_mkstate "$_HOOK_STATE_DIR"; then
+            : >"$_HOOK_STATE_DIR/muse-child-session" 2>/dev/null || true
+            rm -f -- "$_HOOK_STATE_DIR/muse-child-turn" 2>/dev/null || true
+          fi
+          case "${AGENTGUARD_NAME:-}" in codex | muse) _hook_team_busy child set || true ;; esac
+          ;;
+        SubagentStop)
+          if [ "${AGENTGUARD_NAME:-}" = muse ]; then
+            rm -f -- "$_HOOK_STATE_DIR/muse-child-turn" 2>/dev/null || true
+          fi
+          case "${AGENTGUARD_NAME:-}" in codex | claude | muse) _hook_team_busy child clear || true ;; esac
+          ;;
+      esac
+      ;;
+  esac
+fi
+
 # StopFailure and Interrupt end a turn without a Stop callback, and this is the
 # only hook wired to them, so it also ends the agent's busy pane mark. That is
 # a terminal display effect, not a guard, so the observe-only contract holds.
-# With recording disabled the hook exits above without reading its payload, to
-# stay free on every tool call; the mark then lasts until the next Stop or
-# session end.
 if _hook_turn_aborted; then
   _hook_pane_busy clear
 fi
+
+_agentguard_telemetry_enabled || {
+  printf '{}\n'
+  exit 0
+}
 
 # Retention runs around session start and in the background: a full-tree
 # scan must never delay the host's first turn, and once per session is
