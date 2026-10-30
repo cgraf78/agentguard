@@ -1048,6 +1048,92 @@ _hook_turn_aborted() {
   ' >/dev/null 2>&1
 }
 
+# Muse-only child tracking for the foreground veto below. Production Muse runs
+# every hook under one session key (MUSE_SESSION_ID), so a child's
+# SubagentStart marker lands in the root's own state dir. Each active child
+# therefore owns one entry under muse-child/, and the veto marker is lifted
+# once the last visiting child stops; without the drain, the first subagent
+# of a session would silence every later bell and freeze the busy mark on.
+# A child that owns its state dir (its id is the session key) keeps the
+# historical sticky marker: its follow-up tools arrive without a new
+# SubagentStart and still need the veto to route as child work. A pre-fix
+# bare marker (no entries dir) drains on the first visiting Stop, which
+# heals single-child sessions exactly and may release one turn early while
+# legacy siblings still run — strictly better than stuck forever.
+_hook_muse_child_id() {
+  local _muse_child_raw='' _muse_child_stripped=''
+  [ "${AGENTGUARD_NAME:-}" = muse ] || return 1
+  [ -n "${_HOOK_INPUT:-}" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  _muse_child_raw=$(printf '%s' "$_HOOK_INPUT" |
+    jq -r '(.child_session_id | strings) // (.session_id | strings) // empty' 2>/dev/null) || return 1
+  # Reject rather than normalize: collapsing distinct payloads onto one entry
+  # would undercount concurrent children.
+  _muse_child_stripped=${_muse_child_raw//$'\r'/}
+  _muse_child_stripped=${_muse_child_stripped//$'\n'/}
+  [ "$_muse_child_stripped" = "$_muse_child_raw" ] || return 1
+  _hook_session_key_safe "$_muse_child_raw" || return 1
+  printf -v "$1" '%s' "$_muse_child_raw"
+}
+
+# Whether any Muse child entry is recorded. Entry names carry a fixed prefix,
+# so no entry can be a dotfile the glob would miss.
+_hook_muse_child_active() {
+  local _muse_child_entry
+  [ -d "$_HOOK_STATE_DIR/muse-child" ] || return 1
+  for _muse_child_entry in "$_HOOK_STATE_DIR/muse-child"/*; do
+    [ -e "$_muse_child_entry" ] || continue
+    return 0
+  done
+  return 1
+}
+
+_hook_muse_child_begin() {
+  local _muse_child_id=''
+  [ "${AGENTGUARD_NAME:-}" = muse ] || return 0
+  _hook_hm_read_input
+  _hook_mkstate "$_HOOK_STATE_DIR" || return 1
+  # Entry before veto: a concurrent last-Stop that scans between the two
+  # still converges, because the veto touch below lands after its removal.
+  if _hook_muse_child_id _muse_child_id; then
+    if _hook_mkstate "$_HOOK_STATE_DIR/muse-child"; then
+      : >"$_HOOK_STATE_DIR/muse-child/child.$_muse_child_id" 2>/dev/null || true
+    fi
+  fi
+  # Untracked children (no jq, malformed id, unwritable entries) keep the
+  # historical sticky veto: a Start was observed, so silence errs safe.
+  : >"$_HOOK_STATE_DIR/muse-child-session" 2>/dev/null || true
+}
+
+_hook_muse_child_end() {
+  local _muse_child_id=''
+  [ "${AGENTGUARD_NAME:-}" = muse ] || return 0
+  _hook_hm_read_input
+  _hook_muse_child_id _muse_child_id || return 0
+  rm -f -- "$_HOOK_STATE_DIR/muse-child/child.$_muse_child_id" 2>/dev/null || true
+  [ "$_muse_child_id" != "$_HOOK_SESSION_KEY" ] || return 0
+  if _hook_muse_child_active; then
+    return 0
+  fi
+  rm -f -- "$_HOOK_STATE_DIR/muse-child-session" 2>/dev/null || true
+  # A SubagentStart that landed between the scan and the removal restores
+  # the veto itself when its entry is already visible; re-check so a win
+  # there cannot leave a live child veto-less.
+  if _hook_muse_child_active; then
+    : >"$_HOOK_STATE_DIR/muse-child-session" 2>/dev/null || true
+  fi
+}
+
+# SessionStart reaps Muse child tracking: no child can predate its session,
+# so any entries or veto left here belong to a crashed or pre-fix run. Same
+# rationale as the churn-bypass clear in agent-hook-session-start.
+_hook_muse_child_reap() {
+  [ "${AGENTGUARD_NAME:-}" = muse ] || return 0
+  [ -d "$_HOOK_STATE_DIR" ] || return 0
+  rm -rf -- "$_HOOK_STATE_DIR/muse-child" 2>/dev/null || true
+  rm -f -- "$_HOOK_STATE_DIR/muse-child-session" 2>/dev/null || true
+}
+
 # Return whether this lifecycle event belongs to foreground work. Busy marks,
 # notification settlement, and prompt rearming must share this admission rule.
 # Codex runs background agents (memory consolidation, task-title
