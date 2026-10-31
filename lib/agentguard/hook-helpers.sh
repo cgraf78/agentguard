@@ -1332,6 +1332,26 @@ _hook_team_busy() {
   return 2
 }
 
+# Return whether child agent $1 (a payload agent_id) has a turn in progress in
+# this session, per the team state above: a Claude child counts from its
+# SubagentStart to its SubagentStop. Extensions use it to defer to a child
+# that still owns some follow-up work. Every doubt reads as "not working":
+# no team state (no child running, or no term-pane-mark, so busy marks never
+# ran), unreadable or malformed state, state from a release that recorded no
+# start times, and a last start six hours old or more, so a child whose Stop
+# never arrived cannot defer the parent forever.
+_hook_child_working() {
+  local child="${1:-}" file="${_HOOK_STATE_DIR:-}/busy-team/state.json" now=''
+  [ -n "$child" ] && [ -n "${_HOOK_STATE_DIR:-}" ] && [ -f "$file" ] && [ -r "$file" ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  _hook_now now || return 1
+  jq -e --arg child "$child" --argjson now "$now" '
+    (.children | type == "object" and has($child))
+    and (.child_started | type == "object")
+    and (.child_started[$child] | type == "number" and . <= $now and $now - . < 21600)
+  ' "$file" >/dev/null 2>&1 || return 1
+}
+
 _hook_busy_cache_publish() (
   local cache_file="$1" value="$2" candidate=''
   _hook_mkstate "${cache_file%/*}" || return 1

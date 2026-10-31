@@ -957,6 +957,38 @@ _assert_eq 'busy: current snapshot retires the unlisted subagent' 0 "$?"
 _claude_child Stop b asub-b '[{"id":"asub-b","type":"subagent","status":"running"}]'
 _assert_file_missing 'busy: last Claude child Stop clears the team' "$cb_state"
 
+# Extensions ask _hook_child_working whether a child still owns its work. It
+# reads the team state these hooks keep, so a child counts as working exactly
+# from its SubagentStart to its SubagentStop, across parent Stops.
+_claude_child_working() {
+  bash -c 'source "$1"; _HOOK_STATE_DIR=$2; _hook_child_working "$3"' _ \
+    "$AGENTGUARD_ROOT/lib/agentguard/hook-helpers.sh" "${cb_team%/busy-team/*}" "$1" \
+    </dev/null >/dev/null 2>&1
+  printf '%s' "$?"
+}
+_claude_case child-working
+_claude_prompt a
+_assert_eq 'child working: no child before its SubagentStart' 1 "$(_claude_child_working ateam-1)"
+_claude_child Start a ateam-1
+_claude_child Start a asub-1
+_assert_eq 'child working: started child is working' 0 "$(_claude_child_working ateam-1)"
+jq -e '.child_started["ateam-1"] | type == "number"' "$cb_team" >/dev/null 2>&1
+_assert_eq 'child working: team state records the start time' 0 "$?"
+_assert_eq 'child working: an unknown child is not working' 1 "$(_claude_child_working aunknown-1)"
+_claude_stop a "$claude_tm"
+_assert_eq 'child working: child stays working past the parent Stop' 0 "$(_claude_child_working ateam-1)"
+_claude_child Stop a asub-1 "$claude_tm"
+_assert_eq 'child working: stopped child is not working' 1 "$(_claude_child_working asub-1)"
+jq -e '.child_started | has("asub-1") | not' "$cb_team" >/dev/null 2>&1
+_assert_eq 'child working: a stopped child leaves no start time' 0 "$?"
+_assert_eq 'child working: sibling keeps working after another child stops' 0 "$(_claude_child_working ateam-1)"
+_claude_child Stop a ateam-1 "$claude_tm"
+_assert_eq 'child working: last child Stop leaves no working child' 1 "$(_claude_child_working ateam-1)"
+_claude_child Start a ateam-1
+_assert_eq 'child working: teammate woken for a new turn works again' 0 "$(_claude_child_working ateam-1)"
+_claude_idle a
+_assert_eq 'child working: idle backstop retires the child' 1 "$(_claude_child_working ateam-1)"
+
 _claude_case legacy
 mkdir -p "${cb_team%/*}"
 printf '{"root":null,"last_root":"old","children":{"tq1":"old","tq2":"old"},"finished":[],"ended":false,"pending":false}' \

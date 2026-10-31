@@ -224,6 +224,11 @@ Each hook emits one JSON response through `_hook_finish`.
 - state helpers: `_hook_edit_churn_file`, `_hook_counter_read`,
   `_hook_counter_increment`, `_hook_counter_reset`, `_hook_now` (current
   epoch), `_hook_write_atomic`
+- child lifecycle: `_hook_child_working <agent-id>` succeeds while that child
+  has a turn in progress in this session (a Claude child from its
+  `SubagentStart` to its `SubagentStop`, as busy marks track it); missing,
+  unreadable, or older team state, and a last start six hours old or more,
+  read as not working
 - target directory setup: `_hook_cd_to_target`
 - extension loading: `_hook_source_agent`, `_hook_source_work`
 - final JSON emission: `_hook_finish`

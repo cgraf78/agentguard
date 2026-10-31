@@ -367,7 +367,9 @@ Claude marks each subagent and teammate turn from its `SubagentStart` to its
 it shuts down, so they only retire children whose Stop never arrived, and
 Claude's idle prompt, sent once the parent and every child agent are idle,
 clears any that remain. Claude runs no hook when Esc interrupts the parent, so
-that turn's mark stays until a later turn ends.
+that turn's mark stays until a later turn ends. The same state records each
+child's latest start, so hook extensions can ask whether one child is still
+working through `_hook_child_working` (see Shared Helpers).
 
 The launcher trust boundary includes the fixed platform Bash, awk, and env
 paths and the absolute Bash candidate files above. Termux uses its
@@ -450,6 +452,11 @@ Each hook emits one JSON response through `_hook_finish`.
 - state helpers: `_hook_edit_churn_file`, `_hook_counter_read`,
   `_hook_counter_increment`, `_hook_counter_reset`, `_hook_now` (current
   epoch), `_hook_write_atomic`
+- child lifecycle: `_hook_child_working <agent-id>` succeeds while that child
+  has a turn in progress in this session (a Claude child from its
+  `SubagentStart` to its `SubagentStop`, as busy marks track it); missing,
+  unreadable, or older team state, and a last start six hours old or more,
+  read as not working
 - target directory setup: `_hook_cd_to_target`
 - extension loading: `_hook_source_agent`, `_hook_source_work`
 - final JSON emission: `_hook_finish`
