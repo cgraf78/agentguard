@@ -458,7 +458,9 @@ watcher basename.
 - A merge or close by branch or with no argument (the current branch's pull
   request), with an ambiguous bare number, through a script or another tool,
   or chained other than by `&&` forgets nothing: the gate stays until a
-  watcher reports the pull request merged or closed.
+  watcher reports the pull request merged or closed. `git pr-land` from
+  git-tools is one such tool; it runs that one-shot `git pr-watch` itself
+  after the merge, so its merge publishes the merged result.
 - A bare number names a pull request of whatever repository gh runs in. A
   merge or close of another repository's pull request (one this session
   never recorded) whose number matches the session's one open key of that
