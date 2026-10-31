@@ -362,6 +362,12 @@ without guessing a session-to-terminal association.
 Grok team completion relies on its next parent Stop reporting the current
 background task list; the child Stop payload has no stable task ID to match
 against that list.
+Claude marks each subagent and teammate turn from its `SubagentStart` to its
+`SubagentStop`. Claude's task snapshots list an idle teammate as running until
+it shuts down, so they only retire children whose Stop never arrived, and
+Claude's idle prompt, sent once the parent and every child agent are idle,
+clears any that remain. Claude runs no hook when Esc interrupts the parent, so
+that turn's mark stays until a later turn ends.
 
 The launcher trust boundary includes the fixed platform Bash, awk, and env
 paths and the absolute Bash candidate files above. Termux uses its

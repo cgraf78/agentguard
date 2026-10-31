@@ -816,133 +816,290 @@ TERM_PANE_MARK_STATE="$team_state" _busy_hook agent-hook-session-end codex "$tea
   "{\"session_id\":\"$team_session\",\"transcript_path\":\"/tmp/team.jsonl\"}" >/dev/null
 _assert_file_missing 'busy: SessionEnd clears an unfinished team' "$team_state"
 
-# Claude and Grok report the authoritative in-flight task list at root Stop.
-# Claude also reports the parent list at SubagentStop; Grok's idle notification
-# is its documented backstop once the session settles.
-first_team_log="$MOCK_BUSY_DIR/first-team.log"
-first_team_state="$MOCK_BUSY_DIR/first-team.state"
-first_team_session="$TEST_SID-first-team"
-TERM_PANE_MARK_STATE="$first_team_state" _busy_hook agent-hook-prompt-submit claude \
-  "$first_team_log" "{\"session_id\":\"$first_team_session\",\"prompt_id\":\"first\",\"prompt\":\"Work.\"}" "$first_team_session" >/dev/null
-TERM_PANE_MARK_STATE="$first_team_state" _busy_hook agent-hook-stop claude \
-  "$first_team_log" "{\"session_id\":\"$first_team_session\",\"prompt_id\":\"first\",\"background_tasks\":[{\"id\":\"worker\",\"type\":\"subagent\"}]}" "$first_team_session" >/dev/null
-_assert_eq 'busy: first Claude background Stop enters team mode' \
-  "team:$first_team_session" "$(cat "$first_team_state")"
-TERM_PANE_MARK_STATE="$first_team_state" _busy_hook agent-hook-telemetry claude \
-  "$first_team_log" "{\"session_id\":\"$first_team_session\",\"prompt_id\":\"first\",\"agent_id\":\"worker\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[]}" "$first_team_session" >/dev/null
-_assert_file_missing 'busy: first Claude team clears when its child ends' "$first_team_state"
+# Claude children are bracketed by SubagentStart and SubagentStop, teammates
+# included. Its task snapshots list an idle teammate as "running" until it
+# shuts down, so they may only retire children, never mark one as working.
+# Each case gets its own session, pane, and log.
+_claude_case() {
+  cb_session="$TEST_SID-claude-$1"
+  cb_log="$MOCK_BUSY_DIR/claude-$1.log"
+  cb_state="$MOCK_BUSY_DIR/claude-$1.state"
+  cb_team="$TEST_TMPDIR/agentguard/hook-state/$cb_session/busy-team/state.json"
+}
+# Run one hook for the current case. $2 is a jq program over $s (the session).
+_claude_hook() {
+  TERM_PANE_MARK_STATE="$cb_state" _busy_hook "$1" claude "$cb_log" \
+    "$(jq -nc --arg s "$cb_session" "$2")" "$cb_session" >/dev/null
+}
+_claude_prompt() { _claude_hook agent-hook-prompt-submit "{session_id:\$s,prompt_id:\"$1\",hook_event_name:\"UserPromptSubmit\",prompt:\"Work.\"}"; }
+# $2 is the background_tasks JSON array.
+_claude_stop() { _claude_hook agent-hook-stop "{session_id:\$s,prompt_id:\"$1\",hook_event_name:\"Stop\",background_tasks:$2}"; }
+_claude_child() { _claude_hook agent-hook-telemetry "{session_id:\$s,prompt_id:\"$2\",agent_id:\"$3\",agent_type:\"worker\",hook_event_name:\"Subagent$1\"${4:+,background_tasks:$4}}"; }
+_claude_end() { _claude_hook agent-hook-session-end "{session_id:\$s,hook_event_name:\"SessionEnd\"}"; }
+_claude_idle() { _claude_hook agent-hook-telemetry "{session_id:\$s,prompt_id:\"$1\",hook_event_name:\"Notification\",notification_type:\"idle_prompt\",message:\"Claude is waiting for your input\"$2}"; }
+claude_tm='[{"id":"tq1","type":"teammate","status":"running"}]'
 
-old_child_log="$MOCK_BUSY_DIR/old-child.log"
-old_child_state="$MOCK_BUSY_DIR/old-child.state"
-old_child_session="$TEST_SID-old-child"
-TERM_PANE_MARK_STATE="$old_child_state" _busy_hook agent-hook-prompt-submit claude \
-  "$old_child_log" "{\"session_id\":\"$old_child_session\",\"prompt_id\":\"a\",\"prompt\":\"Work.\"}" "$old_child_session" >/dev/null
-TERM_PANE_MARK_STATE="$old_child_state" _busy_hook agent-hook-stop claude \
-  "$old_child_log" "{\"session_id\":\"$old_child_session\",\"prompt_id\":\"a\",\"background_tasks\":[{\"id\":\"worker\",\"type\":\"subagent\"}]}" "$old_child_session" >/dev/null
-TERM_PANE_MARK_STATE="$old_child_state" _busy_hook agent-hook-prompt-submit claude \
-  "$old_child_log" "{\"session_id\":\"$old_child_session\",\"prompt_id\":\"b\",\"prompt\":\"More.\"}" "$old_child_session" >/dev/null
-TERM_PANE_MARK_STATE="$old_child_state" _busy_hook agent-hook-stop claude \
-  "$old_child_log" "{\"session_id\":\"$old_child_session\",\"prompt_id\":\"b\",\"background_tasks\":[{\"id\":\"worker\",\"type\":\"subagent\"}]}" "$old_child_session" >/dev/null
-TERM_PANE_MARK_STATE="$old_child_state" _busy_hook agent-hook-telemetry claude \
-  "$old_child_log" "{\"session_id\":\"$old_child_session\",\"prompt_id\":\"a\",\"agent_id\":\"worker\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[]}" "$old_child_session" >/dev/null
-_assert_file_missing 'busy: older Claude child finishing after a newer Stop clears team' \
-  "$old_child_state"
+_claude_case idle-teammate
+_claude_prompt a
+_claude_child Start a ateam-1
+_claude_stop a "$claude_tm"
+_assert_eq 'busy: Claude teammate turn outlives the parent turn' \
+  "team:$cb_session" "$(cat "$cb_state" 2>/dev/null)"
+_claude_child Stop a ateam-1 "$claude_tm"
+_assert_file_missing 'busy: idle Claude teammate listed as running does not hold the mark' "$cb_state"
+_assert_file_missing 'busy: empty Claude team hands back to direct marks' "$cb_team"
+_claude_prompt b
+_assert_eq 'busy: turn after an emptied team uses its direct token' \
+  "p:${#cb_session}:$cb_session:b" "$(cat "$cb_state" 2>/dev/null)"
+_claude_stop b "$claude_tm"
+_claude_stop a "$claude_tm"
+_assert_file_missing 'busy: parent snapshot cannot revive an idle teammate' "$cb_state"
+_claude_child Start a ateam-1
+_assert_file_exists 'busy: teammate woken while the parent is idle marks the pane' "$cb_state"
+_claude_child Stop a ateam-1 "$claude_tm"
+_assert_file_missing 'busy: woken teammate clears when its turn ends' "$cb_state"
 
-stale_child_log="$MOCK_BUSY_DIR/stale-child.log"
-stale_child_state="$MOCK_BUSY_DIR/stale-child.state"
-stale_child_session="$TEST_SID-stale-child"
-TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-prompt-submit claude \
-  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"prompt\":\"Work.\"}" "$stale_child_session" >/dev/null
-TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-stop claude \
-  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"background_tasks\":[{\"id\":\"one\",\"type\":\"subagent\"},{\"id\":\"two\",\"type\":\"subagent\"}]}" "$stale_child_session" >/dev/null
-TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-telemetry claude \
-  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"agent_id\":\"two\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[]}" "$stale_child_session" >/dev/null
-TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-telemetry claude \
-  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"agent_id\":\"one\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[{\"id\":\"two\",\"type\":\"subagent\"}]}" "$stale_child_session" >/dev/null
-TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-stop claude \
-  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"background_tasks\":[{\"id\":\"two\",\"type\":\"subagent\"}]}" "$stale_child_session" >/dev/null
-_assert_file_missing 'busy: late same-prompt snapshots cannot revive completed tasks' \
-  "$stale_child_state"
-TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-prompt-submit claude \
-  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Continue.\"}" "$stale_child_session" >/dev/null
-TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-telemetry claude \
-  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"agent_id\":\"other\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[{\"id\":\"two\",\"type\":\"subagent\"}]}" "$stale_child_session" >/dev/null
-TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-stop claude \
-  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"background_tasks\":[{\"id\":\"two\",\"type\":\"subagent\"}]}" "$stale_child_session" >/dev/null
-_assert_file_exists 'busy: later request can observe a resumed task ID' \
-  "$stale_child_state"
-TERM_PANE_MARK_STATE="$stale_child_state" _busy_hook agent-hook-telemetry claude \
-  "$stale_child_log" "{\"session_id\":\"$stale_child_session\",\"prompt_id\":\"same\",\"agent_id\":\"other\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[]}" "$stale_child_session" >/dev/null
-_assert_file_missing 'busy: resumed task ID clears after current completion' \
-  "$stale_child_state"
+_claude_case child-first
+_claude_prompt a
+_claude_child Start a asub-1
+_claude_child Stop a asub-1 '[{"id":"asub-1","type":"subagent","status":"running"}]'
+_assert_file_exists 'busy: child finishing first cannot end the parent turn' "$cb_state"
+_claude_stop a '[]'
+_assert_file_missing 'busy: parent Stop clears after its child finished' "$cb_state"
 
-retry_team_log="$MOCK_BUSY_DIR/retry-team.log"
-retry_team_state="$MOCK_BUSY_DIR/retry-team.state"
-retry_team_failure="$MOCK_BUSY_DIR/retry-team.failed"
-retry_team_session="$TEST_SID-retry-team"
-TERM_PANE_MARK_STATE="$retry_team_state" _busy_hook agent-hook-prompt-submit claude \
-  "$retry_team_log" "{\"session_id\":\"$retry_team_session\",\"prompt_id\":\"first\",\"prompt\":\"Work.\"}" "$retry_team_session" >/dev/null
-TERM_PANE_MARK_STATE="$retry_team_state" TERM_PANE_MARK_FAIL_ONCE="$retry_team_failure" \
-  _busy_hook agent-hook-stop claude "$retry_team_log" \
-  "{\"session_id\":\"$retry_team_session\",\"prompt_id\":\"first\",\"background_tasks\":[{\"id\":\"worker\",\"type\":\"subagent\"}]}" "$retry_team_session" >/dev/null
-TERM_PANE_MARK_STATE="$retry_team_state" _busy_hook agent-hook-telemetry claude \
-  "$retry_team_log" "{\"session_id\":\"$retry_team_session\",\"prompt_id\":\"first\",\"agent_id\":\"worker\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[]}" "$retry_team_session" >/dev/null
-_assert_file_missing 'busy: failed team set retries before final clear' "$retry_team_state"
+_claude_case idle-parent
+_claude_prompt a
+_claude_stop a '[]'
+_assert_file_missing 'busy: plain Claude turn clears without team state' "$cb_team"
+_claude_child Start a ateam-1
+_assert_file_exists 'busy: child of an idle parent marks the pane' "$cb_state"
+_claude_child Stop a ateam-1 "$claude_tm"
+_assert_file_missing 'busy: child of an idle parent does not inherit a root turn' "$cb_state"
 
-retry_end_log="$MOCK_BUSY_DIR/retry-end.log"
-retry_end_state="$MOCK_BUSY_DIR/retry-end.state"
-retry_end_session="$TEST_SID-retry-end"
-TERM_PANE_MARK_STATE="$retry_end_state" _busy_hook agent-hook-prompt-submit claude \
-  "$retry_end_log" "{\"session_id\":\"$retry_end_session\",\"prompt_id\":\"first\",\"prompt\":\"Work.\"}" "$retry_end_session" >/dev/null
-TERM_PANE_MARK_STATE="$retry_end_state" \
-  TERM_PANE_MARK_FAIL_ONCE="$MOCK_BUSY_DIR/retry-end-first.failed" \
-  _busy_hook agent-hook-stop claude "$retry_end_log" \
-  "{\"session_id\":\"$retry_end_session\",\"prompt_id\":\"first\",\"background_tasks\":[{\"id\":\"worker\",\"type\":\"subagent\"}]}" "$retry_end_session" >/dev/null
-TERM_PANE_MARK_STATE="$retry_end_state" \
-  TERM_PANE_MARK_FAIL_ONCE="$MOCK_BUSY_DIR/retry-end-second.failed" \
-  _busy_hook agent-hook-session-end claude "$retry_end_log" \
-  "{\"session_id\":\"$retry_end_session\"}" "$retry_end_session" >/dev/null
-_assert_file_missing 'busy: SessionEnd recovers direct mark after failed team transition' \
-  "$retry_end_state"
+_claude_case snapshot-only
+_claude_prompt a
+_claude_stop a "[{\"id\":\"tq1\",\"type\":\"teammate\",\"status\":\"running\"},{\"id\":\"sh1\",\"type\":\"shell\",\"status\":\"running\"}]"
+_assert_file_missing 'busy: listed idle teammates alone do not mark the pane' "$cb_state"
+_assert_file_missing 'busy: snapshots alone do not enter Claude team mode' "$cb_team"
 
-claude_team_log="$MOCK_BUSY_DIR/claude-team.log"
-claude_team_state="$MOCK_BUSY_DIR/claude-team.state"
-claude_team_session="$TEST_SID-claude-team"
-TERM_PANE_MARK_STATE="$claude_team_state" _busy_hook agent-hook-prompt-submit claude \
-  "$claude_team_log" "{\"session_id\":\"$claude_team_session\",\"prompt_id\":\"root-a\",\"prompt\":\"Work.\"}" "$claude_team_session" >/dev/null
-TERM_PANE_MARK_STATE="$claude_team_state" _busy_hook agent-hook-stop claude \
-  "$claude_team_log" "{\"session_id\":\"$claude_team_session\",\"prompt_id\":\"root-a\",\"background_tasks\":[{\"id\":\"child-a\",\"type\":\"subagent\",\"status\":\"running\"}]}" "$claude_team_session" >/dev/null
-_assert_file_exists 'busy: Claude root Stop retains background subagent' "$claude_team_state"
-TERM_PANE_MARK_STATE="$claude_team_state" _busy_hook agent-hook-prompt-submit claude \
-  "$claude_team_log" "{\"session_id\":\"$claude_team_session\",\"prompt_id\":\"root-b\",\"prompt\":\"More.\"}" "$claude_team_session" >/dev/null
-TERM_PANE_MARK_STATE="$claude_team_state" _busy_hook agent-hook-stop claude \
-  "$claude_team_log" "{\"session_id\":\"$claude_team_session\",\"prompt_id\":\"root-a\",\"background_tasks\":[]}" "$claude_team_session" >/dev/null
-TERM_PANE_MARK_STATE="$claude_team_state" _busy_hook agent-hook-stop claude \
-  "$claude_team_log" "{\"session_id\":\"$claude_team_session\",\"prompt_id\":\"root-b\",\"background_tasks\":[{\"id\":\"child-a\",\"type\":\"subagent\",\"status\":\"running\"},{\"id\":\"child-b\",\"type\":\"subagent\",\"status\":\"running\"}]}" "$claude_team_session" >/dev/null
-_assert_file_exists 'busy: stale Claude Stop snapshot cannot erase child of newer turn' \
-  "$claude_team_state"
-TERM_PANE_MARK_STATE="$claude_team_state" _busy_hook agent-hook-telemetry claude \
-  "$claude_team_log" "{\"session_id\":\"$claude_team_session\",\"prompt_id\":\"root-a\",\"agent_id\":\"child-a\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[]}" "$claude_team_session" >/dev/null
-_assert_file_exists 'busy: old Claude child snapshot cannot erase a newer team' \
-  "$claude_team_state"
-TERM_PANE_MARK_STATE="$claude_team_state" _busy_hook agent-hook-stop claude \
-  "$claude_team_log" "{\"session_id\":\"$claude_team_session\",\"prompt_id\":\"root-a\",\"background_tasks\":[]}" "$claude_team_session" >/dev/null
-_assert_file_exists 'busy: old Claude root snapshot cannot erase a completed newer turn' \
-  "$claude_team_state"
-TERM_PANE_MARK_STATE="$claude_team_state" _busy_hook agent-hook-telemetry claude \
-  "$claude_team_log" "{\"session_id\":\"$claude_team_session\",\"prompt_id\":\"root-b\",\"agent_id\":\"child-b\",\"hook_event_name\":\"SubagentStop\",\"background_tasks\":[]}" "$claude_team_session" >/dev/null
-_assert_file_missing 'busy: Claude parent task snapshot clears finished team' "$claude_team_state"
+_claude_case missed-subagent
+_claude_prompt a
+_claude_child Start a asub-1
+_claude_stop a '[{"id":"asub-1","type":"subagent","status":"running"}]'
+_assert_file_exists 'busy: listed working subagent keeps the mark' "$cb_state"
+_claude_prompt b
+_claude_stop b '[{"id":"asub-1","type":"subagent","status":"completed"}]'
+_assert_file_missing 'busy: completed subagent whose Stop was missed is retired' "$cb_state"
 
-claude_shell_log="$MOCK_BUSY_DIR/claude-shell-only.log"
-claude_shell_state="$MOCK_BUSY_DIR/claude-shell-only.state"
-claude_shell_session="$TEST_SID-claude-shell-only"
-TERM_PANE_MARK_STATE="$claude_shell_state" _busy_hook agent-hook-prompt-submit claude \
-  "$claude_shell_log" "{\"session_id\":\"$claude_shell_session\",\"prompt_id\":\"root-a\",\"prompt\":\"Work.\"}" "$claude_shell_session" >/dev/null
-TERM_PANE_MARK_STATE="$claude_shell_state" _busy_hook agent-hook-stop claude \
-  "$claude_shell_log" "{\"session_id\":\"$claude_shell_session\",\"prompt_id\":\"root-a\",\"background_tasks\":[{\"id\":\"shell-a\",\"type\":\"shell\",\"status\":\"running\"}]}" "$claude_shell_session" >/dev/null
-_assert_file_missing 'busy: detached shell alone does not mean agent is working' \
-  "$claude_shell_state"
+_claude_case known-subagent
+_claude_prompt a
+_claude_child Start a ateam-1
+_claude_child Start a asub-1
+_claude_stop a '[{"id":"tq1","type":"teammate","status":"running"},{"id":"asub-1","type":"subagent","status":"running"}]'
+_claude_child Stop a ateam-1 "$claude_tm"
+_assert_file_exists 'busy: remaining subagent keeps the mark' "$cb_state"
+_claude_prompt b
+_claude_stop b "$claude_tm"
+_assert_file_missing 'busy: known subagent is retired while a teammate stays alive' "$cb_state"
 
+_claude_case idle-backstop
+_claude_prompt a
+_claude_child Start a ateam-1
+_claude_stop a "$claude_tm"
+_claude_stop a "$claude_tm"
+_assert_file_exists 'busy: unlisted child stays while a teammate is alive' "$cb_state"
+_claude_idle a ',agent_id:"ateam-1"'
+_assert_file_exists 'busy: child idle notification does not settle the team' "$cb_state"
+_claude_idle a
+_assert_file_missing 'busy: Claude idle prompt retires a child whose Stop was missed' "$cb_state"
+_claude_child Start a ateam-1
+_assert_file_exists 'busy: teammate can rearm after the idle backstop' "$cb_state"
+_claude_child Stop a ateam-1 "$claude_tm"
+_assert_file_missing 'busy: rearmed teammate clears normally' "$cb_state"
+
+_claude_case stale-idle
+_claude_prompt a
+_claude_child Start a ateam-1
+_claude_stop a "$claude_tm"
+_claude_prompt b
+_claude_idle a
+_assert_file_exists 'busy: idle prompt from an older turn cannot clear newer work' "$cb_state"
+_claude_stop b "$claude_tm"
+_assert_file_exists 'busy: newer parent Stop keeps the working teammate' "$cb_state"
+_claude_child Stop b ateam-1 "$claude_tm"
+_assert_file_missing 'busy: teammate Stop clears after the newer turn' "$cb_state"
+
+_claude_case idle-direct
+_claude_prompt a
+_assert_file_exists 'busy: plain Claude prompt marks the pane' "$cb_state"
+_claude_idle a
+_assert_file_missing 'busy: Claude idle prompt clears a direct mark left by a missed Stop' "$cb_state"
+_assert_file_missing 'busy: idle prompt without children creates no team state' "$cb_team"
+
+_claude_case child-failure
+_claude_prompt a
+_claude_child Start a ateam-1
+_claude_stop a "$claude_tm"
+_claude_hook agent-hook-telemetry "{session_id:\$s,prompt_id:\"a\",agent_id:\"ateam-1\",hook_event_name:\"StopFailure\",error:\"server_error\"}"
+_assert_file_missing 'busy: failed Claude child turn retires the child' "$cb_state"
+
+_claude_case overlap
+_claude_prompt a
+_claude_child Start a asub-a
+_claude_prompt b
+_claude_child Start b asub-b
+_claude_stop a '[]'
+_assert_file_exists 'busy: older Claude Stop snapshot cannot erase newer work' "$cb_state"
+_claude_stop b '[{"id":"asub-b","type":"subagent","status":"running"}]'
+_assert_file_exists 'busy: current snapshot keeps its listed subagent' "$cb_state"
+jq -e '.children | keys == ["asub-b"]' "$cb_team" >/dev/null 2>&1
+_assert_eq 'busy: current snapshot retires the unlisted subagent' 0 "$?"
+_claude_child Stop b asub-b '[{"id":"asub-b","type":"subagent","status":"running"}]'
+_assert_file_missing 'busy: last Claude child Stop clears the team' "$cb_state"
+
+_claude_case legacy
+mkdir -p "${cb_team%/*}"
+printf '{"root":null,"last_root":"old","children":{"tq1":"old","tq2":"old"},"finished":[],"ended":false,"pending":false}' \
+  >"$cb_team"
+printf '%s' "team:$cb_session" >"$cb_state"
+_claude_child Stop old ainternal-1 "$claude_tm"
+_assert_file_missing 'busy: first event clears teammates recorded by older releases' "$cb_state"
+_assert_file_missing 'busy: migrated empty Claude team hands back to direct marks' "$cb_team"
+
+_claude_case session-end
+_claude_prompt a
+_claude_child Start a ateam-1
+_claude_end
+_assert_file_missing 'busy: SessionEnd clears an unfinished Claude team' "$cb_state"
+_claude_child Start a ateam-1
+_assert_file_missing 'busy: late Claude child cannot revive a closed session' "$cb_state"
+
+_claude_case retry-team
+_claude_prompt a
+TERM_PANE_MARK_FAIL_ONCE="$MOCK_BUSY_DIR/claude-retry-team.failed" _claude_child Start a asub-1
+_claude_stop a '[{"id":"asub-1","type":"subagent","status":"running"}]'
+_assert_eq 'busy: next event retries a failed Claude team set' \
+  "team:$cb_session" "$(cat "$cb_state" 2>/dev/null)"
+_claude_child Stop a asub-1 '[{"id":"asub-1","type":"subagent","status":"running"}]'
+_assert_file_missing 'busy: retried Claude team clears at its last child Stop' "$cb_state"
+
+_claude_case retry-end
+_claude_prompt a
+TERM_PANE_MARK_FAIL_ONCE="$MOCK_BUSY_DIR/claude-retry-end-first.failed" _claude_child Start a asub-1
+TERM_PANE_MARK_FAIL_ONCE="$MOCK_BUSY_DIR/claude-retry-end-second.failed" \
+  _claude_end
+_assert_file_missing 'busy: SessionEnd recovers direct mark after failed team transition' "$cb_state"
+
+_claude_case retry-replace
+_claude_prompt a
+TERM_PANE_MARK_FAIL_ONCE="$MOCK_BUSY_DIR/claude-retry-replace.failed" _claude_child Start a asub-1
+_claude_stop a '[]'
+_assert_file_missing 'busy: failed first team set replaces the direct token before clearing' "$cb_state"
+
+# The parent's direct clear can run while a child creates the team. Delay the
+# clear so the child reads the parent's live cache first; the clear must then
+# settle the new team too, or it would hold the finished turn.
+# Wait (bounded) until the mock marker starts its delayed call.
+_claude_await_delay() {
+  local tries=0
+  while [ ! -e "$1" ] && [ "$tries" -lt 100 ]; do
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+}
+_claude_case clear-race
+_claude_prompt a
+TERM_PANE_MARK_DELAY_ONCE="$MOCK_BUSY_DIR/claude-clear-race.delayed" _claude_stop a "$claude_tm" &
+claude_race_pid=$!
+_claude_await_delay "$MOCK_BUSY_DIR/claude-clear-race.delayed"
+_claude_child Start a ateam-1
+wait "$claude_race_pid"
+_assert_file_exists 'busy: racing parent Stop keeps the working child' "$cb_state"
+jq -e '.root == null' "$cb_team" >/dev/null 2>&1
+_assert_eq 'busy: racing parent Stop retires its turn from the new team' 0 "$?"
+_claude_child Stop a ateam-1 "$claude_tm"
+_assert_file_missing 'busy: child Stop after a racing parent Stop clears the pane' "$cb_state"
+
+# A parent turn woken by a teammate message (same prompt, no prompt hook) can
+# set its direct mark while another child creates the team before the cache
+# exists. The set must then join the team, or the child's Stop would leave the
+# working parent unmarked.
+_claude_case set-race
+_claude_prompt a
+_claude_stop a '[]'
+TERM_PANE_MARK_DELAY_ONCE="$MOCK_BUSY_DIR/claude-set-race.delayed" \
+  _claude_hook agent-hook-telemetry "{session_id:\$s,prompt_id:\"a\",hook_event_name:\"PreToolUse\",tool_name:\"Read\"}" &
+claude_race_pid=$!
+_claude_await_delay "$MOCK_BUSY_DIR/claude-set-race.delayed"
+_claude_child Start a ateam-1
+wait "$claude_race_pid"
+jq -e '.root == "a"' "$cb_team" >/dev/null 2>&1
+_assert_eq 'busy: racing parent tool joins the new team' 0 "$?"
+_claude_child Stop a ateam-1 "$claude_tm"
+_assert_file_exists 'busy: child Stop keeps a racing parent turn busy' "$cb_state"
+_claude_stop a "$claude_tm"
+_assert_file_missing 'busy: parent Stop after a racing tool clears the pane' "$cb_state"
+
+_claude_case legacy-root
+mkdir -p "${cb_team%/*}"
+printf '{"root":"old","last_root":"old","children":{"tq1":"old"},"finished":["tq0"],"ended":false,"pending":false}' \
+  >"$cb_team"
+printf '%s' "team:$cb_session" >"$cb_state"
+_claude_prompt b
+_assert_eq 'busy: prompt after upgrade keeps its team mark' \
+  "team:$cb_session" "$(cat "$cb_state" 2>/dev/null)"
+_claude_stop b "$claude_tm"
+_assert_file_missing 'busy: migrated legacy root state clears at the next Stop' "$cb_state"
+_assert_file_missing 'busy: migrated legacy team hands back to direct marks' "$cb_team"
+
+_claude_case idle-other-turn
+_claude_prompt a
+_claude_stop a '[]'
+_claude_prompt b
+_claude_idle a
+_assert_file_exists 'busy: idle prompt from an older turn keeps a newer direct mark' "$cb_state"
+_claude_stop b '[]'
+
+_claude_case woken-then-prompt
+_claude_prompt a
+_claude_stop a '[]'
+_claude_child Start a ateam-1
+_claude_prompt b
+_claude_stop b "$claude_tm"
+_assert_file_exists 'busy: parent turn ending mid-child keeps the woken teammate' "$cb_state"
+_claude_child Stop b ateam-1 "$claude_tm"
+_assert_file_missing 'busy: woken teammate Stop clears after the parent turn' "$cb_state"
+
+_claude_case terminal-teammate
+_claude_prompt a
+_claude_child Start a ateam-1
+_claude_stop a '[{"id":"tq1","type":"teammate","status":"killed"}]'
+_assert_file_missing 'busy: a killed teammate cannot keep an unlisted child' "$cb_state"
+
+# busy-team.py rejects transitions that no hook can legitimately request.
+claude_argv_dir=$(_tmpdir)
+# Each case: agent actor action agent_id [key]; only its named field is bad.
+for claude_argv in 'codex root idle a1' 'claude child idle a1' 'claude child set a/b' \
+  'claude child set a1 bad/key'; do
+  read -r claude_agent claude_actor claude_action claude_child claude_key <<<"$claude_argv"
+  jq -nc --arg child "$claude_child" '{session_id:"s",prompt_id:"p",turn_id:"t",agent_id:$child}' |
+    python3 "$AGENTGUARD_ROOT/lib/agentguard/busy-team.py" "$claude_argv_dir" s 1 \
+      "$claude_agent" "$claude_actor" "$claude_action" ${claude_key:+"$claude_key"} >/dev/null 2>&1
+  _assert_eq "busy: busy-team rejects $claude_argv" 2 "$?"
+done
+_assert_path_missing 'busy: rejected transitions create no team state' "$claude_argv_dir/busy-team/state.json"
+
+# Grok reports the authoritative in-flight task list at root Stop; its idle
+# notification is the documented backstop once the session settles.
+grok_shell_log="$MOCK_BUSY_DIR/grok-shell-only.log"
+grok_shell_state="$MOCK_BUSY_DIR/grok-shell-only.state"
+grok_shell_session="$TEST_SID-grok-shell-only"
+TERM_PANE_MARK_STATE="$grok_shell_state" _busy_hook agent-hook-prompt-submit grok \
+  "$grok_shell_log" "{\"sessionId\":\"$grok_shell_session\",\"promptId\":\"root-a\",\"prompt\":\"Work.\"}" "$grok_shell_session" >/dev/null
+TERM_PANE_MARK_STATE="$grok_shell_state" _busy_hook agent-hook-stop grok \
+  "$grok_shell_log" "{\"sessionId\":\"$grok_shell_session\",\"promptId\":\"root-a\",\"backgroundTasks\":[{\"id\":\"shell-a\",\"type\":\"shell\",\"status\":\"running\"}]}" "$grok_shell_session" >/dev/null
+_assert_file_missing 'busy: detached Grok shell alone does not mean agent is working' \
+  "$grok_shell_state"
 grok_team_log="$MOCK_BUSY_DIR/grok-team.log"
 grok_team_state="$MOCK_BUSY_DIR/grok-team.state"
 grok_team_session="$TEST_SID-grok-team"
@@ -1616,9 +1773,8 @@ _busy_hook agent-hook-stop crashfixture "$busy_log" >/dev/null
 _assert_file_content "busy: a Stop whose extension crashes still clears the mark" \
   "$(_busy_mark "$busy_log" clear)" "$busy_log"
 
-# Notifications never touch the busy mark: in recorded Claude sessions,
-# idle_prompt followed only Stops, which already cleared it, and never an
-# interrupted turn.
+# The notification hook never touches the busy mark; agent-hook-telemetry
+# alone settles Claude's idle_prompt (see the Claude idle cases above).
 for waiting_payload in '' '{"notification_type":"permission_prompt"}' \
   '{"notification_type":"idle_prompt"}' 'not-json'; do
   busy_log="$MOCK_BUSY_DIR/notify-waiting.log"
