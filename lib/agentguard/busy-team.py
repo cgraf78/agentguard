@@ -269,6 +269,8 @@ def run() -> int:
                 and owner_alive(state["owner"])
             ):
                 return 0  # A resumed session belongs to its newer pane owner.
+            if not isinstance(state.get("child_started"), dict):
+                state["child_started"] = {}
             before = (
                 state.get("root"),
                 dict(state["children"]),
@@ -276,6 +278,7 @@ def run() -> int:
                 state.get("owner"),
                 tuple(state["subagents"]),
                 state.get("children_source"),
+                dict(state["child_started"]),
             )
             if agent == "claude" and state.get("children_source") != CLAUDE_SOURCE:
                 # Older releases recorded every listed teammate as working,
@@ -355,6 +358,15 @@ def run() -> int:
                     state["children"][child] = turn
             elif state["children"].get(child) == turn:
                 del state["children"][child]
+            # Each child's latest start lets readers (_hook_child_working)
+            # age out a child whose Stop never arrived. Entries leave with
+            # their child, whichever transition retired it.
+            started = state.get("child_started", {})
+            if actor == "child" and action == "set" and child in state["children"]:
+                started[child] = int(time.time())
+            state["child_started"] = {
+                key: value for key, value in started.items() if key in state["children"]
+            }
             after = (
                 state.get("root"),
                 dict(state["children"]),
@@ -362,6 +374,7 @@ def run() -> int:
                 state.get("owner"),
                 tuple(state["subagents"]),
                 state.get("children_source"),
+                dict(state["child_started"]),
             )
             if before == after and not state.get("pending"):
                 return 0

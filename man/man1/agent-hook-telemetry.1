@@ -64,6 +64,9 @@ is
 .B idle_prompt
 means the parent and every child agent are idle, so it clears the mark and
 retires children whose Stop never arrived.
+The team state also records each child's latest start time, which hook
+extensions read through
+.BR _hook_child_working .
 .SH ENVIRONMENT
 .TP
 .B AGENTGUARD_TELEMETRY

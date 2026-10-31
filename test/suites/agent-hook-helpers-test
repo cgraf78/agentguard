@@ -159,6 +159,69 @@ _assert_contains "hook_write_atomic: refuses a directory" "dir=refused" "$now_ou
 _assert_not_contains "hook_write_atomic: no temporary left" "leftover=" "$now_out"
 
 echo ""
+echo "=== hook-helpers: _hook_child_working ==="
+
+# Team state fixtures; agent-hook-session-test drives the same state through
+# real SubagentStart/SubagentStop hooks.
+child_dir=$(_tmpdir)
+# Print 0 or 1 for whether child $2 works per team state JSON $1 ('' = none).
+_child_working_case() {
+  rm -rf "${child_dir:?}/busy-team"
+  if [ -n "$1" ]; then
+    mkdir -p "$child_dir/busy-team"
+    printf '%s\n' "$1" >"$child_dir/busy-team/state.json"
+  fi
+  bash -c '
+    source "$1"
+    _HOOK_STATE_DIR=$2
+    _hook_child_working "$3"
+  ' _ "$HELPERS" "$child_dir" "$2" </dev/null >/dev/null 2>&1
+  printf '%s' "$?"
+}
+child_now=$(date +%s)
+_child_state() { # _child_state CHILD STARTED_EPOCH
+  printf '{"root":null,"children":{"%s":"p1"},"child_started":{"%s":%s},"ended":false}' "$1" "$1" "$2"
+}
+_assert_eq "child working: a recorded, recently started child is working" \
+  0 "$(_child_working_case "$(_child_state asub-1 "$((child_now - 60))")" asub-1)"
+_assert_eq "child working: another child id is not working" \
+  1 "$(_child_working_case "$(_child_state asub-1 "$((child_now - 60))")" asub-2)"
+_assert_eq "child working: an empty child id is not working" \
+  1 "$(_child_working_case "$(_child_state asub-1 "$((child_now - 60))")" '')"
+_assert_eq "child working: missing team state is not working" \
+  1 "$(_child_working_case '' asub-1)"
+_assert_eq "child working: malformed team state is not working" \
+  1 "$(_child_working_case '{"children":' asub-1)"
+_assert_eq "child working: children that are not an object are not working" \
+  1 "$(_child_working_case '{"children":["asub-1"],"child_started":{"asub-1":1}}' asub-1)"
+_assert_eq "child working: state without start times (older release) is not working" \
+  1 "$(_child_working_case '{"children":{"asub-1":"p1"}}' asub-1)"
+_assert_eq "child working: a child without its own start time is not working" \
+  1 "$(_child_working_case "{\"children\":{\"asub-1\":\"p1\"},\"child_started\":{\"asub-2\":$child_now}}" asub-1)"
+_assert_eq "child working: a non-numeric start time is not working" \
+  1 "$(_child_working_case '{"children":{"asub-1":"p1"},"child_started":{"asub-1":"now"}}' asub-1)"
+_assert_eq "child working: a start just under six hours ago is still working" \
+  0 "$(_child_working_case "$(_child_state asub-1 "$((child_now - 21600 + 120))")" asub-1)"
+_assert_eq "child working: a start six hours ago is stale" \
+  1 "$(_child_working_case "$(_child_state asub-1 "$((child_now - 21600))")" asub-1)"
+_assert_eq "child working: a start in the future is not working" \
+  1 "$(_child_working_case "$(_child_state asub-1 "$((child_now + 3600))")" asub-1)"
+child_unset_err=$(bash -c 'set -u; source "$1"; unset _HOOK_STATE_DIR; _hook_child_working asub-1' _ \
+  "$HELPERS" </dev/null 2>&1 >/dev/null)
+_assert_eq "child working: no state dir under set -u is not working, silently" \
+  "1:" "$?:$child_unset_err"
+if [ "$(id -u)" != 0 ]; then
+  rm -rf "${child_dir:?}/busy-team"
+  mkdir -p "$child_dir/busy-team"
+  _child_state asub-1 "$child_now" >"$child_dir/busy-team/state.json"
+  chmod 000 "$child_dir/busy-team/state.json"
+  bash -c 'source "$1"; _HOOK_STATE_DIR=$2; _hook_child_working asub-1' _ \
+    "$HELPERS" "$child_dir" </dev/null >/dev/null 2>&1
+  _assert_eq "child working: unreadable team state is not working" 1 "$?"
+  chmod 600 "$child_dir/busy-team/state.json"
+fi
+
+echo ""
 echo "=== hook-helpers: state markers ==="
 
 marker_dir=$(_tmpdir)
