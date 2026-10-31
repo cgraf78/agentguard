@@ -1435,10 +1435,12 @@ _hook_pane_busy() {
     [ "$cached" = "$_HOOK_BUSY_TURN_KEY" ]; then
     rm -f -- "$cache_file" 2>/dev/null || true
   fi
-  # A Claude child may have created a team while this direct clear ran. The
-  # cache is gone by now, so that team either saw the cleared turn or already
-  # exists here; settling it too keeps it from holding the finished turn.
-  if [ "$team_status" = 1 ] && [ "$mark_action" = clear ] &&
+  # A Claude child may have created a team while this direct mark changed.
+  # The cache already reflects this turn, and the child reads it only after
+  # publishing its team, so either the team saw this turn or it exists here:
+  # applying the transition to it too keeps the team from losing a live turn
+  # or holding a finished one.
+  if [ "$team_status" = 1 ] && [ "$mark_status" = 0 ] &&
     [ -e "$_HOOK_STATE_DIR/busy-team/state.json" ]; then
     _hook_agent_name busy_agent
     [ "$busy_agent" != claude ] || _hook_team_busy root "$1" || true

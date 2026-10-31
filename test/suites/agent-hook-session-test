@@ -999,11 +999,19 @@ _assert_file_missing 'busy: failed first team set replaces the direct token befo
 # The parent's direct clear can run while a child creates the team. Delay the
 # clear so the child reads the parent's live cache first; the clear must then
 # settle the new team too, or it would hold the finished turn.
+# Wait (bounded) until the mock marker starts its delayed call.
+_claude_await_delay() {
+  local tries=0
+  while [ ! -e "$1" ] && [ "$tries" -lt 100 ]; do
+    sleep 0.05
+    tries=$((tries + 1))
+  done
+}
 _claude_case clear-race
 _claude_prompt a
 TERM_PANE_MARK_DELAY_ONCE="$MOCK_BUSY_DIR/claude-clear-race.delayed" _claude_stop a "$claude_tm" &
 claude_race_pid=$!
-sleep 0.4
+_claude_await_delay "$MOCK_BUSY_DIR/claude-clear-race.delayed"
 _claude_child Start a ateam-1
 wait "$claude_race_pid"
 _assert_file_exists 'busy: racing parent Stop keeps the working child' "$cb_state"
@@ -1011,6 +1019,26 @@ jq -e '.root == null' "$cb_team" >/dev/null 2>&1
 _assert_eq 'busy: racing parent Stop retires its turn from the new team' 0 "$?"
 _claude_child Stop a ateam-1 "$claude_tm"
 _assert_file_missing 'busy: child Stop after a racing parent Stop clears the pane' "$cb_state"
+
+# A parent turn woken by a teammate message (same prompt, no prompt hook) can
+# set its direct mark while another child creates the team before the cache
+# exists. The set must then join the team, or the child's Stop would leave the
+# working parent unmarked.
+_claude_case set-race
+_claude_prompt a
+_claude_stop a '[]'
+TERM_PANE_MARK_DELAY_ONCE="$MOCK_BUSY_DIR/claude-set-race.delayed" \
+  _claude_hook agent-hook-telemetry "{session_id:\$s,prompt_id:\"a\",hook_event_name:\"PreToolUse\",tool_name:\"Read\"}" &
+claude_race_pid=$!
+_claude_await_delay "$MOCK_BUSY_DIR/claude-set-race.delayed"
+_claude_child Start a ateam-1
+wait "$claude_race_pid"
+jq -e '.root == "a"' "$cb_team" >/dev/null 2>&1
+_assert_eq 'busy: racing parent tool joins the new team' 0 "$?"
+_claude_child Stop a ateam-1 "$claude_tm"
+_assert_file_exists 'busy: child Stop keeps a racing parent turn busy' "$cb_state"
+_claude_stop a "$claude_tm"
+_assert_file_missing 'busy: parent Stop after a racing tool clears the pane' "$cb_state"
 
 _claude_case legacy-root
 mkdir -p "${cb_team%/*}"
@@ -1050,9 +1078,11 @@ _assert_file_missing 'busy: a killed teammate cannot keep an unlisted child' "$c
 
 # busy-team.py rejects transitions that no hook can legitimately request.
 claude_argv_dir=$(_tmpdir)
-for claude_argv in 'codex root idle' 'claude child idle' 'claude child set' 'claude child set bad/key'; do
-  read -r claude_agent claude_actor claude_action claude_key <<<"$claude_argv"
-  printf '%s' '{"session_id":"s","prompt_id":"p","turn_id":"t","agent_id":"a b"}' |
+# Each case: agent actor action agent_id [key]; only its named field is bad.
+for claude_argv in 'codex root idle a1' 'claude child idle a1' 'claude child set a/b' \
+  'claude child set a1 bad/key'; do
+  read -r claude_agent claude_actor claude_action claude_child claude_key <<<"$claude_argv"
+  jq -nc --arg child "$claude_child" '{session_id:"s",prompt_id:"p",turn_id:"t",agent_id:$child}' |
     python3 "$AGENTGUARD_ROOT/lib/agentguard/busy-team.py" "$claude_argv_dir" s 1 \
       "$claude_agent" "$claude_actor" "$claude_action" ${claude_key:+"$claude_key"} >/dev/null 2>&1
   _assert_eq "busy: busy-team rejects $claude_argv" 2 "$?"
