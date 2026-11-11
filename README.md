@@ -369,20 +369,28 @@ the `PermissionRequest` that Codex and the OpenCode adapter deliver), and
 `blocked` when a root turn fails (`StopFailure`, if it wins the prompt cycle's
 single bell). A glance acknowledges `done`; `waiting` and `blocked` stay until
 the agent moves on. The next tool of the actor that raised `waiting` (the root
-agent, or the child `agent_id`), or that child's `SubagentStop` or
-`StopFailure`, clears it; the next prompt, a Stop that does not ring, an
+agent, or the child routed by `agent_id` or Muse's child session), or that
+child's `SubagentStop` or `StopFailure`, clears it; Claude names no actor on
+permission prompts, a subagent's included, so any actor's next tool or child
+end clears its `waiting`; the next prompt, a Stop that does not ring, an
 interrupt, or session end clears either kind, and a ringing Stop's `done`
 replaces it. Claude's `idle_prompt`, sent about a minute after every turn,
 clears `waiting` (a prompt dismissed with Esc ends no turn) and rings only as
-the backstop for a turn whose Stop did not ring; `auth_success` rings
-nothing. A per-session `attention-sticky` flag records the raised kind and
+the backstop for a turn whose Stop did not ring: one with no Stop, or a turn
+that started without a prompt (a teammate message, a background task, a
+scheduled wakeup), whose Stop finds the prompt cycle's bell already taken;
+`auth_success` rings nothing. A permission request always rings; with turn
+identities, one from a turn the hooks did not see start records no flag. A per-session `attention-sticky` flag records the raised kind and
 actor, so a tool call costs one builtin file test while nothing is sticky.
 Marks are set before the flag and cleared after it is removed, and clears are
 conditional (`term-pane-mark clear pending --if`), so a `done` or failed-command
 mark is never erased. Gemini CLI reports tools as `BeforeTool`, which
 AgentGuard does not observe, so its `waiting` lasts until the turn ends. After
 you answer a prompt, `waiting` stays until the agent's next tool or the end of
-its turn, since no hook reports the answer itself. With an older tmux-tools
+its turn, since no hook reports the answer itself. Agent-team teammates that
+run in the lead's process share its pane but keep their own session flags, so
+one session's clear can retire another session's newer `waiting` dot on that
+pane early. With an older tmux-tools
 that rejects `--kind`, notifications ring and mark plain pending as before;
 one that rejects `--if` only loses the flag, never a mark.
 

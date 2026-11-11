@@ -71,7 +71,10 @@ mark or a failed command's mark is left for the user to see. A release of
 .B term-pane-mark
 that rejects
 .B \-\-if
-is not retried with a plain clear.
+is not retried with a plain clear. A Stop that stays silent because the prompt
+cycle's bell was already taken (a turn that started without a prompt) leaves
+its bell to the next idle notification (see
+.BR agent-hook-notification (1)).
 .SH ENVIRONMENT
 .TP
 .B AGENTGUARD_STOP_BLOCK_ENDS_TURN

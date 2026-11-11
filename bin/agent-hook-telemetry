@@ -66,14 +66,6 @@ if command -v term-pane-mark >/dev/null 2>&1; then
       case "$_busy_event" in
         PreToolUse)
           _busy_child=$(printf '%s' "$_HOOK_INPUT" | jq -r '.agent_id // .agentId // empty' 2>/dev/null)
-          # The agent's next tool means an answered prompt: clear the waiting
-          # mark its actor raised. A builtin test keeps tools free of forks
-          # while nothing is sticky.
-          if [ -e "$_HOOK_STATE_DIR/attention-sticky" ]; then
-            _busy_actor=root
-            _hook_attention_actor _busy_actor "$_busy_child"
-            _hook_attention_clear waiting "$_busy_actor"
-          fi
           if [ -z "$_busy_child" ] && [ "${AGENTGUARD_NAME:-}" = muse ] &&
             [ -e "$_HOOK_STATE_DIR/muse-child-session" ]; then
             _busy_sid=$(printf '%s' "$_HOOK_INPUT" | jq -r '(.session_id | strings) // empty' 2>/dev/null)
@@ -89,6 +81,15 @@ if command -v term-pane-mark >/dev/null 2>&1; then
               [ -e "$_HOOK_STATE_DIR/muse-child/child.$_HOOK_SESSION_KEY" ]; then
               _busy_child="$_busy_sid"
             fi
+          fi
+          # The agent's next tool means an answered prompt: clear the waiting
+          # mark this tool's actor raised, matched on the routed child so a
+          # sibling cannot clear another child's open prompt. A builtin test
+          # keeps tools free of forks while nothing is sticky.
+          if [ -e "$_HOOK_STATE_DIR/attention-sticky" ]; then
+            _busy_actor=root
+            _hook_attention_payload_actor _busy_actor "$_busy_child"
+            _hook_attention_clear waiting "$_busy_actor"
           fi
           if [ -n "$_busy_child" ] && { [ "${AGENTGUARD_NAME:-}" = codex ] ||
             [ "${AGENTGUARD_NAME:-}" = muse ]; }; then
@@ -123,12 +124,13 @@ if command -v term-pane-mark >/dev/null 2>&1; then
           case "${AGENTGUARD_NAME:-}" in codex | claude | muse) _hook_team_busy child set || true ;; esac
           ;;
         SubagentStop)
+          # Before the Muse routing state that names the child is retired.
+          _hook_attention_child_end
           if [ "${AGENTGUARD_NAME:-}" = muse ]; then
             rm -f -- "$_HOOK_STATE_DIR/muse-child-turn" 2>/dev/null || true
             _hook_muse_child_end || true
           fi
           case "${AGENTGUARD_NAME:-}" in codex | claude | muse) _hook_team_busy child clear || true ;; esac
-          _hook_attention_child_end
           ;;
         StopFailure)
           # A failed Claude child turn ends without its SubagentStop. The

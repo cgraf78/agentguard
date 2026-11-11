@@ -913,7 +913,11 @@ _hook_stop_should_notify() {
   if _hook_stop_active && ! _hook_stop_was_continued; then
     return 1
   fi
-  _hook_stop_claim_notification
+  _hook_stop_claim_notification && return 0
+  # The cycle's bell was already taken: a turn that started without a prompt
+  # (a teammate message, a background task, a scheduled wakeup) ends here.
+  _HOOK_STOP_CLAIM_LOST=1
+  return 1
 }
 
 # Record that this foreground Stop's response kept the turn going, so a later
@@ -994,6 +998,12 @@ _hook_stop_settle_current() {
         rm -f -- "$_HOOK_STATE_DIR/attention-sticky" 2>/dev/null || true
       _hook_attention_notify "done" || true
     else
+      if [ -n "${_HOOK_STOP_CLAIM_LOST:-}" ]; then
+        # Leave that silent end to Claude's idle prompt, which rings for it
+        # once (see _hook_attention_claim_ring_current), as it did before the
+        # idle prompt stopped ringing after every turn.
+        : >"$_HOOK_STATE_DIR/prompt-cycle/stop-silent" 2>/dev/null || true
+      fi
       _hook_attention_clear sticky
     fi
     _hook_pane_busy clear
@@ -1097,24 +1107,26 @@ _hook_attention_raise() {
 
 _hook_attention_raise_current() {
   local current=''
-  # A late notification from an older turn must not overwrite a newer turn's
-  # state. Unlike a Stop, it still rings when no turn was recorded (a session
-  # whose prompt predates the hooks): the permission bell always rang. Success
-  # either way, so only a lock failure fails.
+  # The fence governs only the bookkeeping. A turn the hooks did not see start
+  # (a Codex turn without a prompt submit, a steer) records a different turn,
+  # and a permission request blocks its turn, so it cannot be a stale one:
+  # always ring, but leave the flag to the recorded turn. No recorded turn (a
+  # session whose prompt predates the hooks) raises normally.
   if IFS= read -r current <"$_HOOK_STATE_DIR/attention-turn" 2>/dev/null &&
     [ "$current" != "$_HOOK_TURN_KIND:$_HOOK_TURN_TOKEN" ]; then
+    _hook_attention_notify "$1" || true
     return 0
   fi
   _hook_attention_raise "$@"
 }
 
-# Raise sticky kind $1 for actor $2 from a notification. With turn identities,
-# a root notification runs under the attention lock and yields to a newer
-# turn. A child's notification carries the child's turn, and an unavailable
-# lock must not swallow a permission bell that rang before this feature, so
-# both raise directly.
+# Raise sticky kind $1 for actor $2 from a notification, never losing the
+# bell. With turn identities, a root notification takes the attention lock so
+# its flag cannot cross a prompt's rearm. Child activity carries its own
+# session or turn and is not fenced; neither is a notification whose lock is
+# unavailable.
 _hook_attention_raise_fenced() {
-  if [ "$2" = root ]; then
+  if [ "$2" = root ] || [ "$2" = any ]; then
     _hook_turn_identity
     if [ "$_HOOK_TURN_KIND" = tagged ] && _hook_attention_managed; then
       _hook_attention_locked _hook_attention_raise_current "$1" "$2" && return 0
@@ -1123,8 +1135,46 @@ _hook_attention_raise_fenced() {
   _hook_attention_raise "$1" "$2"
 }
 
+# Store in the variable named by $1 the attention actor of this payload:
+# root, a child id, or background (a transcript-less Codex session, the
+# in-process background agents _hook_activity_is_foreground excludes). $2,
+# when given, is the child id the caller already routed (agent-hook-telemetry
+# routes Muse children); otherwise the same detectors run here: agent_id or
+# agentId, then Muse's child session routing (child_session_id names the
+# child on its SubagentStop).
+_hook_attention_payload_actor() {
+  local _aa_child="${2-}" _aa_sid='' _aa_agent=''
+  _hook_agent_name _aa_agent
+  if [ $# -lt 2 ]; then
+    case "${_HOOK_INPUT:-}" in
+      *'"agent_id"'* | *'"agentId"'* | *\\u*)
+        _aa_child=$(printf '%s' "$_HOOK_INPUT" |
+          jq -r '(.agent_id // .agentId // empty) | strings' 2>/dev/null) || _aa_child=''
+        ;;
+    esac
+    if [ -z "$_aa_child" ] && [ "$_aa_agent" = muse ] &&
+      [ -e "$_HOOK_STATE_DIR/muse-child-session" ]; then
+      _aa_sid=$(printf '%s' "${_HOOK_INPUT:-}" |
+        jq -r '(.child_session_id | strings) // (.session_id | strings) // empty' 2>/dev/null) || _aa_sid=''
+      if [ -n "$_aa_sid" ] && { [ "$_aa_sid" != "$_HOOK_SESSION_KEY" ] ||
+        [ -e "$_HOOK_STATE_DIR/muse-child/child.$_HOOK_SESSION_KEY" ]; }; then
+        _aa_child="$_aa_sid"
+      fi
+    fi
+  fi
+  if [ -n "$_aa_child" ]; then
+    _hook_attention_actor "$1" "$_aa_child"
+  elif [ "$_aa_agent" = codex ] && ! _hook_activity_is_foreground; then
+    printf -v "$1" background
+  else
+    printf -v "$1" root
+  fi
+}
+
 # Clear this session's sticky mark when its flag records kind $1 (waiting, or
-# sticky for either) raised by actor $2 (any actor when omitted). The clear is
+# sticky for either) raised by actor $2 (any actor when omitted). A flag whose
+# actor is "any" (a notification that cannot name its actor: Claude sends no
+# agent_id with a subagent's permission prompt) matches every actor. The clear is
 # conditional on the pane's current kind, so a newer done or failed mark
 # survives. An older tmux-tools rejects --if with 64; a plain clear would
 # erase those unseen marks, so the flag just goes and the mark waits for a
@@ -1133,7 +1183,7 @@ _hook_attention_clear() {
   local flag="$_HOOK_STATE_DIR/attention-sticky" kind='' actor=''
   [ -e "$flag" ] || return 0
   IFS=' ' read -r kind actor <"$flag" 2>/dev/null || true
-  if [ -n "${2:-}" ] && [ "$actor" != "$2" ]; then
+  if [ -n "${2:-}" ] && [ "$actor" != "$2" ] && [ "$actor" != any ]; then
     return 0
   fi
   if [ "$1" = waiting ] && [ "$kind" != waiting ]; then
@@ -1155,14 +1205,13 @@ _hook_attention_clear_foreground() {
 }
 
 # Clear the waiting mark a child raised once that child's turn ends: its
-# SubagentStop, or the StopFailure a failed child sends instead.
+# SubagentStop, or the StopFailure a failed child sends instead. Call it
+# before the event retires the child's routing state.
 _hook_attention_child_end() {
-  local child='' actor=''
+  local actor=''
   [ -e "$_HOOK_STATE_DIR/attention-sticky" ] || return 0
-  child=$(printf '%s' "${_HOOK_INPUT:-}" |
-    jq -r '(.agent_id // .agentId // empty) | strings' 2>/dev/null) || child=''
-  [ -n "$child" ] || return 0
-  _hook_attention_actor actor "$child"
+  _hook_attention_payload_actor actor
+  case "$actor" in root | background) return 0 ;; esac
   _hook_attention_clear waiting "$actor"
 }
 
@@ -1183,7 +1232,14 @@ _hook_attention_claim_ring_current() {
   if _hook_attention_managed; then
     _hook_attention_is_current || return 1
   fi
-  _hook_stop_claim_notification || return 1
+  # A Stop that lost the cycle's bell left its silent end to the idle prompt;
+  # unlinking the marker is atomic, so only one idle prompt rings for it.
+  if [ "$1" = "done" ] && [ -e "$_HOOK_STATE_DIR/prompt-cycle/stop-silent" ] &&
+    rm -- "$_HOOK_STATE_DIR/prompt-cycle/stop-silent" 2>/dev/null; then
+    :
+  else
+    _hook_stop_claim_notification || return 1
+  fi
   if [ "$1" = "done" ]; then
     # Done replaces any sticky kind on the pane, so only the flag goes.
     [ ! -e "$_HOOK_STATE_DIR/attention-sticky" ] ||

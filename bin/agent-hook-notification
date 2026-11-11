@@ -53,7 +53,7 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
 # turn, so it rings only as the backstop for a turn whose Stop never rang and
 # otherwise just retires a waiting mark answered by Esc; agent-hook-telemetry
 # repairs its busy mark. Anything else rings as a finished turn, as before.
-_notify_event='' _notify_type='' _notify_child='' _notify_actor=''
+_notify_event='' _notify_type='' _notify_child='' _notify_actor='' _notify_agent=''
 if _hook_read_input && [ -n "${_HOOK_INPUT:-}" ]; then
   IFS=$'\x1f' read -r _notify_event _notify_type _notify_child < <(
     printf '%s' "$_HOOK_INPUT" | jq -r '
@@ -67,7 +67,16 @@ if _hook_read_input && [ -n "${_HOOK_INPUT:-}" ]; then
 fi
 case "$_notify_event:$_notify_type" in
   PermissionRequest:* | *:permission_prompt | *:elicitation_dialog | *:ToolPermission)
-    _hook_attention_actor _notify_actor "$_notify_child"
+    if [ -n "$_notify_child" ]; then
+      _hook_attention_actor _notify_actor "$_notify_child"
+    elif _hook_agent_name _notify_agent && [ "$_notify_agent" = claude ]; then
+      # Claude's permission notifications carry no agent_id, a subagent's
+      # included, so the actor is unknown: any actor's next tool or child end
+      # retires it.
+      _notify_actor=any
+    else
+      _hook_attention_payload_actor _notify_actor
+    fi
     _hook_attention_raise_fenced waiting "$_notify_actor"
     ;;
   *:idle_prompt)

@@ -68,9 +68,9 @@ ends with the agent's next activity. A
 .B PreToolUse
 event only tests whether the flag file exists, which starts no process while
 nothing waits; when it exists and the tool's actor (the root agent, or the
-payload's
-.BR agent_id )
-raised it, the hook clears it with
+child routed by the payload's
+.B agent_id
+or Muse's child session) raised it, or the flag accepts any actor, the hook clears it with
 .BR "term-pane-mark clear pending \-\-if waiting" .
 A child's
 .B SubagentStop
