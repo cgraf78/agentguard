@@ -21,7 +21,8 @@ command and `SubagentStop` reuses `agent-hook-stop`. Grok Stop and
 SubagentStop `additionalContext` keep the agent working, so both stay
 fail-open empty JSON instead of injecting Hive Memory context.
 `StopFailure` and `StopCancelled` run passive telemetry so a failed or
-cancelled foreground turn also clears its busy pane mark.
+cancelled foreground turn also clears its busy pane mark; a failed turn also
+marks the pane `blocked` until the next prompt.
 
 Child events carry camelCase `subagentType` (and sometimes a distinct JSON
 `sessionId`). Hook state is then keyed as that child session id when it

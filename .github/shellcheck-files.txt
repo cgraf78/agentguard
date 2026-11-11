@@ -42,6 +42,7 @@ program	test/run-suites
 program	test/suites/agent-bash-reexec-test
 program	test/suites/agent-command-classifier-test
 program	test/suites/agent-churn-bypass-test
+program	test/suites/agent-hook-attention-test
 program	test/suites/agent-hook-bash-fast-test
 program	test/suites/agent-hook-bash-bounds-test
 program	test/suites/agent-hook-bash-find-grep-test

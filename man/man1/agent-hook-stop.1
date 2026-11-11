@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-STOP 1 "2026-10-14" "agentguard" "User Commands"
+.TH AGENT-HOOK-STOP 1 "2026-11-11" "agentguard" "User Commands"
 .SH NAME
 agent-hook-stop \- run end-of-turn agent checks and notifications
 .SH SYNOPSIS
@@ -8,7 +8,12 @@ agent-hook-stop \- run end-of-turn agent checks and notifications
 reads a stop hook JSON payload from standard input, asks Hive Memory for any
 pending-memory reminder, runs its extensions, and plays a terminal notification
 (naming the agent process with
-.BR "term-notify-sound \-\-owner" )
+.BR "term-notify-sound \-\-owner" ,
+attention kind
+.BR done ,
+retried without
+.B \-\-kind
+when an older release rejects it)
 for the first Stop after a valid prompt that ends the foreground turn. A Stop
 an extension blocks to keep the agent working stays silent, so the Stop that
 later ends the turn rings although the runtime flags it as a continuation.
@@ -51,6 +56,22 @@ mark, so the Stop of an agent it launched, which runs without that terminal,
 leaves it alone. A Claude Code interrupt fires no Stop or other turn-ending
 hook, so after one the mark stays set until the next prompt's turn ends or the
 session ends.
+.PP
+A ringing Stop's
+.B done
+replaces any waiting or blocked attention mark on the pane, so it only removes
+the session's
+.I attention-sticky
+flag. A foreground Stop that ends the turn without ringing clears such a mark
+with
+.BR "term-pane-mark clear pending \-\-if sticky" ,
+under the same attention lock and current-turn check as its bell; a
+.B done
+mark or a failed command's mark is left for the user to see. A release of
+.B term-pane-mark
+that rejects
+.B \-\-if
+is not retried with a plain clear.
 .SH ENVIRONMENT
 .TP
 .B AGENTGUARD_STOP_BLOCK_ENDS_TURN

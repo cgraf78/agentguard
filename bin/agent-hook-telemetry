@@ -66,6 +66,14 @@ if command -v term-pane-mark >/dev/null 2>&1; then
       case "$_busy_event" in
         PreToolUse)
           _busy_child=$(printf '%s' "$_HOOK_INPUT" | jq -r '.agent_id // .agentId // empty' 2>/dev/null)
+          # The agent's next tool means an answered prompt: clear the waiting
+          # mark its actor raised. A builtin test keeps tools free of forks
+          # while nothing is sticky.
+          if [ -e "$_HOOK_STATE_DIR/attention-sticky" ]; then
+            _busy_actor=root
+            _hook_attention_actor _busy_actor "$_busy_child"
+            _hook_attention_clear waiting "$_busy_actor"
+          fi
           if [ -z "$_busy_child" ] && [ "${AGENTGUARD_NAME:-}" = muse ] &&
             [ -e "$_HOOK_STATE_DIR/muse-child-session" ]; then
             _busy_sid=$(printf '%s' "$_HOOK_INPUT" | jq -r '(.session_id | strings) // empty' 2>/dev/null)
@@ -120,6 +128,7 @@ if command -v term-pane-mark >/dev/null 2>&1; then
             _hook_muse_child_end || true
           fi
           case "${AGENTGUARD_NAME:-}" in codex | claude | muse) _hook_team_busy child clear || true ;; esac
+          _hook_attention_child_end
           ;;
         StopFailure)
           # A failed Claude child turn ends without its SubagentStop. The
@@ -128,6 +137,7 @@ if command -v term-pane-mark >/dev/null 2>&1; then
             jq -e '(.agent_id // "") != ""' >/dev/null 2>&1; then
             _hook_team_busy child clear || true
           fi
+          _hook_attention_child_end
           ;;
         Notification)
           # Claude sends its idle prompt only once the parent is idle and no
@@ -153,6 +163,9 @@ if _hook_turn_aborted; then
     _hook_muse_child_reap_turn || true
   fi
   _hook_pane_busy clear
+  # After the busy clear: a failed turn turns red, any other end leaves no
+  # sticky kind behind.
+  _hook_attention_turn_aborted
 fi
 
 _agentguard_telemetry_enabled || {

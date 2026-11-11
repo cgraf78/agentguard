@@ -541,6 +541,52 @@ done
 _assert_eq "prefilter: env split skips text without env" "skip:" \
   "$(_prefilter_case _may_have_env_split_payloads _env_split_payloads "nohup -S 'rm -rf /'")"
 
+echo "=== perf-regression: per-tool attention check is one builtin test ==="
+
+# Every root tool asks whether a waiting mark needs clearing. Without the
+# attention-sticky flag that must stay a single builtin test: the jq and
+# term-pane-mark counts below are the pre-feature budget, and the shell trace
+# shows nothing else touching attention state. With the flag, the clear reuses
+# the hook's existing agent_id parse and adds only the provider call.
+_tool_attention_dir=$(_tmpdir)
+mkdir -p "$_tool_attention_dir/bin"
+cat >"$_tool_attention_dir/bin/term-pane-mark" <<'SCRIPT'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$MOCK_MARK_CALLS"
+SCRIPT
+chmod +x "$_tool_attention_dir/bin/term-pane-mark"
+_tool_attention_cost() {
+  # $1: case name, $2: payload. Prints "jq=N mark=N attention=N", where
+  # attention counts traced commands that mention attention state.
+  local run="$_tool_attention_dir/$1"
+  mkdir -p "$run"
+  : >"$_mock_jq_calls"
+  printf '%s' "$2" |
+    env MOCK_JQ_CALLS="$_mock_jq_calls" MOCK_MARK_CALLS="$run/mark" \
+      PATH="$_tool_attention_dir/bin:$_mock_jq_dir:$PATH" TMPDIR="$TEST_TMPDIR" \
+      AGENTGUARD_NAME=claude AGENTGUARD_SESSION_ID="$TEST_SID-per-tool" \
+      AGENTGUARD_TELEMETRY=0 AGENTGUARD_HOOK_SELF="$BIN_DIR/agent-hook-telemetry" \
+      bash -c 'exec 9>"$1"; BASH_XTRACEFD=9; set -x; . "$2"' _ \
+      "$run/trace" "$BIN_DIR/agent-hook-telemetry" >/dev/null 2>&1
+  printf 'jq=%s mark=%s attention=%s\n' \
+    "$(wc -l <"$_mock_jq_calls" | tr -d ' ')" \
+    "$(cat "$run/mark" 2>/dev/null | wc -l | tr -d ' ')" \
+    "$(grep -cE '_hook_attention|attention-sticky' "$run/trace")"
+}
+_tool_payload=$(jq -cn --arg s "$TEST_SID-per-tool" \
+  '{session_id:$s,prompt_id:"p1",hook_event_name:"PreToolUse",tool_name:"Read"}')
+_tool_flag="$XDG_RUNTIME_DIR/agentguard/hook-state/$TEST_SID-per-tool/attention-sticky"
+_assert_eq "attention: a root tool without a flag keeps its jq/mark budget" \
+  "jq=4 mark=1 attention=1" "$(_tool_attention_cost first "$_tool_payload")"
+_assert_eq "attention: a cached busy turn costs the same, no mark" \
+  "jq=4 mark=0 attention=1" "$(_tool_attention_cost cached "$_tool_payload")"
+_assert_path_missing "attention: the check creates no flag" "$_tool_flag"
+printf 'waiting root\n' >"$_tool_flag"
+_tool_flagged=$(_tool_attention_cost flagged "$_tool_payload")
+_assert_eq "attention: a flagged root tool adds only the clear" \
+  "jq=4 mark=1" "${_tool_flagged% *}"
+_assert_path_missing "attention: the flagged tool removed the flag" "$_tool_flag"
+
 echo "=== perf-regression: generous end-to-end ceilings ==="
 
 _assert_hook_median_under() {

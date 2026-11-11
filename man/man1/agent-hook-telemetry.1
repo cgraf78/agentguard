@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-TELEMETRY 1 "2026-10-12" "agentguard" "User Commands"
+.TH AGENT-HOOK-TELEMETRY 1 "2026-11-11" "agentguard" "User Commands"
 .SH NAME
 agent-hook-telemetry \- record an agent hook event in the audit trail
 .SH SYNOPSIS
@@ -34,10 +34,11 @@ A
 .B StopFailure
 or
 .B Interrupt
-event for the foreground turn ends it without a Stop callback, and only this hook is wired to
-those events, so while recording is enabled it also clears the agent's busy
-tmux pane mark with
-.BR "term-pane-mark clear busy" .
+event for the foreground turn ends it without a Stop callback, and only this
+hook is wired to those events, so it also clears the agent's busy tmux pane
+mark with
+.BR "term-pane-mark clear busy" ,
+whether or not recording is enabled.
 A subagent's event (one carrying
 .BR agent_id )
 and an
@@ -47,6 +48,44 @@ whose
 is
 .B superseded
 (sent after the steering prompt that replaced the turn) leave the mark set.
+After the busy clear, a foreground
+.B StopFailure
+rings
+.B term-notify-sound
+with attention kind
+.B blocked
+when it wins the prompt cycle's single bell (the one a ringing
+.BR agent-hook-stop (1)
+holds) and records the session's
+.I attention-sticky
+flag. A blocked mark stays until the next prompt or the end of the session.
+Any other foreground turn end clears a waiting or blocked mark with
+.BR "term-pane-mark clear pending \-\-if sticky" .
+.PP
+Waiting attention (see
+.BR agent-hook-notification (1))
+ends with the agent's next activity. A
+.B PreToolUse
+event only tests whether the flag file exists, which starts no process while
+nothing waits; when it exists and the tool's actor (the root agent, or the
+payload's
+.BR agent_id )
+raised it, the hook clears it with
+.BR "term-pane-mark clear pending \-\-if waiting" .
+A child's
+.B SubagentStop
+or
+.B StopFailure
+does the same for a waiting mark that child raised. The flag is removed before
+the mark is cleared. A release of
+.B term-pane-mark
+that rejects
+.B \-\-if
+only loses the flag; the hook never falls back to a plain clear, which would
+erase unseen attention. Gemini CLI reports tools as
+.BR BeforeTool ,
+which this hook does not observe, so its waiting mark lasts until the turn
+ends.
 .PP
 For Claude, each subagent or teammate turn keeps the pane busy from its
 .B SubagentStart
@@ -89,5 +128,7 @@ in the AgentGuard checkout.
 .SH EXIT STATUS
 Always 0.
 .SH SEE ALSO
+.BR agent-hook-notification (1),
 .BR agentguard-telemetry (1),
+.BR term-notify-sound (1),
 .BR term-pane-mark (1)

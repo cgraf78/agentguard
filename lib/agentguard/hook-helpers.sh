@@ -989,7 +989,12 @@ _hook_stop_settle_current() {
     _hook_stop_mark_continued
   else
     if _hook_stop_should_notify; then
-      term-notify-sound --owner "$PPID" >/dev/null 2>&1 || true
+      # Done replaces any sticky kind on the pane, so only the flag goes.
+      [ ! -e "$_HOOK_STATE_DIR/attention-sticky" ] ||
+        rm -f -- "$_HOOK_STATE_DIR/attention-sticky" 2>/dev/null || true
+      _hook_attention_notify "done" || true
+    else
+      _hook_attention_clear sticky
     fi
     _hook_pane_busy clear
   fi
@@ -1046,6 +1051,168 @@ _hook_turn_aborted() {
     and (.agent_id // .agentId) == null
     and .reason != "superseded"
   ' >/dev/null 2>&1
+}
+
+# Attention kinds. term-notify-sound sets the pane's pending mark to a kind:
+# done (a turn finished), waiting (the agent needs an answer) or blocked (the
+# turn died). A glance acknowledges done; waiting and blocked are sticky, so
+# the hooks clear them once the agent moves on. The per-session flag
+# attention-sticky records "<kind> <actor>" for a sticky mark this session
+# raised (actor: root, or the child agent_id), so the per-tool clear costs a
+# single builtin test while nothing is sticky. Marks are set before the flag
+# and the flag is removed before the mark is cleared: a race can leave a
+# stale flag, which costs one harmless conditional clear, but never an
+# untracked sticky mark.
+
+# Ring with attention kind $1. Succeeds only when the provider accepted the
+# kind. An older tmux-tools rejects --kind with 64 before ringing, so retry
+# once without it: the bell and a plain pending mark still land, as before.
+_hook_attention_notify() {
+  local status=0
+  term-notify-sound --owner "$PPID" --kind "$1" >/dev/null 2>&1 || status=$?
+  [ "$status" = 64 ] || return "$status"
+  term-notify-sound --owner "$PPID" >/dev/null 2>&1 || true
+  return 1
+}
+
+# Store the flag's actor for payload agent id $2 in the variable named by $1.
+# Ids outside the flag's word charset collapse to one placeholder, which only
+# costs a waiting clear by a different odd-named child.
+_hook_attention_actor() {
+  case "$2" in
+    '') printf -v "$1" root ;;
+    *[!A-Za-z0-9._:-]*) printf -v "$1" child ;;
+    *) printf -v "$1" '%s' "$2" ;;
+  esac
+}
+
+# Ring sticky kind $1 for actor $2, then record the flag when the provider
+# accepted the kind. A legacy fallback marks plain pending, which a glance
+# acknowledges, so it gets no flag.
+_hook_attention_raise() {
+  _hook_attention_notify "$1" || return 0
+  _hook_mkstate "$_HOOK_STATE_DIR" || return 0
+  _hook_write_atomic "$_HOOK_STATE_DIR/attention-sticky" "$1 $2" || true
+}
+
+_hook_attention_raise_current() {
+  local current=''
+  # A late notification from an older turn must not overwrite a newer turn's
+  # state. Unlike a Stop, it still rings when no turn was recorded (a session
+  # whose prompt predates the hooks): the permission bell always rang. Success
+  # either way, so only a lock failure fails.
+  if IFS= read -r current <"$_HOOK_STATE_DIR/attention-turn" 2>/dev/null &&
+    [ "$current" != "$_HOOK_TURN_KIND:$_HOOK_TURN_TOKEN" ]; then
+    return 0
+  fi
+  _hook_attention_raise "$@"
+}
+
+# Raise sticky kind $1 for actor $2 from a notification. With turn identities,
+# a root notification runs under the attention lock and yields to a newer
+# turn. A child's notification carries the child's turn, and an unavailable
+# lock must not swallow a permission bell that rang before this feature, so
+# both raise directly.
+_hook_attention_raise_fenced() {
+  if [ "$2" = root ]; then
+    _hook_turn_identity
+    if [ "$_HOOK_TURN_KIND" = tagged ] && _hook_attention_managed; then
+      _hook_attention_locked _hook_attention_raise_current "$1" "$2" && return 0
+    fi
+  fi
+  _hook_attention_raise "$1" "$2"
+}
+
+# Clear this session's sticky mark when its flag records kind $1 (waiting, or
+# sticky for either) raised by actor $2 (any actor when omitted). The clear is
+# conditional on the pane's current kind, so a newer done or failed mark
+# survives. An older tmux-tools rejects --if with 64; a plain clear would
+# erase those unseen marks, so the flag just goes and the mark waits for a
+# glance.
+_hook_attention_clear() {
+  local flag="$_HOOK_STATE_DIR/attention-sticky" kind='' actor=''
+  [ -e "$flag" ] || return 0
+  IFS=' ' read -r kind actor <"$flag" 2>/dev/null || true
+  if [ -n "${2:-}" ] && [ "$actor" != "$2" ]; then
+    return 0
+  fi
+  if [ "$1" = waiting ] && [ "$kind" != waiting ]; then
+    return 0
+  fi
+  rm -f -- "$flag" 2>/dev/null || true
+  command -v term-pane-mark >/dev/null 2>&1 || return 0
+  term-pane-mark clear pending --if "$1" --owner "$PPID" >/dev/null 2>&1 || true
+}
+
+# Clear kind $1 for foreground activity only (prompt, Stop, Interrupt,
+# session end): a child or background session sharing the process has not
+# moved the user's agent on. The flag test runs first, so sessions without a
+# sticky mark keep their hook budget.
+_hook_attention_clear_foreground() {
+  [ -e "$_HOOK_STATE_DIR/attention-sticky" ] || return 0
+  _hook_activity_is_foreground || return 0
+  _hook_attention_clear "$1"
+}
+
+# Clear the waiting mark a child raised once that child's turn ends: its
+# SubagentStop, or the StopFailure a failed child sends instead.
+_hook_attention_child_end() {
+  local child='' actor=''
+  [ -e "$_HOOK_STATE_DIR/attention-sticky" ] || return 0
+  child=$(printf '%s' "${_HOOK_INPUT:-}" |
+    jq -r '(.agent_id // .agentId // empty) | strings' 2>/dev/null) || child=''
+  [ -n "$child" ] || return 0
+  _hook_attention_actor actor "$child"
+  _hook_attention_clear waiting "$actor"
+}
+
+# Ring kind $1 for the root agent only if it wins this prompt cycle's one
+# bell, the claim a ringing Stop holds, under the same attention fence as a
+# Stop. Succeeds when this call won the claim.
+_hook_attention_claim_ring() {
+  _hook_activity_is_foreground || return 1
+  _hook_turn_identity
+  if _hook_attention_managed; then
+    _hook_attention_locked _hook_attention_claim_ring_current "$1"
+  else
+    _hook_attention_claim_ring_current "$1"
+  fi
+}
+
+_hook_attention_claim_ring_current() {
+  if _hook_attention_managed; then
+    _hook_attention_is_current || return 1
+  fi
+  _hook_stop_claim_notification || return 1
+  if [ "$1" = "done" ]; then
+    # Done replaces any sticky kind on the pane, so only the flag goes.
+    [ ! -e "$_HOOK_STATE_DIR/attention-sticky" ] ||
+      rm -f -- "$_HOOK_STATE_DIR/attention-sticky" 2>/dev/null || true
+    _hook_attention_notify "done" || true
+  else
+    _hook_attention_raise "$1" root
+  fi
+  return 0
+}
+
+# Settle attention for a root turn that ended without Stop (see
+# _hook_turn_aborted, which the caller already checked). A failed request
+# (StopFailure) rings blocked when it wins the prompt cycle's bell; any other
+# end, or a failure that lost the claim, leaves no sticky kind behind.
+_hook_attention_turn_aborted() {
+  local event=''
+  _hook_activity_is_foreground || return 0
+  case "${_HOOK_INPUT:-}" in
+    *StopFailure*)
+      event=$(printf '%s' "$_HOOK_INPUT" |
+        jq -r '.hook_event_name // .hookEventName // empty' 2>/dev/null) || event=''
+      ;;
+  esac
+  if [ "$event" = StopFailure ] && command -v term-notify-sound >/dev/null 2>&1 &&
+    _hook_attention_claim_ring blocked; then
+    return 0
+  fi
+  _hook_attention_clear sticky
 }
 
 # Muse-only child tracking for the foreground veto below. Production Muse runs

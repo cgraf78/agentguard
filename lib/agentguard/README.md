@@ -147,6 +147,20 @@ clear it early (both commands come from
 `claude-templates` enables a Claude-specific maintenance hook when that
 command is installed.
 
+Notifications pass tmux-tools the kind of attention: `done` for a ringing Stop
+and unclassified notifications, `waiting` for permission prompts and questions
+(Notification `permission_prompt`/`elicitation_dialog`, Gemini `ToolPermission`,
+Codex and OpenCode `PermissionRequest`), and `blocked` for a root
+`StopFailure` that wins the prompt cycle's bell. Waiting and blocked are
+sticky: the session's `attention-sticky` flag (`<kind> <actor>`) lets the
+raising actor's next tool or child end clear `waiting`, and the next prompt, a
+silent Stop, an interrupt, or session end clear both, always with a
+conditional `term-pane-mark clear pending --if`. Claude's `idle_prompt` clears
+`waiting` and rings only when it wins the claim a ringing Stop holds. Older
+tmux-tools that reject `--kind` get the plain bell; a rejected `--if` only
+drops the flag. Gemini's `BeforeTool` is not observed, so its waiting lasts
+until the turn ends.
+
 Busy marks use length-prefixed session/turn generation tokens when provided, preventing a late
 Stop from clearing newer work. The same cached foreground/identity policy
 protects prompt rearming and completion notifications. Tagged lifecycle hooks

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # agent-hook-notification — Notification hook.
-# Audible alert on permission prompts and other attention requests.
+# Audible alert on permission prompts and other attention requests, marking
+# the pane with the kind of attention the agent needs.
 
 set -u
 _HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}" # captured before sourcing so _hook_source_extensions finds agent/local variants
@@ -45,8 +46,42 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
 }
 # END GENERATED LAUNCHER BOOTSTRAP
 
-# --owner: an agent this one launched cannot mark this agent's pane pending.
-term-notify-sound --owner "$PPID" 2>/dev/null || true
+# Permission prompts and questions wait for an answer (Claude, Grok and Muse
+# Notification types, Gemini's ToolPermission, and the PermissionRequest event
+# Codex and the OpenCode adapter deliver here); they stay marked until the
+# agent moves on. Claude's idle prompt arrives about a minute after every
+# turn, so it rings only as the backstop for a turn whose Stop never rang and
+# otherwise just retires a waiting mark answered by Esc; agent-hook-telemetry
+# repairs its busy mark. Anything else rings as a finished turn, as before.
+_notify_event='' _notify_type='' _notify_child='' _notify_actor=''
+if _hook_read_input && [ -n "${_HOOK_INPUT:-}" ]; then
+  IFS=$'\x1f' read -r _notify_event _notify_type _notify_child < <(
+    printf '%s' "$_HOOK_INPUT" | jq -r '
+      def word: if type == "string" and test("^[A-Za-z0-9._:-]*$") then . else "" end;
+      [(.hook_event_name // .hookEventName | word),
+        (.notification_type // .notificationType | word),
+        (.agent_id // .agentId | if . == null or . == "" then "" else (word | select(. != "") // "child") end)]
+      | join("\u001f")
+    ' 2>/dev/null
+  ) || true
+fi
+case "$_notify_event:$_notify_type" in
+  PermissionRequest:* | *:permission_prompt | *:elicitation_dialog | *:ToolPermission)
+    _hook_attention_actor _notify_actor "$_notify_child"
+    _hook_attention_raise_fenced waiting "$_notify_actor"
+    ;;
+  *:idle_prompt)
+    if _hook_activity_is_foreground; then
+      _hook_attention_clear waiting
+      _hook_attention_claim_ring "done" || true
+    fi
+    ;;
+  *:auth_success) ;;
+  *)
+    # --owner: an agent this one launched cannot mark this agent's pane.
+    _hook_attention_notify "done" || true
+    ;;
+esac
 
 _hook_source_extensions
 _hook_finish

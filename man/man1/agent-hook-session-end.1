@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-SESSION-END 1 "2026-10-12" "agentguard" "User Commands"
+.TH AGENT-HOOK-SESSION-END 1 "2026-11-11" "agentguard" "User Commands"
 .SH NAME
 agent-hook-session-end \- run generic agent session-end maintenance
 .SH SYNOPSIS
@@ -7,6 +7,10 @@ agent-hook-session-end \- run generic agent session-end maintenance
 .B agent-hook-session-end
 clears the agent's busy tmux pane mark with
 .BR "term-pane-mark clear busy" ,
+and, when the session's
+.I attention-sticky
+flag exists, its waiting or blocked attention mark with
+.BR "term-pane-mark clear pending \-\-if sticky" ,
 then reads a session-end hook JSON payload from standard input, refreshes
 shared session metadata, and gives extensions a final chance to run agent or
 environment-specific maintenance.
