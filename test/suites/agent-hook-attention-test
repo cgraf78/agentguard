@@ -439,14 +439,33 @@ codex_payload() {
   jq -nc --arg s "$ATT_SESSION" --arg t "$1" \
     "{session_id:\$s,turn_id:\$t,transcript_path:\"/tmp/r.jsonl\"} + ($2)"
 }
+# A turn the hooks did not see start (U: no prompt submit) still raises a
+# tracked mark, so its own next tool, or the next prompt after its Stop
+# (which the fence leaves silent), retires it.
 _case
 _hook agent-hook-prompt-submit codex "$(codex_payload A '{hook_event_name:"UserPromptSubmit",prompt:"Work."}')"
-_hook agent-hook-prompt-submit codex "$(codex_payload B '{hook_event_name:"UserPromptSubmit",prompt:"More."}')"
-_hook agent-hook-notification codex "$(codex_payload A '{hook_event_name:"PermissionRequest"}')"
+_hook agent-hook-stop codex "$(codex_payload A '{hook_event_name:"Stop"}')"
+: >"$ATT_LOG.notify"
+_hook agent-hook-notification codex "$(codex_payload U '{hook_event_name:"PermissionRequest"}')"
 _assert_eq "tagged: a request from a turn the hooks did not record still rings" \
   "--owner $(_owner) --kind waiting flag=absent" "$(_notify_calls)"
-_assert_eq "tagged: but records no flag for the recorded turn" "" "$(_flag)"
-: >"$ATT_LOG.notify"
+_assert_eq "tagged: and records the flag, so the mark stays tracked" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry codex "$(codex_payload U '{hook_event_name:"PreToolUse",tool_name:"Bash"}')"
+_assert_eq "tagged: that turn's next tool clears it" "" "$(_flag)"
+_assert_eq "tagged: and the pane no longer waits" "" "$(_pending_kind)"
+
+_case
+_hook agent-hook-prompt-submit codex "$(codex_payload A '{hook_event_name:"UserPromptSubmit",prompt:"Work."}')"
+_hook agent-hook-stop codex "$(codex_payload A '{hook_event_name:"Stop"}')"
+_hook agent-hook-notification codex "$(codex_payload U '{hook_event_name:"PermissionRequest"}')"
+_hook agent-hook-stop codex "$(codex_payload U '{hook_event_name:"Stop"}')"
+_assert_eq "tagged: the unrecorded turn's Stop is fenced and leaves the mark" "waiting" "$(_pending_kind)"
+_hook agent-hook-prompt-submit codex "$(codex_payload B '{hook_event_name:"UserPromptSubmit",prompt:"More."}')"
+_assert_eq "tagged: the next prompt clears it" "" "$(_flag)"
+_assert_eq "tagged: and the pane no longer waits" "" "$(_pending_kind)"
+
+_case
+_hook agent-hook-prompt-submit codex "$(codex_payload B '{hook_event_name:"UserPromptSubmit",prompt:"More."}')"
 _hook agent-hook-notification codex "$(codex_payload B '{hook_event_name:"PermissionRequest"}')"
 _assert_eq "tagged: the current turn's request rings waiting" \
   "--owner $(_owner) --kind waiting flag=absent" "$(_notify_calls)"

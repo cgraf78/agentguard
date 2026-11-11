@@ -159,8 +159,8 @@ silent Stop, an interrupt, or session end clear both, always with a
 conditional `term-pane-mark clear pending --if`. Claude's `idle_prompt` clears
 `waiting` and rings only when it wins the claim a ringing Stop holds, or
 once for a Stop that found that claim taken (a turn started without a
-prompt). A permission request always rings; the attention fence only decides
-whether its flag is written. Older
+prompt). A permission request always rings and records its flag, even from a
+turn the hooks did not see start. Older
 tmux-tools that reject `--kind` get the plain bell; a rejected `--if` only
 drops the flag. Gemini's `BeforeTool` is not observed, so its waiting lasts
 until the turn ends.

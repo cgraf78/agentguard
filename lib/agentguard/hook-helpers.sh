@@ -1105,31 +1105,19 @@ _hook_attention_raise() {
   _hook_write_atomic "$_HOOK_STATE_DIR/attention-sticky" "$1 $2" || true
 }
 
-_hook_attention_raise_current() {
-  local current=''
-  # The fence governs only the bookkeeping. A turn the hooks did not see start
-  # (a Codex turn without a prompt submit, a steer) records a different turn,
-  # and a permission request blocks its turn, so it cannot be a stale one:
-  # always ring, but leave the flag to the recorded turn. No recorded turn (a
-  # session whose prompt predates the hooks) raises normally.
-  if IFS= read -r current <"$_HOOK_STATE_DIR/attention-turn" 2>/dev/null &&
-    [ "$current" != "$_HOOK_TURN_KIND:$_HOOK_TURN_TOKEN" ]; then
-    _hook_attention_notify "$1" || true
-    return 0
-  fi
-  _hook_attention_raise "$@"
-}
-
 # Raise sticky kind $1 for actor $2 from a notification, never losing the
-# bell. With turn identities, a root notification takes the attention lock so
-# its flag cannot cross a prompt's rearm. Child activity carries its own
-# session or turn and is not fenced; neither is a notification whose lock is
-# unavailable.
+# bell or its flag. A permission request blocks its turn, so it is never
+# stale: a turn the hooks did not see start (a Codex turn without a prompt
+# submit, a steer) still raises normally, because a mark without its flag
+# would outlive every clear. With turn identities, a root notification takes
+# the attention lock only so its flag write cannot interleave with a prompt's
+# rearm, after which the prompt's own clear retires it. Child activity is not
+# serialized; neither is a notification whose lock is unavailable.
 _hook_attention_raise_fenced() {
   if [ "$2" = root ] || [ "$2" = any ]; then
     _hook_turn_identity
     if [ "$_HOOK_TURN_KIND" = tagged ] && _hook_attention_managed; then
-      _hook_attention_locked _hook_attention_raise_current "$1" "$2" && return 0
+      _hook_attention_locked _hook_attention_raise "$1" "$2" && return 0
     fi
   fi
   _hook_attention_raise "$1" "$2"

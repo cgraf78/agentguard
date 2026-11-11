@@ -379,9 +379,10 @@ clears `waiting` (a prompt dismissed with Esc ends no turn) and rings only as
 the backstop for a turn whose Stop did not ring: one with no Stop, or a turn
 that started without a prompt (a teammate message, a background task, a
 scheduled wakeup), whose Stop finds the prompt cycle's bell already taken;
-`auth_success` rings nothing. A permission request always rings; with turn
-identities, one from a turn the hooks did not see start records no flag. A per-session `attention-sticky` flag records the raised kind and
-actor, so a tool call costs one builtin file test while nothing is sticky.
+`auth_success` rings nothing. A permission request always rings and is always
+tracked, even from a turn the hooks did not see start. A per-session
+`attention-sticky` flag records the raised kind and actor, so a tool call
+costs one builtin file test while nothing is sticky.
 Marks are set before the flag and cleared after it is removed, and clears are
 conditional (`term-pane-mark clear pending --if`), so a `done` or failed-command
 mark is never erased. Gemini CLI reports tools as `BeforeTool`, which

@@ -39,8 +39,9 @@ notifications, a subagent's included, so its flag accepts any actor.
 A glance does not acknowledge a waiting mark; the agent's next tool, the end
 of the child that raised it, or the end of the turn or session clears it (see
 .BR agent-hook-telemetry (1)).
-It always rings; with turn identities, a root notification from a turn the
-hooks did not see start records no flag.
+It always rings and records its flag, even from a turn the hooks did not see
+start (its Stop is then fenced, and its next tool or the next prompt clears
+the mark).
 .TP
 .B idle_prompt
 Claude Code sends this about a minute after the agent goes idle. It clears a
