@@ -330,14 +330,9 @@ stop_claim_marker_failure=$(
     source "$1"
     _HOOK_INPUT=""
     _HOOK_INPUT_STATE_REFRESHED=1
+    # The state dir "exists" but the marker cannot be written into it.
     _HOOK_STATE_DIR="$2"
-    mkdir() {
-      if [ "${1:-}" = "-p" ]; then
-        command mkdir "$@"
-      else
-        return 1
-      fi
-    }
+    _hook_mkstate() { return 0; }
     if _hook_stop_should_notify; then
       printf "notify\n"
     else
@@ -347,6 +342,41 @@ stop_claim_marker_failure=$(
 )
 _assert_eq "stop notification claim: marker write failure stays silent" \
   "silent" "$stop_claim_marker_failure"
+
+# The claim must not trust an external mkdir: one that reports success for a
+# directory a racer already created (as a reimplemented coreutils did on a CI
+# image) would let every callback ring. A claim an older release left as a
+# directory still holds.
+stop_claim_mkdir_bin="$stop_claim_root/lenient-mkdir"
+mkdir -p "$stop_claim_mkdir_bin"
+printf '#!/bin/sh\n[ "$1" = -p ] && shift\n/bin/mkdir -p "$@"\n' >"$stop_claim_mkdir_bin/mkdir"
+chmod +x "$stop_claim_mkdir_bin/mkdir"
+stop_claim_lenient=$(
+  PATH="$stop_claim_mkdir_bin:$PATH" bash -c '
+    source "$1"
+    _HOOK_INPUT=""
+    _HOOK_INPUT_STATE_REFRESHED=1
+    _HOOK_STATE_DIR="$2"
+    for attempt in 1 2 3; do
+      if _hook_stop_should_notify; then printf "notify "; else printf "silent "; fi
+    done
+    case "$-" in *C*) printf "noclobber-leaked" ;; esac
+  ' _ "$HELPERS" "$stop_claim_root/lenient"
+)
+_assert_eq "stop notification claim: a lenient mkdir still claims once" \
+  "notify silent silent " "$stop_claim_lenient"
+stop_claim_legacy=$(
+  bash -c '
+    source "$1"
+    _HOOK_INPUT=""
+    _HOOK_INPUT_STATE_REFRESHED=1
+    _HOOK_STATE_DIR="$2"
+    mkdir -p "$2/prompt-cycle/stop-notified"
+    if _hook_stop_should_notify; then printf "notify\n"; else printf "silent\n"; fi
+  ' _ "$HELPERS" "$stop_claim_root/legacy"
+)
+_assert_eq "stop notification claim: an older release's directory claim holds" \
+  "silent" "$stop_claim_legacy"
 
 stop_claim_subagent=$(
   bash -c '

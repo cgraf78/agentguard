@@ -870,10 +870,21 @@ _hook_stop_active() {
 # behavioral reminders, sound must fail silent when state cannot be persisted;
 # failing open here would recreate the repeated-bell failure under concurrency
 # or a temporarily unavailable state root.
+#
+# The claim is the shell's own exclusive create (noclobber opens with
+# O_EXCL), not an external mkdir: a mkdir implementation that tests for the
+# directory before creating it, or reports success when a racer created it
+# first, lets several concurrent callbacks ring (seen on a CI image whose
+# coreutils is a reimplementation). It also spares a fork. A claim left as a
+# directory by an older release still counts: the redirect cannot open it.
 _hook_stop_claim_notification() {
-  local dir="$_HOOK_STATE_DIR/prompt-cycle"
+  local dir="$_HOOK_STATE_DIR/prompt-cycle" claimed=1 noclobber=''
   _hook_mkstate "$dir" || return 1
-  mkdir "$dir/stop-notified" 2>/dev/null
+  case "$-" in *C*) noclobber=1 ;; esac
+  set -C
+  { : >"$dir/stop-notified"; } 2>/dev/null && claimed=0
+  [ -n "$noclobber" ] || set +C
+  return "$claimed"
 }
 
 # Return whether this Stop ends the user's foreground turn. SubagentStop does
