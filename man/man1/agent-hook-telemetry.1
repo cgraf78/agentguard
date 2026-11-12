@@ -72,6 +72,12 @@ child routed by the payload's
 .B agent_id
 or Muse's child session) raised it, or the flag accepts any actor, the hook clears it with
 .BR "term-pane-mark clear pending \-\-if waiting" .
+A
+.B PostToolUse
+or
+.B PostToolUseFailure
+from that actor does the same, since a prompted tool returns only after its
+prompt is answered; while no flag exists it costs the same single file test.
 A child's
 .B SubagentStop
 or
@@ -82,7 +88,20 @@ the mark is cleared. A release of
 that rejects
 .B \-\-if
 only loses the flag; the hook never falls back to a plain clear, which would
-erase unseen attention. Gemini CLI reports tools as
+erase unseen attention.
+A Claude
+.B PermissionRequest
+raises nothing, because another hook may resolve it before a prompt shows,
+but records its actor and time in the session's
+.I attention-request
+file: Claude's
+.B permission_prompt
+notification that follows about 6 seconds later names no
+.BR agent_id ,
+and
+.BR agent-hook-notification (1)
+reads the actor from there.
+Gemini CLI reports tools as
 .BR BeforeTool ,
 which this hook does not observe, so its waiting mark lasts until the turn
 ends.

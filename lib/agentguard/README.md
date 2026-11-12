@@ -153,14 +153,19 @@ and unclassified notifications, `waiting` for permission prompts and questions
 Codex and OpenCode `PermissionRequest`), and `blocked` for a root
 `StopFailure` that wins the prompt cycle's bell. Waiting and blocked are
 sticky: the session's `attention-sticky` flag (`<kind> <actor>`, the actor
-being `root`, the routed child, or `any` for Claude, whose prompts name no
-agent) lets the raising actor's next tool or child end clear `waiting`, and the next prompt, a
+being `root`, the routed child, or `any` for a Claude notification that
+names no agent) lets the raising actor's next tool, tool result or child end
+clear `waiting`, and the next prompt, a
 silent Stop, an interrupt, or session end clear both, always with a
 conditional `term-pane-mark clear pending --if`. Claude's `idle_prompt` clears
 `waiting` and rings only when it wins the claim a ringing Stop holds, or
 once for a Stop that found that claim taken (a turn started without a
 prompt). A permission request always rings and records its flag, even from a
-turn the hooks did not see start. Older
+turn the hooks did not see start. Claude's notifications omit `agent_id`, so
+a Claude `PermissionRequest` (wired to `agent-hook-telemetry`) records
+`<epoch> <actor>` in the session's `attention-request`, and a
+`permission_prompt` within `_HOOK_ATTENTION_REQUEST_TTL` (60 s) of it takes
+that actor instead of `any`. Older
 tmux-tools that reject `--kind` get the plain bell; a rejected `--if` only
 drops the flag. Gemini's `BeforeTool` is not observed, so its waiting lasts
 until the turn ends.

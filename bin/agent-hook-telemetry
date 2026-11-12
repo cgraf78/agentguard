@@ -61,7 +61,7 @@ _hook_read_input || true
 # the pane helper caches the turn identity to avoid touching tmux per tool.
 if command -v term-pane-mark >/dev/null 2>&1; then
   case "${_HOOK_INPUT:-}" in
-    *PreToolUse* | *SubagentStart* | *SubagentStop* | *StopFailure* | *idle_prompt*)
+    *PreToolUse* | *SubagentStart* | *SubagentStop* | *StopFailure* | *idle_prompt* | *PermissionRequest*)
       _busy_event=$(printf '%s' "$_HOOK_INPUT" | jq -r '.hook_event_name // .hookEventName // empty' 2>/dev/null)
       case "$_busy_event" in
         PreToolUse)
@@ -116,6 +116,11 @@ if command -v term-pane-mark >/dev/null 2>&1; then
             _hook_pane_busy set
           fi
           ;;
+        PermissionRequest)
+          # Claude's permission Notification that may follow names no
+          # agent_id; note this request's actor for it (no mark here).
+          _hook_attention_note_request
+          ;;
         SubagentStart)
           if [ "${AGENTGUARD_NAME:-}" = muse ] && _hook_mkstate "$_HOOK_STATE_DIR"; then
             _hook_muse_child_begin || true
@@ -151,6 +156,14 @@ if command -v term-pane-mark >/dev/null 2>&1; then
           fi
           ;;
       esac
+      ;;
+  esac
+  # The prompted tool cannot return before its prompt is answered, so its
+  # actor's PostToolUse retires the waiting mark. While nothing is sticky a
+  # tool result costs one builtin file test.
+  case "${_HOOK_INPUT:-}" in
+    *PostToolUse*)
+      [ ! -e "$_HOOK_STATE_DIR/attention-sticky" ] || _hook_attention_tool_done
       ;;
   esac
 fi

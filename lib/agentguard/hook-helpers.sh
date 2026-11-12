@@ -1172,8 +1172,9 @@ _hook_attention_payload_actor() {
 
 # Clear this session's sticky mark when its flag records kind $1 (waiting, or
 # sticky for either) raised by actor $2 (any actor when omitted). A flag whose
-# actor is "any" (a notification that cannot name its actor: Claude sends no
-# agent_id with a subagent's permission prompt) matches every actor. The clear is
+# actor is "any" (a notification that cannot name its actor: a Claude
+# elicitation, or a permission prompt with no recent PermissionRequest)
+# matches every actor. The clear is
 # conditional on the pane's current kind, so a newer done or failed mark
 # survives. An older tmux-tools rejects --if with 64; a plain clear would
 # erase those unseen marks, so the flag just goes and the mark waits for a
@@ -1191,6 +1192,67 @@ _hook_attention_clear() {
   rm -f -- "$flag" 2>/dev/null || true
   command -v term-pane-mark >/dev/null 2>&1 || return 0
   term-pane-mark clear pending --if "$1" --owner "$PPID" >/dev/null 2>&1 || true
+}
+
+# Claude's permission_prompt Notification names no agent_id, a subagent's
+# included, but the PermissionRequest that precedes it does, about 6 s
+# earlier. That request records "<epoch> <actor>" in attention-request; it
+# raises nothing itself, since another hook may resolve the request before
+# any prompt shows. The record is not consumed: a prompt can notify more
+# than once, and with one sticky flag per session the newest request is the
+# best guess for each later notification. Two actors requesting within the
+# window can still be confused; the newer one wins.
+_HOOK_ATTENTION_REQUEST_TTL=60
+
+# Record this Claude PermissionRequest's actor for the notification it may
+# lead to. One small write, on an event that only fires for permission
+# checks.
+_hook_attention_note_request() {
+  local _nr_agent='' _nr_actor='' _nr_now=''
+  _hook_agent_name _nr_agent
+  [ "$_nr_agent" = claude ] || return 0
+  _hook_attention_payload_actor _nr_actor
+  _hook_now _nr_now || return 0
+  _hook_mkstate "$_HOOK_STATE_DIR" || return 0
+  _hook_write_atomic "$_HOOK_STATE_DIR/attention-request" "$_nr_now $_nr_actor" || true
+}
+
+# Store in the variable named by $1 the actor of this session's latest
+# PermissionRequest when it was recorded within the last
+# _HOOK_ATTENTION_REQUEST_TTL seconds; fail when there is no such record.
+_hook_attention_request_actor() {
+  local _ra_file="$_HOOK_STATE_DIR/attention-request" _ra_at='' _ra_actor='' _ra_now='' _ra_age
+  [ -f "$_ra_file" ] || return 1
+  IFS=' ' read -r _ra_at _ra_actor <"$_ra_file" 2>/dev/null || return 1
+  case "$_ra_at" in
+    '' | *[!0-9]* | ????????????????*) return 1 ;;
+  esac
+  case "$_ra_actor" in
+    '' | any | *[!A-Za-z0-9._:-]*) return 1 ;;
+  esac
+  _hook_now _ra_now || return 1
+  _ra_age=$((10#$_ra_now - 10#$_ra_at))
+  [ "$_ra_age" -ge 0 ] && [ "$_ra_age" -le "$_HOOK_ATTENTION_REQUEST_TTL" ] || return 1
+  printf -v "$1" '%s' "$_ra_actor"
+}
+
+# A tool that returns after a prompt was answered: clear the waiting mark
+# its actor raised. The prompted tool cannot return before the answer, so
+# this retires the mark as soon as the approved tool finishes or the
+# question's answer lands, instead of at the actor's next tool. Callers test
+# the flag first, so tools pay nothing while nothing is sticky.
+_hook_attention_tool_done() {
+  local _td_event="${_HOOK_INPUT_EVENT:-}" _td_actor=''
+  if [ -z "$_td_event" ]; then
+    _td_event=$(printf '%s' "${_HOOK_INPUT:-}" |
+      jq -r '.hook_event_name // .hookEventName // empty' 2>/dev/null) || _td_event=''
+  fi
+  case "$_td_event" in
+    PostToolUse | PostToolUseFailure) ;;
+    *) return 0 ;;
+  esac
+  _hook_attention_payload_actor _td_actor
+  _hook_attention_clear waiting "$_td_actor"
 }
 
 # Clear kind $1 for foreground activity only (prompt, Stop, Interrupt,

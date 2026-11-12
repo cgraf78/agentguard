@@ -71,9 +71,14 @@ case "$_notify_event:$_notify_type" in
       _hook_attention_actor _notify_actor "$_notify_child"
     elif _hook_agent_name _notify_agent && [ "$_notify_agent" = claude ]; then
       # Claude's permission notifications carry no agent_id, a subagent's
-      # included, so the actor is unknown: any actor's next tool or child end
-      # retires it.
+      # included. A permission prompt follows its PermissionRequest, which
+      # agent-hook-telemetry recorded with the actor, by about 6 s. Without
+      # a fresh record (an elicitation has none) the actor is unknown and
+      # any actor's next tool or child end retires the mark.
       _notify_actor=any
+      if [ "$_notify_type" = permission_prompt ]; then
+        _hook_attention_request_actor _notify_actor || _notify_actor=any
+      fi
     else
       _hook_attention_payload_actor _notify_actor
     fi

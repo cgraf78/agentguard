@@ -370,16 +370,23 @@ the `PermissionRequest` that Codex and the OpenCode adapter deliver), and
 single bell). A glance acknowledges `done`; `waiting` and `blocked` stay until
 the agent moves on. The next tool of the actor that raised `waiting` (the root
 agent, or the child routed by `agent_id` or Muse's child session), or that
-child's `SubagentStop` or `StopFailure`, clears it; Claude names no actor on
-permission prompts, a subagent's included, so any actor's next tool or child
-end clears its `waiting`; the next prompt, a Stop that does not ring, an
-interrupt, or session end clears either kind, and a ringing Stop's `done`
-replaces it. Claude's `idle_prompt`, sent about a minute after every turn,
+child's `SubagentStop` or `StopFailure`, clears it, and so does that actor's
+`PostToolUse` or `PostToolUseFailure`, since the prompted tool returns only
+after the answer. Claude names no actor on its permission notifications, a
+subagent's included, so `agent-hook-telemetry` records the actor of each
+Claude `PermissionRequest` (which raises nothing itself, since another hook
+may resolve it before a prompt shows) and a `permission_prompt` within 60
+seconds of it takes that actor; without such a record (an
+`elicitation_dialog`, for one), any actor's next tool or child end clears
+its `waiting`. Two actors requesting permission within that window can be
+confused: the newer request names both prompts. The next prompt, a Stop that
+does not ring, an interrupt, or session end clears either kind, and a ringing
+Stop's `done` replaces it. Claude's `idle_prompt`, sent about a minute after every turn,
 clears `waiting` (a prompt dismissed with Esc ends no turn) and rings only as
 the backstop for a turn whose Stop did not ring: one with no Stop, or a turn
 that started without a prompt (a teammate message, a background task, a
 scheduled wakeup), whose Stop finds the prompt cycle's bell already taken;
-`auth_success` rings nothing. A permission request always rings and is always
+`auth_success` rings nothing. A permission prompt always rings and is always
 tracked, even from a turn the hooks did not see start. A per-session
 `attention-sticky` flag records the raised kind and actor, so a tool call
 costs one builtin file test while nothing is sticky.
@@ -387,8 +394,10 @@ Marks are set before the flag and cleared after it is removed, and clears are
 conditional (`term-pane-mark clear pending --if`), so a `done` or failed-command
 mark is never erased. Gemini CLI reports tools as `BeforeTool`, which
 AgentGuard does not observe, so its `waiting` lasts until the turn ends. After
-you answer a prompt, `waiting` stays until the agent's next tool or the end of
-its turn, since no hook reports the answer itself. Agent-team teammates that
+you answer a prompt, `waiting` stays until the prompted tool returns, the
+agent's next tool, or the end of its turn, since no hook reports the answer
+itself; approving a long-running command keeps it yellow while that command
+runs. Agent-team teammates that
 run in the lead's process share its pane but keep their own session flags, so
 one session's clear can retire another session's newer `waiting` dot on that
 pane early. With an older tmux-tools

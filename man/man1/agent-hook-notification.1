@@ -35,9 +35,19 @@ flag: the kind and the actor that raised it (the root agent, or the child
 routed by
 .B agent_id
 or a Muse child session). Claude names no actor on permission
-notifications, a subagent's included, so its flag accepts any actor.
-A glance does not acknowledge a waiting mark; the agent's next tool, the end
-of the child that raised it, or the end of the turn or session clears it (see
+notifications, a subagent's included, so a Claude
+.B permission_prompt
+takes the actor of the session's latest
+.B PermissionRequest
+when
+.BR agent-hook-telemetry (1)
+recorded it within the last 60 seconds. Otherwise (an
+.BR elicitation_dialog ,
+or no recent request) its flag accepts any actor. Two actors requesting
+permission within that window can be confused; the newer request wins.
+A glance does not acknowledge a waiting mark; the actor's next tool or tool
+result, the end of the child that raised it, or the end of the turn or
+session clears it (see
 .BR agent-hook-telemetry (1)).
 It always rings and records its flag, even from a turn the hooks did not see
 start (its Stop is then fenced, and its next tool or the next prompt clears
