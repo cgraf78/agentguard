@@ -95,6 +95,7 @@ for spec in \
   'claude|{hook_event_name:"Notification",notification_type:"permission_prompt"}' \
   'claude|{hook_event_name:"Notification",notification_type:"elicitation_dialog"}' \
   'muse|{hook_event_name:"Notification",notification_type:"permission_prompt"}' \
+  'muse|{hook_event_name:"Notification",notification_type:"question_prompt"}' \
   'grok|{hookEventName:"Notification",notificationType:"permission_prompt"}' \
   'gemini|{hook_event_name:"Notification",notification_type:"ToolPermission"}' \
   'codex|{hook_event_name:"PermissionRequest",turn_id:"t1",transcript_path:"/tmp/r.jsonl"}' \
@@ -553,6 +554,20 @@ _hook agent-hook-telemetry muse \
   "$(_payload '{hook_event_name:"PostToolUse",tool_name:"bash",transcript_path:null}')" \
   MUSE_SESSION_ID="$ATT_SESSION"
 _assert_eq "actor: the root's approved tool still clears it" "" "$(_flag)"
+# Muse's request_user_input dialog runs no tool hooks, so after the answer
+# the root's next tool (or its Stop) retires the question's waiting mark.
+_case
+_hook agent-hook-notification muse \
+  "$(_payload '{hook_event_name:"Notification",notification_type:"question_prompt",turn_id:"q1",transcript_path:null}')" \
+  MUSE_SESSION_ID="$ATT_SESSION"
+_assert_eq "actor: a Muse question records the root" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry muse "$(muse_side PreToolUse)" MUSE_SESSION_ID="$ATT_SESSION"
+_assert_eq "actor: a Muse side session's tool keeps the question" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry muse \
+  "$(_payload '{hook_event_name:"PreToolUse",tool_name:"bash",turn_id:"q1",transcript_path:null}')" \
+  MUSE_SESSION_ID="$ATT_SESSION"
+_assert_eq "actor: the root's next tool clears the answered question" "" "$(_flag)"
+_assert_eq "actor: and the pane no longer waits" "" "$(_pending_kind)"
 # A launcher without MUSE_SESSION_ID keys on its parent pid, which no payload
 # names, so the payload's session cannot be compared and stays the root's.
 _case

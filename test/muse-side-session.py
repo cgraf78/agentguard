@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Replay a Muse turn whose reminder side session runs its own tools.
+"""Replay Muse turns whose reminder side session runs its own tools.
 
 Muse runs a reminder judge as a separate session inside the user's Muse
 process. Its hooks carry the root's MUSE_SESSION_ID, so they share the
 root's state dir, but their payloads name the side session and no
-SubagentStart precedes them. The payloads below mirror a captured Muse
-session with ids, paths, model fields and free text replaced. Every hook
-runs under this one process, as Muse runs them, so the pane owner is
-stable.
+SubagentStart precedes them. The payloads below mirror captured Muse
+sessions with ids, paths, model fields and free text replaced: an approval
+turn, then a turn that asks the user a question. Every hook runs under this
+one process, as Muse runs them, so the pane owner is stable.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ failures: list[str] = []
 
 ROOT_TURN = "01a1c0d2-0000-7000-8000-00000000a001"
 NEXT_TURN = "01a1c0d2-0000-7000-8000-00000000a002"
+QUESTION_TURN = "01a1c0d3-0000-7000-8000-00000000a003"
 # One side session per reminder decision; each uses its session id as its
 # turn id. The first runs while the approval dialog is open, the others
 # after the root's Stop.
@@ -45,6 +46,7 @@ SIDE = (
     "01a1c0d3-0000-7000-8000-00000000b002",
     "01a1c0d3-0000-7000-8000-00000000b003",
 )
+QUESTION_SIDE = "01a1c0d3-0000-7000-8000-00000000b004"
 CWD = "/work/repo"
 BASH_INPUT = {"command": "touch z.txt", "description": "Create z.txt", "workdir": CWD}
 
@@ -181,6 +183,45 @@ hook("telemetry", root_tool("PreToolUse", NEXT_TURN))
 check(team_root() == NEXT_TURN, f"next root tool left team root {team_root()!r}")
 hook("stop", root_event("Stop", NEXT_TURN, stop_hook_active=False))
 check(read(mark) is None, "next root Stop left the pane busy")
+
+# A question turn (Muse 1.4.18): the request_user_input dialog sends a
+# question_prompt Notification and runs no tool hooks, so the turn's own Stop
+# (or its next tool) is what retires the waiting mark after the answer.
+notify_log = Path(str(log) + ".notify")
+hook("prompt-submit", root_event("UserPromptSubmit", QUESTION_TURN, prompt="Ask me."))
+hook("telemetry", side_tool("PreToolUse", QUESTION_SIDE))
+hook("telemetry", side_tool("PostToolUse", QUESTION_SIDE))
+rings = len((read(notify_log) or "").splitlines())
+hook(
+    "notification",
+    root_event(
+        "Notification",
+        QUESTION_TURN,
+        notification_type="question_prompt",
+        title="Muse Code needs your input",
+        message="repo \u2014 waiting for your answer",
+    ),
+)
+new_rings = (read(notify_log) or "").splitlines()[rings:]
+check(len(new_rings) == 1, f"question prompt rang {new_rings!r}")
+check(
+    all("--kind waiting" in line for line in new_rings),
+    f"question prompt rang {new_rings!r}, not waiting",
+)
+check(
+    read(state / "attention-sticky") == "waiting root",
+    f"question prompt left flag {read(state / 'attention-sticky')!r}",
+)
+hook(
+    "stop",
+    root_event("Stop", QUESTION_TURN, stop_hook_active=False, last_assistant_message="Noted."),
+)
+check(read(state / "attention-sticky") is None, "the question turn's Stop left waiting")
+check(read(mark) is None, "the question turn's Stop left the pane busy")
+check(
+    "--kind done" in ((read(notify_log) or "").splitlines() or [""])[-1],
+    "the question turn's Stop did not ring done",
+)
 
 if failures:
     print("\n".join(failures), file=sys.stderr)

@@ -368,8 +368,9 @@ Each notification also tells the terminal what kind of attention the pane
 needs, as the value of tmux-tools' pending mark: `done` when a turn finished
 (a ringing Stop, or a notification AgentGuard does not classify), `waiting`
 when the agent needs an answer (a Notification of type `permission_prompt` or
-`elicitation_dialog`, either key spelling, Gemini CLI's `ToolPermission`, and
-the `PermissionRequest` that Codex and the OpenCode adapter deliver), and
+`elicitation_dialog`, either key spelling, Muse's `question_prompt`, Gemini
+CLI's `ToolPermission`, and the `PermissionRequest` that Codex and the
+OpenCode adapter deliver), and
 `blocked` when a root turn fails (`StopFailure`, if it wins the prompt cycle's
 single bell). A glance acknowledges `done`; `waiting` and `blocked` stay until
 the agent moves on. The next tool of the actor that raised `waiting` (the root
@@ -403,7 +404,9 @@ AgentGuard does not observe, so its `waiting` lasts until the turn ends. After
 you answer a prompt, `waiting` stays until the prompted tool returns, the
 agent's next tool, or the end of its turn, since no hook reports the answer
 itself; approving a long-running command keeps it yellow while that command
-runs. Agent-team teammates that
+runs. Muse runs no tool hooks for its question dialog, so an answered
+question stays yellow until the agent's next tool or the end of its turn.
+Agent-team teammates that
 run in the lead's process share its pane but keep their own session flags, so
 one session's clear can retire another session's newer `waiting` dot on that
 pane early. With an older tmux-tools

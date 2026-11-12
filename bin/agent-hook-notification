@@ -47,13 +47,14 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
 # END GENERATED LAUNCHER BOOTSTRAP
 
 # Permission prompts and questions wait for an answer (Claude, Grok and Muse
-# Notification types, Gemini's ToolPermission, and the PermissionRequest event
-# Codex and the OpenCode adapter deliver here); they stay marked until the
-# agent moves on. Claude's idle prompt arrives about a minute after a turn
-# ends or a prompt is dismissed with Esc (never after Esc interrupts a running
-# tool), so it rings only as the backstop for a turn whose Stop never rang and
-# otherwise just retires a waiting mark answered by Esc; agent-hook-telemetry
-# repairs its busy mark. Anything else rings as a finished turn, as before.
+# Notification types, Muse's question_prompt for its request_user_input
+# dialog, Gemini's ToolPermission, and the PermissionRequest event Codex and
+# the OpenCode adapter deliver here); they stay marked until the agent moves
+# on. Claude's idle prompt arrives about a minute after a turn ends or a
+# prompt is dismissed with Esc (never after Esc interrupts a running tool), so
+# it rings only as the backstop for a turn whose Stop never rang and otherwise
+# just retires a waiting mark answered by Esc; agent-hook-telemetry repairs
+# its busy mark. Anything else rings as a finished turn, as before.
 _notify_event='' _notify_type='' _notify_child='' _notify_actor='' _notify_agent=''
 if _hook_read_input && [ -n "${_HOOK_INPUT:-}" ]; then
   IFS=$'\x1f' read -r _notify_event _notify_type _notify_child < <(
@@ -67,7 +68,7 @@ if _hook_read_input && [ -n "${_HOOK_INPUT:-}" ]; then
   ) || true
 fi
 case "$_notify_event:$_notify_type" in
-  PermissionRequest:* | *:permission_prompt | *:elicitation_dialog | *:ToolPermission)
+  PermissionRequest:* | *:permission_prompt | *:elicitation_dialog | *:question_prompt | *:ToolPermission)
     if [ -n "$_notify_child" ]; then
       _hook_attention_actor _notify_actor "$_notify_child"
     elif _hook_agent_name _notify_agent && [ "$_notify_agent" = claude ]; then

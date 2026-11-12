@@ -149,8 +149,9 @@ command is installed.
 
 Notifications pass tmux-tools the kind of attention: `done` for a ringing Stop
 and unclassified notifications, `waiting` for permission prompts and questions
-(Notification `permission_prompt`/`elicitation_dialog`, Gemini `ToolPermission`,
-Codex and OpenCode `PermissionRequest`), and `blocked` for a root
+(Notification `permission_prompt`/`elicitation_dialog`, Muse `question_prompt`,
+Gemini `ToolPermission`, Codex and OpenCode `PermissionRequest`), and
+`blocked` for a root
 `StopFailure` that wins the prompt cycle's bell. Waiting and blocked are
 sticky: the session's `attention-sticky` flag (`<kind> <actor>`, the actor
 being `root`, the routed child, `background` for an in-process background
