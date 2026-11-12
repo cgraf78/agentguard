@@ -528,6 +528,38 @@ _hook agent-hook-telemetry muse \
   "$(_payload '{hook_event_name:"SubagentStop",child_session_id:"muse-child-a"}')"
 _assert_eq "actor: the raising Muse child's end clears it" "" "$(_flag)"
 
+# Muse's reminder judge runs as its own session under the root's
+# MUSE_SESSION_ID, with no SubagentStart: its tools and ends are background
+# work, not the root's (shapes from a captured session, ids replaced; the
+# full turn replays in test/muse-side-session.py).
+muse_side() {
+  jq -nc --arg e "$1" '{session_id:"01a1c0d2-0000-7000-8000-00000000b001",
+    turn_id:"01a1c0d2-0000-7000-8000-00000000b001",transcript_path:null,
+    hook_event_name:$e,tool_name:"submit_reminder_decision",
+    tool_input:{decision:"none"}}'
+}
+_case
+_seed waiting root
+for event in PreToolUse PostToolUse; do
+  _hook agent-hook-telemetry muse "$(muse_side "$event")" MUSE_SESSION_ID="$ATT_SESSION"
+done
+_assert_eq "actor: a Muse side session's tools keep the root's prompt" \
+  "waiting root" "$(_flag)"
+_hook agent-hook-stop muse "$(muse_side Stop)" MUSE_SESSION_ID="$ATT_SESSION"
+_assert_eq "actor: so does its Stop" "waiting root" "$(_flag)"
+_assert_eq "actor: which rings nothing" "" "$(_notify_calls)"
+_assert_eq "actor: and no pending clear ran" "" "$(_pending_calls)"
+_hook agent-hook-telemetry muse \
+  "$(_payload '{hook_event_name:"PostToolUse",tool_name:"bash",transcript_path:null}')" \
+  MUSE_SESSION_ID="$ATT_SESSION"
+_assert_eq "actor: the root's approved tool still clears it" "" "$(_flag)"
+# A launcher without MUSE_SESSION_ID keys on its parent pid, which no payload
+# names, so the payload's session cannot be compared and stays the root's.
+_case
+_seed waiting root
+_hook agent-hook-telemetry muse "$(muse_side PostToolUse)"
+_assert_eq "actor: without MUSE_SESSION_ID any session's tool is the root's" "" "$(_flag)"
+
 # A sibling child's tool cannot clear another child's prompt.
 _case
 _hook agent-hook-notification codex \

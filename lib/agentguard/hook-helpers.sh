@@ -1135,12 +1135,12 @@ _hook_attention_raise_fenced() {
 }
 
 # Store in the variable named by $1 the attention actor of this payload:
-# root, a child id, or background (a transcript-less Codex session, the
-# in-process background agents _hook_activity_is_foreground excludes). $2,
-# when given, is the child id the caller already routed (agent-hook-telemetry
-# routes Muse children); otherwise the same detectors run here: agent_id or
-# agentId, then Muse's child session routing (child_session_id names the
-# child on its SubagentStop).
+# root, a child id, or background (a transcript-less Codex session or a Muse
+# side session, the in-process background agents _hook_activity_is_foreground
+# excludes). $2, when given, is the child id the caller already routed
+# (agent-hook-telemetry routes Muse children); otherwise the same detectors
+# run here: agent_id or agentId, then Muse's child session routing
+# (child_session_id names the child on its SubagentStop).
 _hook_attention_payload_actor() {
   local _aa_child="${2-}" _aa_sid='' _aa_agent=''
   _hook_agent_name _aa_agent
@@ -1164,6 +1164,10 @@ _hook_attention_payload_actor() {
   if [ -n "$_aa_child" ]; then
     _hook_attention_actor "$1" "$_aa_child"
   elif [ "$_aa_agent" = codex ] && ! _hook_activity_is_foreground; then
+    printf -v "$1" background
+  elif [ "$_aa_agent" = muse ] && _hook_muse_side_session; then
+    # Not the coarse foreground veto: while a Muse child runs it also vetoes
+    # the root's own tools, which must still clear the root's marks.
     printf -v "$1" background
   else
     printf -v "$1" root
@@ -1502,7 +1506,25 @@ _hook_activity_is_foreground() {
   if [ "$_busy_agent_name" = muse ] && [ -e "$_HOOK_STATE_DIR/muse-child-session" ]; then
     return 1
   fi
+  if [ "$_busy_agent_name" = muse ] && _hook_muse_side_session; then
+    return 1
+  fi
   _HOOK_ACTIVITY_FOREGROUND=1
+}
+
+# Return whether this Muse payload names a session other than the root whose
+# key its hooks run under. Muse runs side agents (its reminder judge) as
+# their own sessions inside the user's process, with no SubagentStart and no
+# transcript, like the root: only the session id tells them apart. Their
+# hooks carry the root's MUSE_SESSION_ID, so the state key is the root's
+# session while the payload names the side session. Without MUSE_SESSION_ID
+# the launcher keys on its parent pid, which no payload names, so the rule
+# needs that key to be the session id itself. Builtins only: every Muse
+# hook asks this.
+_hook_muse_side_session() {
+  _hook_hm_read_input
+  [ -n "${MUSE_SESSION_ID:-}" ] && [ "$_HOOK_SESSION_KEY" = "$MUSE_SESSION_ID" ] &&
+    [ -n "$_HOOK_INPUT_SESSION" ] && [ "$_HOOK_INPUT_SESSION" != "$_HOOK_SESSION_KEY" ]
 }
 
 # Set or clear the busy mark on the agent's tmux pane, so the terminal can show

@@ -89,6 +89,13 @@ that rejects
 .B \-\-if
 only loses the flag; the hook never falls back to a plain clear, which would
 erase unseen attention.
+A Muse side session (its reminder judge), whose payload names a session other
+than
+.B MUSE_SESSION_ID
+and which no
+.B SubagentStart
+introduced, is background work like Codex's transcript-less sessions: its
+tools neither clear the root's marks nor mark the pane busy.
 A Claude
 .B PermissionRequest
 raises nothing, because another hook may resolve it before a prompt shows,
@@ -121,7 +128,11 @@ whose
 is
 .B idle_prompt
 means the parent and every child agent are idle, so it clears the mark and
-retires children whose Stop never arrived.
+retires children whose Stop never arrived. Claude runs no hook when Esc
+interrupts a running tool and sends no
+.B idle_prompt
+afterwards, so that turn's busy mark stays until the next prompt or turn
+replaces it.
 The team state also records each child's latest start time, which hook
 extensions read through
 .BR _hook_child_working .

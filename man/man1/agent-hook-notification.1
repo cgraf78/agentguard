@@ -54,8 +54,9 @@ start (its Stop is then fenced, and its next tool or the next prompt clears
 the mark).
 .TP
 .B idle_prompt
-Claude Code sends this about a minute after the agent goes idle. It clears a
-waiting mark (a prompt dismissed with Esc ends no turn) and rings
+Claude Code sends this about a minute after a turn ends or a prompt is
+dismissed with Esc, but not after Esc interrupts a running tool. It clears a
+waiting mark (a dismissed prompt ends no turn) and rings
 .B done
 only if it wins the prompt cycle's single bell, which a ringing
 .BR agent-hook-stop (1)

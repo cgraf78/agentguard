@@ -1511,6 +1511,9 @@ _assert_eq 'busy: root set still records its turn' 'notif-a' \
 python3 "$AGENTGUARD_ROOT/test/muse-busy-team.py" "$MOCK_BUSY_DIR" \
   "$TEST_SID-muse-team"
 _assert_eq 'busy: Muse parent and child turns share one owned mark' 0 "$?"
+python3 "$AGENTGUARD_ROOT/test/muse-side-session.py" "$MOCK_BUSY_DIR" \
+  "01a1c0d1-0000-7000-8000-$(printf '%012d' "$$")"
+_assert_eq 'busy: a Muse side session neither clears waiting nor claims busy' 0 "$?"
 python3 "$AGENTGUARD_ROOT/test/busy-team-owner.py" "$MOCK_BUSY_DIR" \
   "$TEST_SID-owner" "$AGENTGUARD_ROOT/lib/agentguard/busy-team.py"
 _assert_eq 'busy: late SessionEnd cannot clear a resumed team' 0 "$?"

@@ -153,7 +153,10 @@ and unclassified notifications, `waiting` for permission prompts and questions
 Codex and OpenCode `PermissionRequest`), and `blocked` for a root
 `StopFailure` that wins the prompt cycle's bell. Waiting and blocked are
 sticky: the session's `attention-sticky` flag (`<kind> <actor>`, the actor
-being `root`, the routed child, or `any` for a Claude notification that
+being `root`, the routed child, `background` for an in-process background
+session (a transcript-less Codex session, or a Muse side session whose
+payload names a session other than `MUSE_SESSION_ID` and that no
+`SubagentStart` introduced), or `any` for a Claude notification that
 names no agent) lets the raising actor's next tool, tool result or child end
 clear `waiting`, and the next prompt, a
 silent Stop, an interrupt, or session end clear both, always with a

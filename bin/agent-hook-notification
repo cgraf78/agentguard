@@ -49,8 +49,9 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
 # Permission prompts and questions wait for an answer (Claude, Grok and Muse
 # Notification types, Gemini's ToolPermission, and the PermissionRequest event
 # Codex and the OpenCode adapter deliver here); they stay marked until the
-# agent moves on. Claude's idle prompt arrives about a minute after every
-# turn, so it rings only as the backstop for a turn whose Stop never rang and
+# agent moves on. Claude's idle prompt arrives about a minute after a turn
+# ends or a prompt is dismissed with Esc (never after Esc interrupts a running
+# tool), so it rings only as the backstop for a turn whose Stop never rang and
 # otherwise just retires a waiting mark answered by Esc; agent-hook-telemetry
 # repairs its busy mark. Anything else rings as a finished turn, as before.
 _notify_event='' _notify_type='' _notify_child='' _notify_actor='' _notify_agent=''

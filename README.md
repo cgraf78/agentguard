@@ -345,7 +345,11 @@ status context; `term-notify-sound` plays the `agent-hook-stop` and
 `agent-hook-notification` terminal notifications; `term-pane-mark` marks the
 agent's tmux pane busy from a submitted prompt or the first tool of a
 notification-started turn. Background child work keeps the pane busy when the
-host exposes a reliable parent task snapshot or child turn identity. The
+host exposes a reliable parent task snapshot or child turn identity. Sessions
+an agent runs in the background of its own process mark nothing and clear
+nothing: Codex's transcript-less sessions, and Muse side sessions (its
+reminder judge), which name a session other than `MUSE_SESSION_ID` with no
+`SubagentStart` before them. The
 pane terminal's foreground agent owns the mark, so launched agents cannot
 clear it independently (both commands come from
 [tmux-tools](https://github.com/cgraf78/tmux-tools)); and
@@ -381,9 +385,11 @@ seconds of it takes that actor; without such a record (an
 its `waiting`. Two actors requesting permission within that window can be
 confused: the newer request names both prompts. The next prompt, a Stop that
 does not ring, an interrupt, or session end clears either kind, and a ringing
-Stop's `done` replaces it. Claude's `idle_prompt`, sent about a minute after every turn,
-clears `waiting` (a prompt dismissed with Esc ends no turn) and rings only as
-the backstop for a turn whose Stop did not ring: one with no Stop, or a turn
+Stop's `done` replaces it. Claude's `idle_prompt`, which Claude sends about a
+minute after a turn ends or a prompt is dismissed with Esc (but not after Esc
+interrupts a running tool), clears `waiting` (a dismissed prompt ends no turn)
+and rings only as the backstop for a turn whose Stop did not ring: one with
+no Stop, or a turn
 that started without a prompt (a teammate message, a background task, a
 scheduled wakeup), whose Stop finds the prompt cycle's bell already taken;
 `auth_success` rings nothing. A permission prompt always rings and is always
@@ -411,10 +417,12 @@ Claude marks each subagent and teammate turn from its `SubagentStart` to its
 `SubagentStop`. Claude's task snapshots list an idle teammate as running until
 it shuts down, so they only retire children whose Stop never arrived, and
 Claude's idle prompt, sent once the parent and every child agent are idle,
-clears any that remain. Claude runs no hook when Esc interrupts the parent, so
-that turn's mark stays until a later turn ends. The same state records each
-child's latest start, so hook extensions can ask whether one child is still
-working through `_hook_child_working` (see Shared Helpers).
+clears any that remain. A busy mark clears only when a hook reports the end:
+Claude runs no hook when Esc interrupts a running tool, and sends no
+`idle_prompt` afterwards, so that turn's mark stays until the next prompt or
+turn replaces it. The same state records each child's latest start, so hook
+extensions can ask whether one child is still working through
+`_hook_child_working` (see Shared Helpers).
 
 The launcher trust boundary includes the fixed platform Bash, awk, and env
 paths and the absolute Bash candidate files above. Termux uses its
