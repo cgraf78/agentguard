@@ -56,13 +56,18 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
 # just retires a waiting mark answered by Esc; agent-hook-telemetry repairs
 # its busy mark. Anything else rings as a finished turn, as before.
 _notify_event='' _notify_type='' _notify_child='' _notify_actor='' _notify_agent=''
+_notify_fp='' _notify_request_actor='' _notify_request_fp=''
 if _hook_read_input && [ -n "${_HOOK_INPUT:-}" ]; then
-  IFS=$'\x1f' read -r _notify_event _notify_type _notify_child < <(
-    printf '%s' "$_HOOK_INPUT" | jq -r '
+  # A PermissionRequest (Codex) names its tool; a fingerprint of it lets
+  # only that tool's PostToolUse retire the mark (_hook_attention_tool_done).
+  IFS=$'\x1f' read -r _notify_event _notify_type _notify_child _notify_fp < <(
+    printf '%s' "$_HOOK_INPUT" | jq -r "$_HOOK_ATTENTION_TOOL_FP_JQ"'
       def word: if type == "string" and test("^[A-Za-z0-9._:-]*$") then . else "" end;
-      [(.hook_event_name // .hookEventName | word),
+      (.hook_event_name // .hookEventName | word) as $event
+      | [$event,
         (.notification_type // .notificationType | word),
-        (.agent_id // .agentId | if . == null or . == "" then "" else (word | select(. != "") // "child") end)]
+        (.agent_id // .agentId | if . == null or . == "" then "" else (word | select(. != "") // "child") end),
+        (if $event == "PermissionRequest" then attention_tool_fp else "" end)]
       | join("\u001f")
     ' 2>/dev/null
   ) || true
@@ -84,7 +89,16 @@ case "$_notify_event:$_notify_type" in
     else
       _hook_attention_payload_actor _notify_actor
     fi
-    _hook_attention_raise_fenced waiting "$_notify_actor"
+    # A permission prompt names no tool, but the same actor's fresh
+    # PermissionRequest record does (Claude and Muse). Elicitations and
+    # questions get no fingerprint, so only the other clearers retire them.
+    if [ "$_notify_type" = permission_prompt ] &&
+      _hook_attention_request_actor _notify_request_actor _notify_request_fp &&
+      [ "$_notify_request_actor" = "$_notify_actor" ]; then
+      _notify_fp="$_notify_request_fp"
+    fi
+    [ "$_notify_actor" != any ] || _notify_fp=''
+    _hook_attention_raise_fenced waiting "$_notify_actor" "$_notify_fp"
     ;;
   *:idle_prompt)
     if _hook_activity_is_foreground; then

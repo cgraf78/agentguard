@@ -593,11 +593,22 @@ _tool_result=$(jq -cn --arg s "$TEST_SID-per-tool" \
   '{session_id:$s,prompt_id:"p1",hook_event_name:"PostToolUse",tool_name:"Read",tool_response:{}}')
 _assert_eq "attention: a tool result without a flag keeps its jq/mark budget" \
   "jq=1 mark=0 attention=1" "$(_tool_attention_cost result "$_tool_result")"
+# Only the prompted tool's result clears: a flag without a tool fingerprint
+# costs no jq, and a fingerprinted one adds a single parse and the clear.
 printf 'waiting root\n' >"$_tool_flag"
 _tool_flagged=$(_tool_attention_cost result-flagged "$_tool_result")
-_assert_eq "attention: a flagged tool result adds only the clear" \
-  "jq=1 mark=1" "${_tool_flagged% *}"
-_assert_path_missing "attention: the flagged tool result removed the flag" "$_tool_flag"
+_assert_eq "attention: a flagged tool result without a fingerprint adds nothing" \
+  "jq=1 mark=0" "${_tool_flagged% *}"
+_assert_eq "attention: and keeps the flag" "waiting root" "$(cat "$_tool_flag" 2>/dev/null)"
+_tool_request=$(printf '%s' "$_tool_result" | jq -c '.hook_event_name = "PermissionRequest"')
+_tool_attention_cost request "$_tool_request" >/dev/null
+read -r _ _ _tool_fp <"${_tool_flag%/*}/attention-request" || true
+_assert_contains "attention: the request recorded the tool's fingerprint" "-" "$_tool_fp"
+printf 'root %s\n' "$_tool_fp" >"${_tool_flag%/*}/attention-tool"
+_tool_flagged=$(_tool_attention_cost result-prompted "$_tool_result")
+_assert_eq "attention: the prompted tool's result adds one jq and the clear" \
+  "jq=2 mark=1" "${_tool_flagged% *}"
+_assert_path_missing "attention: the prompted tool's result removed the flag" "$_tool_flag"
 # Muse tells a side session (its reminder judge) from the root by session id
 # alone, with builtins: the root's tool keeps its budget, and a side
 # session's tool reaches no busy mark at all.

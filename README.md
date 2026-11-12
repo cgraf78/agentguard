@@ -348,8 +348,8 @@ notification-started turn. Background child work keeps the pane busy when the
 host exposes a reliable parent task snapshot or child turn identity. Sessions
 an agent runs in the background of its own process mark nothing and clear
 nothing: Codex's transcript-less sessions, and Muse side sessions (its
-reminder judge), which name a session other than `MUSE_SESSION_ID` with no
-`SubagentStart` before them. The
+reminder judge), whose tool events name a session other than
+`MUSE_SESSION_ID` with no `SubagentStart` before them. The
 pane terminal's foreground agent owns the mark, so launched agents cannot
 clear it independently (both commands come from
 [tmux-tools](https://github.com/cgraf78/tmux-tools)); and
@@ -375,16 +375,24 @@ OpenCode adapter deliver), and
 single bell). A glance acknowledges `done`; `waiting` and `blocked` stay until
 the agent moves on. The next tool of the actor that raised `waiting` (the root
 agent, or the child routed by `agent_id` or Muse's child session), or that
-child's `SubagentStop` or `StopFailure`, clears it, and so does that actor's
-`PostToolUse` or `PostToolUseFailure`, since the prompted tool returns only
-after the answer. Claude names no actor on its permission notifications, a
-subagent's included, so `agent-hook-telemetry` records the actor of each
-Claude `PermissionRequest` (which raises nothing itself, since another hook
-may resolve it before a prompt shows) and a `permission_prompt` within 60
-seconds of it takes that actor; without such a record (an
-`elicitation_dialog`, for one), any actor's next tool or child end clears
-its `waiting`. Two actors requesting permission within that window can be
-confused: the newer request names both prompts. The next prompt, a Stop that
+child's `SubagentStop` or `StopFailure`, clears it. A permission prompt
+also clears on the `PostToolUse` or `PostToolUseFailure` of the tool it
+asked about, since that tool returns only after the answer, but not on a
+parallel sibling's result, which can arrive while the dialog is still open.
+No `PermissionRequest` names a call id, so `agent-hook-telemetry` records
+each one's actor and a fingerprint of its tool (the tool name and a hash of
+`tool_input` without `description`, `answers` and `annotations`, which only
+one side carries), and only the same actor's matching result clears the
+prompt. A question, an `elicitation_dialog`, an OpenCode or Gemini CLI
+prompt, or a prompt whose request is stale has no fingerprint and waits for
+the other clearers. Claude names no actor on its permission notifications, a
+subagent's included, so a Claude `permission_prompt` within 60 seconds of
+its recorded `PermissionRequest` (which raises nothing itself, since another
+hook may resolve it before a prompt shows) takes that request's actor;
+without such a record (an `elicitation_dialog`, for one), any actor's next
+tool or child end clears its `waiting`. Two actors requesting permission
+within that window can be confused: the newer request names both prompts.
+The next prompt, a Stop that
 does not ring, an interrupt, or session end clears either kind, and a ringing
 Stop's `done` replaces it. Claude's `idle_prompt`, which Claude sends about a
 minute after a turn ends or a prompt is dismissed with Esc (but not after Esc

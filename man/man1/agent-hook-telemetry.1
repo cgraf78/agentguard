@@ -72,42 +72,59 @@ child routed by the payload's
 .B agent_id
 or Muse's child session) raised it, or the flag accepts any actor, the hook clears it with
 .BR "term-pane-mark clear pending \-\-if waiting" .
-A
-.B PostToolUse
-or
-.B PostToolUseFailure
-from that actor does the same, since a prompted tool returns only after its
-prompt is answered; while no flag exists it costs the same single file test.
 A child's
 .B SubagentStop
 or
 .B StopFailure
-does the same for a waiting mark that child raised. The flag is removed before
+does the same for a waiting mark that child raised.
+A
+.B PostToolUse
+or
+.B PostToolUseFailure
+from the raising actor clears it too for a permission prompt raised with the
+fingerprint of that very tool, since a prompted tool returns only after its
+prompt is answered. A parallel sibling's result, which can arrive while the
+dialog is still open, has another fingerprint and clears nothing, and so
+does any result for a prompt raised without one (a question, an
+elicitation, an OpenCode or Gemini CLI prompt, a stale request). While no
+flag exists a tool result costs the same single file test, and a flag
+without a fingerprint starts no process. The flag is removed before
 the mark is cleared. A release of
 .B term-pane-mark
 that rejects
 .B \-\-if
 only loses the flag; the hook never falls back to a plain clear, which would
 erase unseen attention.
-A Muse side session (its reminder judge), whose payload names a session other
-than
+A Muse side session (its reminder judge), whose tool events name a session
+other than
 .B MUSE_SESSION_ID
 and which no
 .B SubagentStart
 introduced, is background work like Codex's transcript-less sessions: its
-tools neither clear the root's marks nor mark the pane busy.
-A Claude
+tools neither clear the root's marks nor mark the pane busy. Side sessions
+send only tool events, so a prompt, Stop or notification is always the
+root's.
+A
 .B PermissionRequest
 raises nothing, because another hook may resolve it before a prompt shows,
-but records its actor and time in the session's
-.I attention-request
-file: Claude's
-.B permission_prompt
-notification that follows about 6 seconds later names no
-.BR agent_id ,
+but records its time, actor and a fingerprint of its tool (the tool name and
+a hash of
+.B tool_input
+without the
+.BR description ,
+.B answers
 and
+.B annotations
+fields that only one side carries) in the session's
+.I attention-request
+file. The
+.B permission_prompt
+notification that follows about 6 seconds later names no tool, and Claude's
+no
+.B agent_id
+either;
 .BR agent-hook-notification (1)
-reads the actor from there.
+reads both from there.
 Gemini CLI reports tools as
 .BR BeforeTool ,
 which this hook does not observe, so its waiting mark lasts until the turn

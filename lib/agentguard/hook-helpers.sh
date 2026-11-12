@@ -1109,14 +1109,22 @@ _hook_attention_actor() {
 
 # Ring sticky kind $1 for actor $2, then record the flag when the provider
 # accepted the kind. A legacy fallback marks plain pending, which a glance
-# acknowledges, so it gets no flag.
+# acknowledges, so it gets no flag. $3, when given, fingerprints the tool
+# whose permission prompt this is (see _hook_attention_tool_done); every
+# raise rewrites or drops that record, so it never outlives its prompt.
 _hook_attention_raise() {
   _hook_attention_notify "$1" || return 0
   _hook_mkstate "$_HOOK_STATE_DIR" || return 0
+  if [ -n "${3:-}" ]; then
+    _hook_write_atomic "$_HOOK_STATE_DIR/attention-tool" "$2 $3" || true
+  elif [ -e "$_HOOK_STATE_DIR/attention-tool" ]; then
+    rm -f -- "$_HOOK_STATE_DIR/attention-tool" 2>/dev/null || true
+  fi
   _hook_write_atomic "$_HOOK_STATE_DIR/attention-sticky" "$1 $2" || true
 }
 
-# Raise sticky kind $1 for actor $2 from a notification, never losing the
+# Raise sticky kind $1 for actor $2 (tool fingerprint $3, optional) from a
+# notification, never losing the
 # bell or its flag. A permission request blocks its turn, so it is never
 # stale: a turn the hooks did not see start (a Codex turn without a prompt
 # submit, a steer) still raises normally, because a mark without its flag
@@ -1128,10 +1136,10 @@ _hook_attention_raise_fenced() {
   if [ "$2" = root ] || [ "$2" = any ]; then
     _hook_turn_identity
     if [ "$_HOOK_TURN_KIND" = tagged ] && _hook_attention_managed; then
-      _hook_attention_locked _hook_attention_raise "$1" "$2" && return 0
+      _hook_attention_locked _hook_attention_raise "$1" "$2" "${3:-}" && return 0
     fi
   fi
-  _hook_attention_raise "$1" "$2"
+  _hook_attention_raise "$1" "$2" "${3:-}"
 }
 
 # Store in the variable named by $1 the attention actor of this payload:
@@ -1200,53 +1208,119 @@ _hook_attention_clear() {
 
 # Claude's permission_prompt Notification names no agent_id, a subagent's
 # included, but the PermissionRequest that precedes it does, about 6 s
-# earlier. That request records "<epoch> <actor>" in attention-request; it
-# raises nothing itself, since another hook may resolve the request before
-# any prompt shows. The record is not consumed: a prompt can notify more
-# than once, and with one sticky flag per session the newest request is the
-# best guess for each later notification. Two actors requesting within the
-# window can still be confused; the newer one wins.
+# earlier. That request records "<epoch> <actor> <tool>" in
+# attention-request (the tool fingerprint below, empty without a tool
+# name); it raises nothing itself, since another hook may resolve the
+# request before any prompt shows. The record is not consumed: a prompt can
+# notify more than once, and with one sticky flag per session the newest
+# request is the best guess for each later notification. Two actors
+# requesting within the window can still be confused; the newer one wins.
 _HOOK_ATTENTION_REQUEST_TTL=60
 
-# Record this Claude PermissionRequest's actor for the notification it may
-# lead to. One small write, on an event that only fires for permission
-# checks.
+# jq definition of a tool call's fingerprint: its tool name and a hash of
+# its tool_input, so the PostToolUse of the tool a permission prompt asked
+# about can be told from a parallel sibling's. No payload carries a call id
+# on PermissionRequest. Fields an agent adds on only one side are left out:
+# Codex's request adds a description of its own, and Claude's answered
+# question adds answers and annotations. The hash covers the length and the
+# first and last 2048 characters, which keeps a large Write's request cheap;
+# the modulus keeps jq 1.6's arithmetic exact. Empty without a tool name.
+# shellcheck disable=SC2016 # jq variables, not shell expansions.
+_HOOK_ATTENTION_TOOL_FP_JQ='
+  def attention_tool_fp:
+    (.tool_name // .toolName) as $n
+    | if ($n | type) != "string" or $n == "" then ""
+      else
+        ($n + "\u0000" + ((.tool_input // .toolInput)
+          | if type == "object" then del(.description, .answers, .annotations) else . end
+          | tojson)) as $s
+        | ($s[0:2048] + $s[-2048:] | explode
+          | reduce .[] as $c (5381; (. * 33 + $c) % 16777213)) as $h
+        | "\($s | length)-\($h)"
+      end;
+'
+
+# Store in the variables named by $1 and $2 this tool payload's agent id
+# (empty for none; a line break, which no actor word allows, becomes "/")
+# and its tool fingerprint, with one jq.
+_hook_attention_tool_identity() {
+  local _ti_child='' _ti_fp=''
+  {
+    IFS= read -r _ti_child || true
+    IFS= read -r _ti_fp || true
+  } < <(printf '%s' "${_HOOK_INPUT:-}" | jq -r "$_HOOK_ATTENTION_TOOL_FP_JQ"'
+    ((.agent_id // .agentId // "")
+      | if type == "string" then split("\n") | join("/") | split("\r") | join("/") else "" end),
+    attention_tool_fp
+  ' 2>/dev/null)
+  printf -v "$1" '%s' "$_ti_child"
+  printf -v "$2" '%s' "$_ti_fp"
+}
+
+# Store in the variable named by $1 this tool payload's attention actor,
+# given its agent id $2 from _hook_attention_tool_identity: the same answer
+# as _hook_attention_payload_actor, without parsing agent_id again.
+_hook_attention_tool_actor() {
+  if [ -n "$2" ]; then
+    _hook_attention_payload_actor "$1" "$2"
+  else
+    _hook_attention_payload_actor "$1"
+  fi
+}
+
+# Record this PermissionRequest's actor and tool for the notification it
+# may lead to. One jq and one small write, on an event that only fires for
+# permission checks.
 _hook_attention_note_request() {
-  local _nr_agent='' _nr_actor='' _nr_now=''
-  _hook_agent_name _nr_agent
-  [ "$_nr_agent" = claude ] || return 0
-  _hook_attention_payload_actor _nr_actor
+  local _nr_child='' _nr_fp='' _nr_actor='' _nr_now=''
+  _hook_attention_tool_identity _nr_child _nr_fp
+  _hook_attention_tool_actor _nr_actor "$_nr_child"
   _hook_now _nr_now || return 0
   _hook_mkstate "$_HOOK_STATE_DIR" || return 0
-  _hook_write_atomic "$_HOOK_STATE_DIR/attention-request" "$_nr_now $_nr_actor" || true
+  _hook_write_atomic "$_HOOK_STATE_DIR/attention-request" \
+    "$_nr_now $_nr_actor${_nr_fp:+ $_nr_fp}" || true
 }
 
 # Store in the variable named by $1 the actor of this session's latest
 # PermissionRequest when it was recorded within the last
-# _HOOK_ATTENTION_REQUEST_TTL seconds; fail when there is no such record.
+# _HOOK_ATTENTION_REQUEST_TTL seconds, and its tool fingerprint (empty when
+# it has none) in the variable named by $2 when given; fail when there is
+# no such record.
 _hook_attention_request_actor() {
-  local _ra_file="$_HOOK_STATE_DIR/attention-request" _ra_at='' _ra_actor='' _ra_now='' _ra_age
+  local _ra_file="$_HOOK_STATE_DIR/attention-request" _ra_at='' _ra_actor='' _ra_fp=''
+  local _ra_now='' _ra_age
   [ -f "$_ra_file" ] || return 1
-  IFS=' ' read -r _ra_at _ra_actor <"$_ra_file" 2>/dev/null || return 1
+  IFS=' ' read -r _ra_at _ra_actor _ra_fp <"$_ra_file" 2>/dev/null || return 1
   case "$_ra_at" in
     '' | *[!0-9]* | ????????????????*) return 1 ;;
   esac
   case "$_ra_actor" in
     '' | any | *[!A-Za-z0-9._:-]*) return 1 ;;
   esac
+  case "$_ra_fp" in
+    *[!0-9-]*) _ra_fp='' ;;
+  esac
   _hook_now _ra_now || return 1
   _ra_age=$((10#$_ra_now - 10#$_ra_at))
   [ "$_ra_age" -ge 0 ] && [ "$_ra_age" -le "$_HOOK_ATTENTION_REQUEST_TTL" ] || return 1
   printf -v "$1" '%s' "$_ra_actor"
+  [ -z "${2:-}" ] || printf -v "$2" '%s' "$_ra_fp"
 }
 
-# A tool that returns after a prompt was answered: clear the waiting mark
-# its actor raised. The prompted tool cannot return before the answer, so
-# this retires the mark as soon as the approved tool finishes or the
-# question's answer lands, instead of at the actor's next tool. Callers test
-# the flag first, so tools pay nothing while nothing is sticky.
+# The prompted tool returning: clear the waiting mark its actor raised. A
+# permission prompt raised with a tool fingerprint (attention-tool) cannot
+# be answered later than its own tool returns, so this retires the mark as
+# soon as the approved tool finishes or the question's answer lands, instead
+# of at the actor's next tool. Only that tool's result clears: a parallel
+# sibling of the same actor returns while the dialog is still open. A prompt
+# without a fingerprint (an elicitation or question, OpenCode, Gemini, a
+# stale request) waits for the other clearers. Callers test the flag first,
+# so tools pay nothing while nothing is sticky, and a flag without a
+# fingerprint costs no jq.
 _hook_attention_tool_done() {
-  local _td_event="${_HOOK_INPUT_EVENT:-}" _td_actor=''
+  local _td_event="${_HOOK_INPUT_EVENT:-}" _td_tool="$_HOOK_STATE_DIR/attention-tool"
+  local _td_want_actor='' _td_want_fp='' _td_kind='' _td_flag_actor='' _td_child='' _td_fp=''
+  local _td_actor=''
   if [ -z "$_td_event" ]; then
     _td_event=$(printf '%s' "${_HOOK_INPUT:-}" |
       jq -r '.hook_event_name // .hookEventName // empty' 2>/dev/null) || _td_event=''
@@ -1255,7 +1329,15 @@ _hook_attention_tool_done() {
     PostToolUse | PostToolUseFailure) ;;
     *) return 0 ;;
   esac
-  _hook_attention_payload_actor _td_actor
+  [ -f "$_td_tool" ] || return 0
+  IFS=' ' read -r _td_want_actor _td_want_fp <"$_td_tool" 2>/dev/null || true
+  [ -n "$_td_want_fp" ] || return 0
+  IFS=' ' read -r _td_kind _td_flag_actor <"$_HOOK_STATE_DIR/attention-sticky" 2>/dev/null || true
+  [ "$_td_kind" = waiting ] && [ "$_td_flag_actor" = "$_td_want_actor" ] || return 0
+  _hook_attention_tool_identity _td_child _td_fp
+  [ "$_td_fp" = "$_td_want_fp" ] || return 0
+  _hook_attention_tool_actor _td_actor "$_td_child"
+  [ "$_td_actor" = "$_td_want_actor" ] || return 0
   _hook_attention_clear waiting "$_td_actor"
 }
 
@@ -1519,10 +1601,15 @@ _hook_activity_is_foreground() {
 # hooks carry the root's MUSE_SESSION_ID, so the state key is the root's
 # session while the payload names the side session. Without MUSE_SESSION_ID
 # the launcher keys on its parent pid, which no payload names, so the rule
-# needs that key to be the session id itself. Builtins only: every Muse
-# hook asks this.
+# needs that key to be the session id itself. Side sessions send only tool
+# events, so a prompt, Stop or notification is never one, whatever session
+# it names. Builtins only: every Muse hook asks this.
 _hook_muse_side_session() {
   _hook_hm_read_input
+  case "$_HOOK_INPUT_EVENT" in
+    PreToolUse | PostToolUse | PostToolUseFailure) ;;
+    *) return 1 ;;
+  esac
   [ -n "${MUSE_SESSION_ID:-}" ] && [ "$_HOOK_SESSION_KEY" = "$MUSE_SESSION_ID" ] &&
     [ -n "$_HOOK_INPUT_SESSION" ] && [ "$_HOOK_INPUT_SESSION" != "$_HOOK_SESSION_KEY" ]
 }

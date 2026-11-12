@@ -490,10 +490,133 @@ _hook agent-hook-notification claude \
   "$(_payload '{hook_event_name:"Notification",notification_type:"elicitation_dialog"}')"
 _assert_eq "request: an elicitation stays any-actor" "waiting any" "$(_flag)"
 
-# Other agents name their actors on the notification itself.
+# Other agents name their actors on the notification itself, but a Muse
+# request still records the tool its permission prompt asks about.
 _case
 _hook agent-hook-telemetry muse "$(_payload '{hook_event_name:"PermissionRequest",tool_name:"Bash"}')"
-_assert_eq "request: a Muse PermissionRequest records nothing" "" "$(_request)"
+_assert_contains "request: a Muse PermissionRequest records the root and its tool" \
+  " root " "$(_request)"
+
+echo ""
+echo "=== attention: only the prompted tool's result clears ==="
+
+# Parallel tool calls: a sibling's result can arrive while the prompted
+# tool's dialog is still open (shapes from captured Muse, Claude and Codex
+# sessions; no PermissionRequest names a call id).
+muse_tool() {
+  # $1 event, $2 command, $3 tool_use_id (none on a PermissionRequest).
+  _payload "{hook_event_name:\"$1\",tool_name:\"bash\",turn_id:\"m1\",transcript_path:null,
+    tool_input:{command:\"$2\",description:\"Run it\",workdir:\"/w\"}} +
+    (if \"$3\" == \"\" then {} else {tool_use_id:\"$3\"} end)"
+}
+_case
+_hook agent-hook-telemetry muse "$(muse_tool PreToolUse "sleep 30" call_a)"
+_hook agent-hook-telemetry muse "$(muse_tool PreToolUse "rm x" call_b)"
+_hook agent-hook-telemetry muse "$(muse_tool PermissionRequest "rm x" "")"
+_hook agent-hook-notification muse "$(_payload "$perm")"
+_assert_eq "prompted: a Muse prompt for one of two parallel tools waits" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry muse "$(muse_tool PostToolUse "sleep 30" call_a)"
+_assert_eq "prompted: the sibling's result keeps the open dialog waiting" "waiting root" "$(_flag)"
+_assert_eq "prompted: the pane still waits" waiting "$(_pending_kind)"
+_assert_eq "prompted: no pending clear ran" "" "$(_pending_calls)"
+_hook agent-hook-telemetry muse "$(muse_tool PostToolUse "rm x" call_b)"
+_assert_eq "prompted: the prompted tool's own result clears it" "" "$(_flag)"
+_assert_eq "prompted: and the pane no longer waits" "" "$(_pending_kind)"
+
+codex_tool() {
+  # $1 event, $2 command, $3 extra tool_input fields.
+  jq -nc --arg s "$ATT_SESSION" --arg e "$1" --arg c "$2" --argjson x "$3" \
+    '{session_id:$s,turn_id:"c1",transcript_path:"/tmp/r.jsonl",hook_event_name:$e,
+      tool_name:"Bash",tool_input:({command:$c} + $x)}'
+}
+claude_bash() {
+  # $1 event, $2 command, $3 agent_id (empty for the root).
+  _payload "{hook_event_name:\"$1\",tool_name:\"Bash\",
+    tool_input:{command:\"$2\",description:\"Run $2\"}} +
+    (if \"$3\" == \"\" then {} else {agent_id:\"$3\"} end)"
+}
+_case
+_hook agent-hook-telemetry claude "$(claude_bash PermissionRequest "rm x" "")"
+_hook agent-hook-notification claude "$(_payload "$perm")"
+_assert_eq "prompted: a Claude prompt for one of two Bash calls waits" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry claude "$(claude_bash PostToolUse "ls" "")"
+_hook agent-hook-telemetry claude \
+  "$(claude_bash PostToolUse "ls" "" | jq -c '.hook_event_name = "PostToolUseFailure"')"
+_assert_eq "prompted: the other Bash call's result or failure keeps it" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry claude "$(claude_bash PostToolUse "rm x" kid-b)"
+_assert_eq "prompted: the same tool from another actor keeps it" "waiting root" "$(_flag)"
+_assert_eq "prompted: no pending clear ran for either" "" "$(_pending_calls)"
+_hook agent-hook-telemetry claude "$(claude_bash PostToolUse "rm x" "")"
+_assert_eq "prompted: only the prompted Bash call's result clears it" "" "$(_flag)"
+
+# Each agent's captured request and result differ only in fields left out of
+# the fingerprint: Claude's answered question adds answers and annotations.
+_case
+ask='{questions:[{question:"Pick a color",header:"Color",options:[{label:"Red"},{label:"Blue"}],multiSelect:false}]}'
+_hook agent-hook-telemetry claude \
+  "$(_payload "{hook_event_name:\"PermissionRequest\",tool_name:\"AskUserQuestion\",tool_input:$ask}")"
+_hook agent-hook-notification claude "$(_payload "$perm")"
+_hook agent-hook-telemetry claude \
+  "$(_payload "{hook_event_name:\"PostToolUse\",tool_name:\"AskUserQuestion\",
+    tool_input:($ask + {answers:{\"Pick a color\":\"Red\"},annotations:{}})}")"
+_assert_eq "prompted: an answered Claude question's result clears it" "" "$(_flag)"
+
+# Codex's request adds a description its result does not carry.
+_case
+_hook agent-hook-notification codex "$(codex_tool PermissionRequest "rm -rf junk" \
+  '{"description":"Allow removing junk?"}')"
+_assert_eq "prompted: a Codex request waits" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry codex "$(codex_tool PostToolUse "ls" '{}')"
+_assert_eq "prompted: a parallel Codex exec's result keeps it" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry codex "$(codex_tool PostToolUse "rm -rf junk" '{}')"
+_assert_eq "prompted: the approved Codex exec's result clears it" "" "$(_flag)"
+
+# Without a fingerprint a tool result never clears: the other clearers
+# (the next tool, a child end, a prompt, Stop, Interrupt, session end) do.
+for spec in \
+  'claude|{hook_event_name:"Notification",notification_type:"elicitation_dialog"}' \
+  'muse|{hook_event_name:"Notification",notification_type:"question_prompt"}' \
+  'gemini|{hook_event_name:"Notification",notification_type:"ToolPermission"}' \
+  'opencode|{hook_event_name:"PermissionRequest",permission:{type:"bash"}}' \
+  'codex|{hook_event_name:"PermissionRequest",turn_id:"t1",transcript_path:"/tmp/r.jsonl"}'; do
+  _case
+  agent=${spec%%|*}
+  _hook agent-hook-telemetry "$agent" "$(claude_bash PermissionRequest "rm x" "")"
+  _hook agent-hook-notification "$agent" "$(_payload "${spec#*|}")"
+  flag=$(_flag)
+  _hook agent-hook-telemetry "$agent" "$(claude_bash PostToolUse "rm x" "")"
+  _assert_eq "unprompted ($agent ${spec#*|}): a tool result keeps the mark" "$flag" "$(_flag)"
+  _assert_eq "unprompted ($agent): no pending clear ran" "" "$(_pending_calls)"
+  _hook agent-hook-telemetry "$agent" "$(claude_bash PreToolUse "ls" "")"
+  _assert_eq "unprompted ($agent): the next tool clears it" "" "$(_flag)"
+done
+
+# A stale request names no tool, so its prompt is not the tool's to clear.
+for agent in claude muse; do
+  _case
+  _hook agent-hook-telemetry "$agent" "$(claude_bash PermissionRequest "rm x" "")"
+  read -r _ request_actor request_fp <"${ATT_FLAG%/*}/attention-request"
+  printf '%s %s %s\n' "$((now_epoch - 61))" "$request_actor" "$request_fp" \
+    >"${ATT_FLAG%/*}/attention-request"
+  _hook agent-hook-notification "$agent" "$(_payload "$perm")"
+  flag=$(_flag)
+  _hook agent-hook-telemetry "$agent" "$(claude_bash PostToolUse "rm x" "")"
+  _assert_eq "unprompted ($agent): a stale request's tool result keeps the mark" \
+    "$flag" "$(_flag)"
+done
+
+# Every raise replaces the fingerprint: a later question raised without one
+# is not cleared by the earlier prompt's tool.
+_case
+_hook agent-hook-telemetry muse "$(muse_tool PermissionRequest "rm x" "")"
+_hook agent-hook-notification muse "$(_payload "$perm")"
+_hook agent-hook-prompt-submit muse "$(_payload '{hook_event_name:"UserPromptSubmit",prompt:"More."}')"
+_assert_eq "prompted: the next prompt clears the permission prompt" "" "$(_flag)"
+_hook agent-hook-notification muse \
+  "$(_payload '{hook_event_name:"Notification",notification_type:"question_prompt"}')"
+_hook agent-hook-telemetry muse "$(muse_tool PostToolUse "rm x" call_b)"
+_assert_eq "prompted: the earlier prompt's tool cannot clear a later question" \
+  "waiting root" "$(_flag)"
 
 _case
 _hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"PostToolUse",tool_name:"Read"}')"
@@ -530,9 +653,10 @@ _hook agent-hook-telemetry muse \
 _assert_eq "actor: the raising Muse child's end clears it" "" "$(_flag)"
 
 # Muse's reminder judge runs as its own session under the root's
-# MUSE_SESSION_ID, with no SubagentStart: its tools and ends are background
-# work, not the root's (shapes from a captured session, ids replaced; the
-# full turn replays in test/muse-side-session.py).
+# MUSE_SESSION_ID, with no SubagentStart: its tools are background work, not
+# the root's (shapes from a captured session, ids replaced; the full turn
+# replays in test/muse-side-session.py). Captured side sessions send only
+# tool events; a Stop naming one is fenced as a turn the hooks never saw.
 muse_side() {
   jq -nc --arg e "$1" '{session_id:"01a1c0d2-0000-7000-8000-00000000b001",
     turn_id:"01a1c0d2-0000-7000-8000-00000000b001",transcript_path:null,
@@ -551,9 +675,9 @@ _assert_eq "actor: so does its Stop" "waiting root" "$(_flag)"
 _assert_eq "actor: which rings nothing" "" "$(_notify_calls)"
 _assert_eq "actor: and no pending clear ran" "" "$(_pending_calls)"
 _hook agent-hook-telemetry muse \
-  "$(_payload '{hook_event_name:"PostToolUse",tool_name:"bash",transcript_path:null}')" \
+  "$(_payload '{hook_event_name:"PreToolUse",tool_name:"bash",transcript_path:null}')" \
   MUSE_SESSION_ID="$ATT_SESSION"
-_assert_eq "actor: the root's approved tool still clears it" "" "$(_flag)"
+_assert_eq "actor: the root's next tool still clears it" "" "$(_flag)"
 # Muse's request_user_input dialog runs no tool hooks, so after the answer
 # the root's next tool (or its Stop) retires the question's waiting mark.
 _case
@@ -568,11 +692,28 @@ _hook agent-hook-telemetry muse \
   MUSE_SESSION_ID="$ATT_SESSION"
 _assert_eq "actor: the root's next tool clears the answered question" "" "$(_flag)"
 _assert_eq "actor: and the pane no longer waits" "" "$(_pending_kind)"
+# Only tool events are a side session's: a root whose payloads name another
+# session than MUSE_SESSION_ID (a stale id) keeps its prompt and Stop marks.
+muse_stale() {
+  jq -nc --arg e "$1" --argjson x "$2" \
+    '{session_id:"01a1c0d2-0000-7000-8000-00000000c001",hook_event_name:$e} + $x'
+}
+_case
+_hook agent-hook-prompt-submit muse "$(muse_stale UserPromptSubmit '{"prompt":"Go."}')" \
+  MUSE_SESSION_ID="$ATT_SESSION"
+_hook agent-hook-notification muse \
+  "$(muse_stale Notification '{"notification_type":"permission_prompt"}')" \
+  MUSE_SESSION_ID="$ATT_SESSION"
+_assert_eq "actor: a stale-id Muse root's prompt is the root's" "waiting root" "$(_flag)"
+_hook agent-hook-stop muse "$(muse_stale Stop '{"stop_hook_active":false}')" \
+  MUSE_SESSION_ID="$ATT_SESSION"
+_assert_eq "actor: its Stop clears it" "" "$(_flag)"
+_assert_eq "actor: and rings done" "done" "$(_pending_kind)"
 # A launcher without MUSE_SESSION_ID keys on its parent pid, which no payload
 # names, so the payload's session cannot be compared and stays the root's.
 _case
 _seed waiting root
-_hook agent-hook-telemetry muse "$(muse_side PostToolUse)"
+_hook agent-hook-telemetry muse "$(muse_side PreToolUse)"
 _assert_eq "actor: without MUSE_SESSION_ID any session's tool is the root's" "" "$(_flag)"
 
 # A sibling child's tool cannot clear another child's prompt.
@@ -624,8 +765,10 @@ _assert_eq "tagged: the current turn's request rings waiting" \
 _assert_eq "tagged: and records the flag" "waiting root" "$(_flag)"
 _hook agent-hook-telemetry codex "$(codex_payload B '{hook_event_name:"PreToolUse",tool_name:"Bash"}')"
 _assert_eq "tagged: the next tool clears it" "" "$(_flag)"
-_hook agent-hook-notification codex "$(codex_payload B '{hook_event_name:"PermissionRequest"}')"
-_hook agent-hook-telemetry codex "$(codex_payload B '{hook_event_name:"PostToolUse",tool_name:"Bash"}')"
+_hook agent-hook-notification codex \
+  "$(codex_payload B '{hook_event_name:"PermissionRequest",tool_name:"Bash",tool_input:{command:"ls"}}')"
+_hook agent-hook-telemetry codex \
+  "$(codex_payload B '{hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:"ls"}}')"
 _assert_eq "tagged: so does the approved tool returning" "" "$(_flag)"
 
 _case

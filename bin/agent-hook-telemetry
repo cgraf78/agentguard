@@ -117,8 +117,9 @@ if command -v term-pane-mark >/dev/null 2>&1; then
           fi
           ;;
         PermissionRequest)
-          # Claude's permission Notification that may follow names no
-          # agent_id; note this request's actor for it (no mark here).
+          # The permission Notification that may follow names no tool, and
+          # Claude's no agent_id either; note this request's actor and tool
+          # for it (no mark here).
           _hook_attention_note_request
           ;;
         SubagentStart)
@@ -159,8 +160,11 @@ if command -v term-pane-mark >/dev/null 2>&1; then
       ;;
   esac
   # The prompted tool cannot return before its prompt is answered, so its
-  # actor's PostToolUse retires the waiting mark. While nothing is sticky a
-  # tool result costs one builtin file test.
+  # own PostToolUse retires the waiting mark. A parallel sibling's result
+  # can arrive while the dialog is open, so the result must match the tool
+  # fingerprint the prompt recorded; a prompt without one waits for the
+  # actor's next tool or turn end. While nothing is sticky a tool result
+  # costs one builtin file test.
   case "${_HOOK_INPUT:-}" in
     *PostToolUse*)
       [ ! -e "$_HOOK_STATE_DIR/attention-sticky" ] || _hook_attention_tool_done

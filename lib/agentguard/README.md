@@ -156,20 +156,27 @@ Gemini `ToolPermission`, Codex and OpenCode `PermissionRequest`), and
 sticky: the session's `attention-sticky` flag (`<kind> <actor>`, the actor
 being `root`, the routed child, `background` for an in-process background
 session (a transcript-less Codex session, or a Muse side session whose
-payload names a session other than `MUSE_SESSION_ID` and that no
+tool events name a session other than `MUSE_SESSION_ID` and that no
 `SubagentStart` introduced), or `any` for a Claude notification that
-names no agent) lets the raising actor's next tool, tool result or child end
-clear `waiting`, and the next prompt, a
+names no agent) lets the raising actor's next tool or child end clear
+`waiting`, and the next prompt, a
 silent Stop, an interrupt, or session end clear both, always with a
 conditional `term-pane-mark clear pending --if`. Claude's `idle_prompt` clears
 `waiting` and rings only when it wins the claim a ringing Stop holds, or
 once for a Stop that found that claim taken (a turn started without a
 prompt). A permission request always rings and records its flag, even from a
-turn the hooks did not see start. Claude's notifications omit `agent_id`, so
-a Claude `PermissionRequest` (wired to `agent-hook-telemetry`) records
-`<epoch> <actor>` in the session's `attention-request`, and a
-`permission_prompt` within `_HOOK_ATTENTION_REQUEST_TTL` (60 s) of it takes
-that actor instead of `any`. Older
+turn the hooks did not see start. Every `PermissionRequest` wired to
+`agent-hook-telemetry` (Claude, Codex, Muse) records
+`<epoch> <actor> <tool>` in the session's `attention-request`, the tool
+being `_HOOK_ATTENTION_TOOL_FP_JQ`'s fingerprint of its name and
+`tool_input`. A Claude `permission_prompt` within
+`_HOOK_ATTENTION_REQUEST_TTL` (60 s) of it takes that actor instead of
+`any`, since Claude's notifications omit `agent_id`. A permission prompt
+whose actor matches a fresh record, or a Codex `PermissionRequest` itself,
+raises with that fingerprint in `attention-tool` (`<actor> <tool>`, which
+every raise rewrites or drops), and the matching `PostToolUse` or
+`PostToolUseFailure` of that actor clears `waiting`; a parallel sibling's
+result does not. Older
 tmux-tools that reject `--kind` get the plain bell; a rejected `--if` only
 drops the flag. Gemini's `BeforeTool` is not observed, so its waiting lasts
 until the turn ends.

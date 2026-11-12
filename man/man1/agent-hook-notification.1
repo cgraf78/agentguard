@@ -49,8 +49,16 @@ recorded it within the last 60 seconds. Otherwise (an
 .BR elicitation_dialog ,
 or no recent request) its flag accepts any actor. Two actors requesting
 permission within that window can be confused; the newer request wins.
-A glance does not acknowledge a waiting mark; the actor's next tool or tool
-result, the end of the child that raised it, or the end of the turn or
+A
+.B permission_prompt
+whose actor matches such a recent request, or a Codex
+.B PermissionRequest
+itself, also records a fingerprint of the prompted tool in
+.IR attention-tool ,
+which every raise rewrites or removes.
+A glance does not acknowledge a waiting mark; the actor's next tool, the
+result of the very tool a fingerprinted prompt asked about (not a parallel
+sibling's), the end of the child that raised it, or the end of the turn or
 session clears it (see
 .BR agent-hook-telemetry (1)).
 It always rings and records its flag, even from a turn the hooks did not see
