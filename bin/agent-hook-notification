@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # agent-hook-notification — Notification hook.
-# Audible alert on permission prompts and other attention requests.
+# Audible alert on permission prompts and other attention requests, marking
+# the pane with the kind of attention the agent needs.
 
 set -u
 _HOOK_SELF="${AGENTGUARD_HOOK_SELF:-$0}" # captured before sourcing so _hook_source_extensions finds agent/local variants
@@ -45,8 +46,72 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
 }
 # END GENERATED LAUNCHER BOOTSTRAP
 
-# --owner: an agent this one launched cannot mark this agent's pane pending.
-term-notify-sound --owner "$PPID" 2>/dev/null || true
+# Permission prompts and questions wait for an answer (Claude, Grok and Muse
+# Notification types, Muse's question_prompt for its request_user_input
+# dialog, Gemini's ToolPermission, and the PermissionRequest event Codex and
+# the OpenCode adapter deliver here); they stay marked until the agent moves
+# on. Claude's idle prompt arrives about a minute after a turn ends or a
+# prompt is dismissed with Esc (never after Esc interrupts a running tool), so
+# it rings only as the backstop for a turn whose Stop never rang and otherwise
+# just retires a waiting mark answered by Esc; agent-hook-telemetry repairs
+# its busy mark. Anything else rings as a finished turn, as before.
+_notify_event='' _notify_type='' _notify_child='' _notify_actor='' _notify_agent=''
+_notify_fp='' _notify_request_actor='' _notify_request_fp=''
+if _hook_read_input && [ -n "${_HOOK_INPUT:-}" ]; then
+  # A PermissionRequest (Codex) names its tool; a fingerprint of it lets
+  # only that tool's PostToolUse retire the mark (_hook_attention_tool_done).
+  IFS=$'\x1f' read -r _notify_event _notify_type _notify_child _notify_fp < <(
+    printf '%s' "$_HOOK_INPUT" | jq -r "$_HOOK_ATTENTION_TOOL_FP_JQ"'
+      def word: if type == "string" and test("^[A-Za-z0-9._:-]*$") then . else "" end;
+      (.hook_event_name // .hookEventName | word) as $event
+      | [$event,
+        (.notification_type // .notificationType | word),
+        (.agent_id // .agentId | if . == null or . == "" then "" else (word | select(. != "") // "child") end),
+        (if $event == "PermissionRequest" then attention_tool_fp else "" end)]
+      | join("\u001f")
+    ' 2>/dev/null
+  ) || true
+fi
+case "$_notify_event:$_notify_type" in
+  PermissionRequest:* | *:permission_prompt | *:elicitation_dialog | *:question_prompt | *:ToolPermission)
+    if [ -n "$_notify_child" ]; then
+      _hook_attention_actor _notify_actor "$_notify_child"
+    elif _hook_agent_name _notify_agent && [ "$_notify_agent" = claude ]; then
+      # Claude's permission notifications carry no agent_id, a subagent's
+      # included. A permission prompt follows its PermissionRequest, which
+      # agent-hook-telemetry recorded with the actor, by about 6 s. Without
+      # a fresh record (an elicitation has none) the actor is unknown and
+      # any actor's next tool or child end retires the mark.
+      _notify_actor=any
+      if [ "$_notify_type" = permission_prompt ]; then
+        _hook_attention_request_actor _notify_actor || _notify_actor=any
+      fi
+    else
+      _hook_attention_payload_actor _notify_actor
+    fi
+    # A permission prompt names no tool, but the same actor's fresh
+    # PermissionRequest record does (Claude and Muse). Elicitations and
+    # questions get no fingerprint, so only the other clearers retire them.
+    if [ "$_notify_type" = permission_prompt ] &&
+      _hook_attention_request_actor _notify_request_actor _notify_request_fp &&
+      [ "$_notify_request_actor" = "$_notify_actor" ]; then
+      _notify_fp="$_notify_request_fp"
+    fi
+    [ "$_notify_actor" != any ] || _notify_fp=''
+    _hook_attention_raise_fenced waiting "$_notify_actor" "$_notify_fp"
+    ;;
+  *:idle_prompt)
+    if _hook_activity_is_foreground; then
+      _hook_attention_clear waiting
+      _hook_attention_claim_ring "done" || true
+    fi
+    ;;
+  *:auth_success) ;;
+  *)
+    # --owner: an agent this one launched cannot mark this agent's pane.
+    _hook_attention_notify "done" || true
+    ;;
+esac
 
 _hook_source_extensions
 _hook_finish

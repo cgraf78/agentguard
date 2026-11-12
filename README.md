@@ -345,7 +345,11 @@ status context; `term-notify-sound` plays the `agent-hook-stop` and
 `agent-hook-notification` terminal notifications; `term-pane-mark` marks the
 agent's tmux pane busy from a submitted prompt or the first tool of a
 notification-started turn. Background child work keeps the pane busy when the
-host exposes a reliable parent task snapshot or child turn identity. The
+host exposes a reliable parent task snapshot or child turn identity. Sessions
+an agent runs in the background of its own process mark nothing and clear
+nothing: Codex's transcript-less sessions, and Muse side sessions (its
+reminder judge), whose tool events name a session other than
+`MUSE_SESSION_ID` with no `SubagentStart` before them. The
 pane terminal's foreground agent owns the mark, so launched agents cannot
 clear it independently (both commands come from
 [tmux-tools](https://github.com/cgraf78/tmux-tools)); and
@@ -359,6 +363,64 @@ in a detached backend, which cannot identify an attached TUI from process
 ancestry; such hooks deliberately mark no pane. Interactive `codex --no-daemon`
 keeps the hook parent in the foreground terminal and supports this integration
 without guessing a session-to-terminal association.
+
+Each notification also tells the terminal what kind of attention the pane
+needs, as the value of tmux-tools' pending mark: `done` when a turn finished
+(a ringing Stop, or a notification AgentGuard does not classify), `waiting`
+when the agent needs an answer (a Notification of type `permission_prompt` or
+`elicitation_dialog`, either key spelling, Muse's `question_prompt`, Gemini
+CLI's `ToolPermission`, and the `PermissionRequest` that Codex and the
+OpenCode adapter deliver), and
+`blocked` when a root turn fails (`StopFailure`, if it wins the prompt cycle's
+single bell). A glance acknowledges `done`; `waiting` and `blocked` stay until
+the agent moves on. The next tool of the actor that raised `waiting` (the root
+agent, or the child routed by `agent_id` or Muse's child session), or that
+child's `SubagentStop` or `StopFailure`, clears it. A permission prompt
+also clears on the `PostToolUse` or `PostToolUseFailure` of the tool it
+asked about, since that tool returns only after the answer, but not on a
+parallel sibling's result, which can arrive while the dialog is still open.
+No `PermissionRequest` names a call id, so `agent-hook-telemetry` records
+each one's actor and a fingerprint of its tool (the tool name and a hash of
+`tool_input` without `description`, `answers` and `annotations`, which only
+one side carries), and only the same actor's matching result clears the
+prompt. A question, an `elicitation_dialog`, an OpenCode or Gemini CLI
+prompt, or a prompt whose request is stale has no fingerprint and waits for
+the other clearers. Claude names no actor on its permission notifications, a
+subagent's included, so a Claude `permission_prompt` within 60 seconds of
+its recorded `PermissionRequest` (which raises nothing itself, since another
+hook may resolve it before a prompt shows) takes that request's actor;
+without such a record (an `elicitation_dialog`, for one), any actor's next
+tool or child end clears its `waiting`. Two actors requesting permission
+within that window can be confused: the newer request names both prompts.
+The next prompt, a Stop that
+does not ring, an interrupt, or session end clears either kind, and a ringing
+Stop's `done` replaces it. Claude's `idle_prompt`, which Claude sends about a
+minute after a turn ends or a prompt is dismissed with Esc (but not after Esc
+interrupts a running tool), clears `waiting` (a dismissed prompt ends no turn)
+and rings only as the backstop for a turn whose Stop did not ring: one with
+no Stop, or a turn
+that started without a prompt (a teammate message, a background task, a
+scheduled wakeup), whose Stop finds the prompt cycle's bell already taken;
+`auth_success` rings nothing. A permission prompt always rings and is always
+tracked, even from a turn the hooks did not see start. A per-session
+`attention-sticky` flag records the raised kind and actor, so a tool call
+costs one builtin file test while nothing is sticky.
+Marks are set before the flag and cleared after it is removed, and clears are
+conditional (`term-pane-mark clear pending --if`), so a `done` or failed-command
+mark is never erased. Gemini CLI reports tools as `BeforeTool`, which
+AgentGuard does not observe, so its `waiting` lasts until the turn ends. After
+you answer a prompt, `waiting` stays until the prompted tool returns, the
+agent's next tool, or the end of its turn, since no hook reports the answer
+itself; approving a long-running command keeps it yellow while that command
+runs. Muse runs no tool hooks for its question dialog, so an answered
+question stays yellow until the agent's next tool or the end of its turn.
+Agent-team teammates that
+run in the lead's process share its pane but keep their own session flags, so
+one session's clear can retire another session's newer `waiting` dot on that
+pane early. With an older tmux-tools
+that rejects `--kind`, notifications ring and mark plain pending as before;
+one that rejects `--if` only loses the flag, never a mark.
+
 Grok team completion relies on its next parent Stop reporting the current
 background task list; the child Stop payload has no stable task ID to match
 against that list.
@@ -366,10 +428,12 @@ Claude marks each subagent and teammate turn from its `SubagentStart` to its
 `SubagentStop`. Claude's task snapshots list an idle teammate as running until
 it shuts down, so they only retire children whose Stop never arrived, and
 Claude's idle prompt, sent once the parent and every child agent are idle,
-clears any that remain. Claude runs no hook when Esc interrupts the parent, so
-that turn's mark stays until a later turn ends. The same state records each
-child's latest start, so hook extensions can ask whether one child is still
-working through `_hook_child_working` (see Shared Helpers).
+clears any that remain. A busy mark clears only when a hook reports the end:
+Claude runs no hook when Esc interrupts a running tool, and sends no
+`idle_prompt` afterwards, so that turn's mark stays until the next prompt or
+turn replaces it. The same state records each child's latest start, so hook
+extensions can ask whether one child is still working through
+`_hook_child_working` (see Shared Helpers).
 
 The launcher trust boundary includes the fixed platform Bash, awk, and env
 paths and the absolute Bash candidate files above. Termux uses its
@@ -677,7 +741,10 @@ To add a new managed agent runtime:
   and must not be removed while the session is active.
 
   `agent-hook-notification` plays notifications for host attention events such
-  as permission requests.
+  as permission requests, marking the pane `waiting` until the agent moves on,
+  and leaves Claude's recurring `idle_prompt` silent unless the turn's Stop did
+  not ring (see the attention kinds above). The Stop bell marks the pane
+  `done`.
 
 [Hive Memory](https://github.com/cgraf78/hive-memory) integration is
 deliberately centralized behind `hm hook <event>`.

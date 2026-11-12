@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-NOTIFICATION 1 "2026-10-12" "agentguard" "User Commands"
+.TH AGENT-HOOK-NOTIFICATION 1 "2026-11-11" "agentguard" "User Commands"
 .SH NAME
 agent-hook-notification \- play terminal notifications for agent events
 .SH SYNOPSIS
@@ -9,12 +9,93 @@ reads an agent notification hook payload from standard input and plays the
 configured terminal notification sound through
 .BR "term-notify-sound \-\-owner" ,
 naming the agent process so that an agent it launched cannot mark its pane
-pending. It leaves the busy tmux pane mark alone and does not add workflow
-warnings or blocks.
+pending, and passes the kind of attention with
+.BR \-\-kind .
+It leaves the busy tmux pane mark alone and does not add workflow warnings or
+blocks.
+.TP
+.B waiting
+A permission prompt or question: a
+.B Notification
+whose
+.B notification_type
+(or
+.BR notificationType )
+is
+.BR permission_prompt ,
+.BR elicitation_dialog ,
+Muse's
+.B question_prompt
+(its
+.B request_user_input
+dialog), or Gemini CLI's
+.BR ToolPermission ,
+and the
+.B PermissionRequest
+event Codex and the OpenCode adapter deliver to this hook. After the mark is
+set, the hook records the session's
+.I attention-sticky
+flag: the kind and the actor that raised it (the root agent, or the child
+routed by
+.B agent_id
+or a Muse child session). Claude names no actor on permission
+notifications, a subagent's included, so a Claude
+.B permission_prompt
+takes the actor of the session's latest
+.B PermissionRequest
+when
+.BR agent-hook-telemetry (1)
+recorded it within the last 60 seconds. Otherwise (an
+.BR elicitation_dialog ,
+or no recent request) its flag accepts any actor. Two actors requesting
+permission within that window can be confused; the newer request wins.
+A
+.B permission_prompt
+whose actor matches such a recent request, or a Codex
+.B PermissionRequest
+itself, also records a fingerprint of the prompted tool in
+.IR attention-tool ,
+which every raise rewrites or removes.
+A glance does not acknowledge a waiting mark; the actor's next tool, the
+result of the very tool a fingerprinted prompt asked about (not a parallel
+sibling's), the end of the child that raised it, or the end of the turn or
+session clears it (see
+.BR agent-hook-telemetry (1)).
+It always rings and records its flag, even from a turn the hooks did not see
+start (its Stop is then fenced, and its next tool or the next prompt clears
+the mark).
+.TP
+.B idle_prompt
+Claude Code sends this about a minute after a turn ends or a prompt is
+dismissed with Esc, but not after Esc interrupts a running tool. It clears a
+waiting mark (a dismissed prompt ends no turn) and rings
+.B done
+only if it wins the prompt cycle's single bell, which a ringing
+.BR agent-hook-stop (1)
+already holds, or once for a Stop that found that bell taken (a turn that
+started without a prompt), so it is the backstop for a turn whose Stop did
+not ring.
+.BR agent-hook-telemetry (1)
+still repairs the busy mark from it.
+.TP
+.B auth_success
+Nothing.
+.TP
+.B done
+Any other notification, as before.
+.PP
+An older
+.B term-notify-sound
+that rejects
+.B \-\-kind
+(exit status 64) is called again without it, which rings and sets a plain
+pending mark, and no flag is recorded.
 .SH EXIT STATUS
 .TP
 .B 0
 The notification was emitted or skipped by best-effort terminal handling.
 .SH SEE ALSO
 .BR agent-hook-stop (1),
+.BR agent-hook-telemetry (1),
+.BR term-notify-sound (1),
 .BR term-pane-mark (1)

@@ -12,6 +12,10 @@ fragment contains no permissions, model selection, UI preferences, or machine
 policy. A missing fragment or reconciler should leave the complete existing
 configuration intact and be reported as a failed refresh.
 
+Gemini reports tools as `BeforeTool`, which AgentGuard's attention tracking
+does not observe, so a `waiting` pane mark raised by a `ToolPermission`
+notification lasts until the turn ends rather than until the next tool.
+
 `test/suites/integration-assets-test` owns the exact event, matcher, timeout,
 identity, and executable contract. Consumer tests should prove only resolution
 and layering.

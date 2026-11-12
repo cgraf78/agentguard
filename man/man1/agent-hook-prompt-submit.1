@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-PROMPT-SUBMIT 1 "2026-10-13" "agentguard" "User Commands"
+.TH AGENT-HOOK-PROMPT-SUBMIT 1 "2026-11-11" "agentguard" "User Commands"
 .SH NAME
 agent-hook-prompt-submit \- handle prompt-time agent context refresh
 .SH SYNOPSIS
@@ -22,6 +22,15 @@ titles), and also a
 run directly in a pane;
 .BR agent-hook-stop (1)
 clears the mark when the turn ends.
+.PP
+A foreground prompt also ends any waiting or blocked attention the previous
+turn left: when the session's
+.I attention-sticky
+flag exists, the hook removes it and runs
+.BR "term-pane-mark clear pending \-\-if sticky" ,
+which leaves a
+.B done
+mark or a failed command's mark alone.
 .PP
 On Claude Code, Codex, and Muse the hook asks Hive Memory to track delivery:
 it passes the host's context lifetime and size limit, minus room for context

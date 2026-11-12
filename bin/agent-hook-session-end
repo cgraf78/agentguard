@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # agent-hook-session-end — SessionEnd hook.
-# Clears the agent's busy pane mark and parses session metadata.
+# Clears the agent's busy and sticky attention pane marks and parses session
+# metadata.
 # Agent-specific extensions handle naming.
 
 set -u
@@ -49,6 +50,8 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
 # The agent is exiting, so whatever turn it was in is over.
 _hook_team_busy root end || true
 _hook_pane_busy clear
+# Nothing waits on an agent that is gone.
+_hook_attention_clear_foreground sticky
 # Teardown callbacks may omit the final prompt ID. Recover this session's
 # exact last token; a late end must not erase another session's mark.
 if command -v term-pane-mark >/dev/null 2>&1 && _hook_activity_is_foreground; then

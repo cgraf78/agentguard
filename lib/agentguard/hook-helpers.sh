@@ -870,10 +870,21 @@ _hook_stop_active() {
 # behavioral reminders, sound must fail silent when state cannot be persisted;
 # failing open here would recreate the repeated-bell failure under concurrency
 # or a temporarily unavailable state root.
+#
+# The claim is the shell's own exclusive create (noclobber opens with
+# O_EXCL), not an external mkdir: a mkdir implementation that tests for the
+# directory before creating it, or reports success when a racer created it
+# first, lets several concurrent callbacks ring (seen on a CI image whose
+# coreutils is a reimplementation). It also spares a fork. A claim left as a
+# directory by an older release still counts: the redirect cannot open it.
 _hook_stop_claim_notification() {
-  local dir="$_HOOK_STATE_DIR/prompt-cycle"
+  local dir="$_HOOK_STATE_DIR/prompt-cycle" claimed=1 noclobber=''
   _hook_mkstate "$dir" || return 1
-  mkdir "$dir/stop-notified" 2>/dev/null
+  case "$-" in *C*) noclobber=1 ;; esac
+  set -C
+  { : >"$dir/stop-notified"; } 2>/dev/null && claimed=0
+  [ -n "$noclobber" ] || set +C
+  return "$claimed"
 }
 
 # Return whether this Stop ends the user's foreground turn. SubagentStop does
@@ -913,7 +924,11 @@ _hook_stop_should_notify() {
   if _hook_stop_active && ! _hook_stop_was_continued; then
     return 1
   fi
-  _hook_stop_claim_notification
+  _hook_stop_claim_notification && return 0
+  # The cycle's bell was already taken: a turn that started without a prompt
+  # (a teammate message, a background task, a scheduled wakeup) ends here.
+  _HOOK_STOP_CLAIM_LOST=1
+  return 1
 }
 
 # Record that this foreground Stop's response kept the turn going, so a later
@@ -989,7 +1004,18 @@ _hook_stop_settle_current() {
     _hook_stop_mark_continued
   else
     if _hook_stop_should_notify; then
-      term-notify-sound --owner "$PPID" >/dev/null 2>&1 || true
+      # Done replaces any sticky kind on the pane, so only the flag goes.
+      [ ! -e "$_HOOK_STATE_DIR/attention-sticky" ] ||
+        rm -f -- "$_HOOK_STATE_DIR/attention-sticky" 2>/dev/null || true
+      _hook_attention_notify "done" || true
+    else
+      if [ -n "${_HOOK_STOP_CLAIM_LOST:-}" ]; then
+        # Leave that silent end to Claude's idle prompt, which rings for it
+        # once (see _hook_attention_claim_ring_current), as it did before the
+        # idle prompt stopped ringing after every turn.
+        : >"$_HOOK_STATE_DIR/prompt-cycle/stop-silent" 2>/dev/null || true
+      fi
+      _hook_attention_clear sticky
     fi
     _hook_pane_busy clear
   fi
@@ -1046,6 +1072,350 @@ _hook_turn_aborted() {
     and (.agent_id // .agentId) == null
     and .reason != "superseded"
   ' >/dev/null 2>&1
+}
+
+# Attention kinds. term-notify-sound sets the pane's pending mark to a kind:
+# done (a turn finished), waiting (the agent needs an answer) or blocked (the
+# turn died). A glance acknowledges done; waiting and blocked are sticky, so
+# the hooks clear them once the agent moves on. The per-session flag
+# attention-sticky records "<kind> <actor>" for a sticky mark this session
+# raised (actor: root, or the child agent_id), so the per-tool clear costs a
+# single builtin test while nothing is sticky. Marks are set before the flag
+# and the flag is removed before the mark is cleared: a race can leave a
+# stale flag, which costs one harmless conditional clear, but never an
+# untracked sticky mark.
+
+# Ring with attention kind $1. Succeeds only when the provider accepted the
+# kind. An older tmux-tools rejects --kind with 64 before ringing, so retry
+# once without it: the bell and a plain pending mark still land, as before.
+_hook_attention_notify() {
+  local status=0
+  term-notify-sound --owner "$PPID" --kind "$1" >/dev/null 2>&1 || status=$?
+  [ "$status" = 64 ] || return "$status"
+  term-notify-sound --owner "$PPID" >/dev/null 2>&1 || true
+  return 1
+}
+
+# Store the flag's actor for payload agent id $2 in the variable named by $1.
+# Ids outside the flag's word charset collapse to one placeholder, which only
+# costs a waiting clear by a different odd-named child.
+_hook_attention_actor() {
+  case "$2" in
+    '') printf -v "$1" root ;;
+    *[!A-Za-z0-9._:-]*) printf -v "$1" child ;;
+    *) printf -v "$1" '%s' "$2" ;;
+  esac
+}
+
+# Ring sticky kind $1 for actor $2, then record the flag when the provider
+# accepted the kind. A legacy fallback marks plain pending, which a glance
+# acknowledges, so it gets no flag. $3, when given, fingerprints the tool
+# whose permission prompt this is (see _hook_attention_tool_done); every
+# raise rewrites or drops that record, so it never outlives its prompt.
+_hook_attention_raise() {
+  _hook_attention_notify "$1" || return 0
+  _hook_mkstate "$_HOOK_STATE_DIR" || return 0
+  if [ -n "${3:-}" ]; then
+    _hook_write_atomic "$_HOOK_STATE_DIR/attention-tool" "$2 $3" || true
+  elif [ -e "$_HOOK_STATE_DIR/attention-tool" ]; then
+    rm -f -- "$_HOOK_STATE_DIR/attention-tool" 2>/dev/null || true
+  fi
+  _hook_write_atomic "$_HOOK_STATE_DIR/attention-sticky" "$1 $2" || true
+}
+
+# Raise sticky kind $1 for actor $2 (tool fingerprint $3, optional) from a
+# notification, never losing the
+# bell or its flag. A permission request blocks its turn, so it is never
+# stale: a turn the hooks did not see start (a Codex turn without a prompt
+# submit, a steer) still raises normally, because a mark without its flag
+# would outlive every clear. With turn identities, a root notification takes
+# the attention lock only so its flag write cannot interleave with a prompt's
+# rearm, after which the prompt's own clear retires it. Child activity is not
+# serialized; neither is a notification whose lock is unavailable.
+_hook_attention_raise_fenced() {
+  if [ "$2" = root ] || [ "$2" = any ]; then
+    _hook_turn_identity
+    if [ "$_HOOK_TURN_KIND" = tagged ] && _hook_attention_managed; then
+      _hook_attention_locked _hook_attention_raise "$1" "$2" "${3:-}" && return 0
+    fi
+  fi
+  _hook_attention_raise "$1" "$2" "${3:-}"
+}
+
+# Store in the variable named by $1 the attention actor of this payload:
+# root, a child id, or background (a transcript-less Codex session or a Muse
+# side session, the in-process background agents _hook_activity_is_foreground
+# excludes). $2, when given, is the child id the caller already routed
+# (agent-hook-telemetry routes Muse children); otherwise the same detectors
+# run here: agent_id or agentId, then Muse's child session routing
+# (child_session_id names the child on its SubagentStop).
+_hook_attention_payload_actor() {
+  local _aa_child="${2-}" _aa_sid='' _aa_agent=''
+  _hook_agent_name _aa_agent
+  if [ $# -lt 2 ]; then
+    case "${_HOOK_INPUT:-}" in
+      *'"agent_id"'* | *'"agentId"'* | *\\u*)
+        _aa_child=$(printf '%s' "$_HOOK_INPUT" |
+          jq -r '(.agent_id // .agentId // empty) | strings' 2>/dev/null) || _aa_child=''
+        ;;
+    esac
+    if [ -z "$_aa_child" ] && [ "$_aa_agent" = muse ] &&
+      [ -e "$_HOOK_STATE_DIR/muse-child-session" ]; then
+      _aa_sid=$(printf '%s' "${_HOOK_INPUT:-}" |
+        jq -r '(.child_session_id | strings) // (.session_id | strings) // empty' 2>/dev/null) || _aa_sid=''
+      if [ -n "$_aa_sid" ] && { [ "$_aa_sid" != "$_HOOK_SESSION_KEY" ] ||
+        [ -e "$_HOOK_STATE_DIR/muse-child/child.$_HOOK_SESSION_KEY" ]; }; then
+        _aa_child="$_aa_sid"
+      fi
+    fi
+  fi
+  if [ -n "$_aa_child" ]; then
+    _hook_attention_actor "$1" "$_aa_child"
+  elif [ "$_aa_agent" = codex ] && ! _hook_activity_is_foreground; then
+    printf -v "$1" background
+  elif [ "$_aa_agent" = muse ] && _hook_muse_side_session; then
+    # Not the coarse foreground veto: while a Muse child runs it also vetoes
+    # the root's own tools, which must still clear the root's marks.
+    printf -v "$1" background
+  else
+    printf -v "$1" root
+  fi
+}
+
+# Clear this session's sticky mark when its flag records kind $1 (waiting, or
+# sticky for either) raised by actor $2 (any actor when omitted). A flag whose
+# actor is "any" (a notification that cannot name its actor: a Claude
+# elicitation, or a permission prompt with no recent PermissionRequest)
+# matches every actor. The clear is
+# conditional on the pane's current kind, so a newer done or failed mark
+# survives. An older tmux-tools rejects --if with 64; a plain clear would
+# erase those unseen marks, so the flag just goes and the mark waits for a
+# glance.
+_hook_attention_clear() {
+  local flag="$_HOOK_STATE_DIR/attention-sticky" kind='' actor=''
+  [ -e "$flag" ] || return 0
+  IFS=' ' read -r kind actor <"$flag" 2>/dev/null || true
+  if [ -n "${2:-}" ] && [ "$actor" != "$2" ] && [ "$actor" != any ]; then
+    return 0
+  fi
+  if [ "$1" = waiting ] && [ "$kind" != waiting ]; then
+    return 0
+  fi
+  rm -f -- "$flag" 2>/dev/null || true
+  command -v term-pane-mark >/dev/null 2>&1 || return 0
+  term-pane-mark clear pending --if "$1" --owner "$PPID" >/dev/null 2>&1 || true
+}
+
+# Claude's permission_prompt Notification names no agent_id, a subagent's
+# included, but the PermissionRequest that precedes it does, about 6 s
+# earlier. That request records "<epoch> <actor> <tool>" in
+# attention-request (the tool fingerprint below, empty without a tool
+# name); it raises nothing itself, since another hook may resolve the
+# request before any prompt shows. The record is not consumed: a prompt can
+# notify more than once, and with one sticky flag per session the newest
+# request is the best guess for each later notification. Two actors
+# requesting within the window can still be confused; the newer one wins.
+_HOOK_ATTENTION_REQUEST_TTL=60
+
+# jq definition of a tool call's fingerprint: its tool name and a hash of
+# its tool_input, so the PostToolUse of the tool a permission prompt asked
+# about can be told from a parallel sibling's. No payload carries a call id
+# on PermissionRequest. Fields an agent adds on only one side are left out:
+# Codex's request adds a description of its own, and Claude's answered
+# question adds answers and annotations. The hash covers the length and the
+# first and last 2048 characters, which keeps a large Write's request cheap;
+# the modulus keeps jq 1.6's arithmetic exact. Empty without a tool name.
+# shellcheck disable=SC2016 # jq variables, not shell expansions.
+_HOOK_ATTENTION_TOOL_FP_JQ='
+  def attention_tool_fp:
+    (.tool_name // .toolName) as $n
+    | if ($n | type) != "string" or $n == "" then ""
+      else
+        ($n + "\u0000" + ((.tool_input // .toolInput)
+          | if type == "object" then del(.description, .answers, .annotations) else . end
+          | tojson)) as $s
+        | ($s[0:2048] + $s[-2048:] | explode
+          | reduce .[] as $c (5381; (. * 33 + $c) % 16777213)) as $h
+        | "\($s | length)-\($h)"
+      end;
+'
+
+# Store in the variables named by $1 and $2 this tool payload's agent id
+# (empty for none; a line break, which no actor word allows, becomes "/")
+# and its tool fingerprint, with one jq.
+_hook_attention_tool_identity() {
+  local _ti_child='' _ti_fp=''
+  {
+    IFS= read -r _ti_child || true
+    IFS= read -r _ti_fp || true
+  } < <(printf '%s' "${_HOOK_INPUT:-}" | jq -r "$_HOOK_ATTENTION_TOOL_FP_JQ"'
+    ((.agent_id // .agentId // "")
+      | if type == "string" then split("\n") | join("/") | split("\r") | join("/") else "" end),
+    attention_tool_fp
+  ' 2>/dev/null)
+  printf -v "$1" '%s' "$_ti_child"
+  printf -v "$2" '%s' "$_ti_fp"
+}
+
+# Store in the variable named by $1 this tool payload's attention actor,
+# given its agent id $2 from _hook_attention_tool_identity: the same answer
+# as _hook_attention_payload_actor, without parsing agent_id again.
+_hook_attention_tool_actor() {
+  if [ -n "$2" ]; then
+    _hook_attention_payload_actor "$1" "$2"
+  else
+    _hook_attention_payload_actor "$1"
+  fi
+}
+
+# Record this PermissionRequest's actor and tool for the notification it
+# may lead to. One jq and one small write, on an event that only fires for
+# permission checks.
+_hook_attention_note_request() {
+  local _nr_child='' _nr_fp='' _nr_actor='' _nr_now=''
+  _hook_attention_tool_identity _nr_child _nr_fp
+  _hook_attention_tool_actor _nr_actor "$_nr_child"
+  _hook_now _nr_now || return 0
+  _hook_mkstate "$_HOOK_STATE_DIR" || return 0
+  _hook_write_atomic "$_HOOK_STATE_DIR/attention-request" \
+    "$_nr_now $_nr_actor${_nr_fp:+ $_nr_fp}" || true
+}
+
+# Store in the variable named by $1 the actor of this session's latest
+# PermissionRequest when it was recorded within the last
+# _HOOK_ATTENTION_REQUEST_TTL seconds, and its tool fingerprint (empty when
+# it has none) in the variable named by $2 when given; fail when there is
+# no such record.
+_hook_attention_request_actor() {
+  local _ra_file="$_HOOK_STATE_DIR/attention-request" _ra_at='' _ra_actor='' _ra_fp=''
+  local _ra_now='' _ra_age
+  [ -f "$_ra_file" ] || return 1
+  IFS=' ' read -r _ra_at _ra_actor _ra_fp <"$_ra_file" 2>/dev/null || return 1
+  case "$_ra_at" in
+    '' | *[!0-9]* | ????????????????*) return 1 ;;
+  esac
+  case "$_ra_actor" in
+    '' | any | *[!A-Za-z0-9._:-]*) return 1 ;;
+  esac
+  case "$_ra_fp" in
+    *[!0-9-]*) _ra_fp='' ;;
+  esac
+  _hook_now _ra_now || return 1
+  _ra_age=$((10#$_ra_now - 10#$_ra_at))
+  [ "$_ra_age" -ge 0 ] && [ "$_ra_age" -le "$_HOOK_ATTENTION_REQUEST_TTL" ] || return 1
+  printf -v "$1" '%s' "$_ra_actor"
+  [ -z "${2:-}" ] || printf -v "$2" '%s' "$_ra_fp"
+}
+
+# The prompted tool returning: clear the waiting mark its actor raised. A
+# permission prompt raised with a tool fingerprint (attention-tool) cannot
+# be answered later than its own tool returns, so this retires the mark as
+# soon as the approved tool finishes or the question's answer lands, instead
+# of at the actor's next tool. Only that tool's result clears: a parallel
+# sibling of the same actor returns while the dialog is still open. A prompt
+# without a fingerprint (an elicitation or question, OpenCode, Gemini, a
+# stale request) waits for the other clearers. Callers test the flag first,
+# so tools pay nothing while nothing is sticky, and a flag without a
+# fingerprint costs no jq.
+_hook_attention_tool_done() {
+  local _td_event="${_HOOK_INPUT_EVENT:-}" _td_tool="$_HOOK_STATE_DIR/attention-tool"
+  local _td_want_actor='' _td_want_fp='' _td_kind='' _td_flag_actor='' _td_child='' _td_fp=''
+  local _td_actor=''
+  if [ -z "$_td_event" ]; then
+    _td_event=$(printf '%s' "${_HOOK_INPUT:-}" |
+      jq -r '.hook_event_name // .hookEventName // empty' 2>/dev/null) || _td_event=''
+  fi
+  case "$_td_event" in
+    PostToolUse | PostToolUseFailure) ;;
+    *) return 0 ;;
+  esac
+  [ -f "$_td_tool" ] || return 0
+  IFS=' ' read -r _td_want_actor _td_want_fp <"$_td_tool" 2>/dev/null || true
+  [ -n "$_td_want_fp" ] || return 0
+  IFS=' ' read -r _td_kind _td_flag_actor <"$_HOOK_STATE_DIR/attention-sticky" 2>/dev/null || true
+  [ "$_td_kind" = waiting ] && [ "$_td_flag_actor" = "$_td_want_actor" ] || return 0
+  _hook_attention_tool_identity _td_child _td_fp
+  [ "$_td_fp" = "$_td_want_fp" ] || return 0
+  _hook_attention_tool_actor _td_actor "$_td_child"
+  [ "$_td_actor" = "$_td_want_actor" ] || return 0
+  _hook_attention_clear waiting "$_td_actor"
+}
+
+# Clear kind $1 for foreground activity only (prompt, Stop, Interrupt,
+# session end): a child or background session sharing the process has not
+# moved the user's agent on. The flag test runs first, so sessions without a
+# sticky mark keep their hook budget.
+_hook_attention_clear_foreground() {
+  [ -e "$_HOOK_STATE_DIR/attention-sticky" ] || return 0
+  _hook_activity_is_foreground || return 0
+  _hook_attention_clear "$1"
+}
+
+# Clear the waiting mark a child raised once that child's turn ends: its
+# SubagentStop, or the StopFailure a failed child sends instead. Call it
+# before the event retires the child's routing state.
+_hook_attention_child_end() {
+  local actor=''
+  [ -e "$_HOOK_STATE_DIR/attention-sticky" ] || return 0
+  _hook_attention_payload_actor actor
+  case "$actor" in root | background) return 0 ;; esac
+  _hook_attention_clear waiting "$actor"
+}
+
+# Ring kind $1 for the root agent only if it wins this prompt cycle's one
+# bell, the claim a ringing Stop holds, under the same attention fence as a
+# Stop. Succeeds when this call won the claim.
+_hook_attention_claim_ring() {
+  _hook_activity_is_foreground || return 1
+  _hook_turn_identity
+  if _hook_attention_managed; then
+    _hook_attention_locked _hook_attention_claim_ring_current "$1"
+  else
+    _hook_attention_claim_ring_current "$1"
+  fi
+}
+
+_hook_attention_claim_ring_current() {
+  if _hook_attention_managed; then
+    _hook_attention_is_current || return 1
+  fi
+  # A Stop that lost the cycle's bell left its silent end to the idle prompt;
+  # unlinking the marker is atomic, so only one idle prompt rings for it.
+  if [ "$1" = "done" ] && [ -e "$_HOOK_STATE_DIR/prompt-cycle/stop-silent" ] &&
+    rm -- "$_HOOK_STATE_DIR/prompt-cycle/stop-silent" 2>/dev/null; then
+    :
+  else
+    _hook_stop_claim_notification || return 1
+  fi
+  if [ "$1" = "done" ]; then
+    # Done replaces any sticky kind on the pane, so only the flag goes.
+    [ ! -e "$_HOOK_STATE_DIR/attention-sticky" ] ||
+      rm -f -- "$_HOOK_STATE_DIR/attention-sticky" 2>/dev/null || true
+    _hook_attention_notify "done" || true
+  else
+    _hook_attention_raise "$1" root
+  fi
+  return 0
+}
+
+# Settle attention for a root turn that ended without Stop (see
+# _hook_turn_aborted, which the caller already checked). A failed request
+# (StopFailure) rings blocked when it wins the prompt cycle's bell; any other
+# end, or a failure that lost the claim, leaves no sticky kind behind.
+_hook_attention_turn_aborted() {
+  local event=''
+  _hook_activity_is_foreground || return 0
+  case "${_HOOK_INPUT:-}" in
+    *StopFailure*)
+      event=$(printf '%s' "$_HOOK_INPUT" |
+        jq -r '.hook_event_name // .hookEventName // empty' 2>/dev/null) || event=''
+      ;;
+  esac
+  if [ "$event" = StopFailure ] && command -v term-notify-sound >/dev/null 2>&1 &&
+    _hook_attention_claim_ring blocked; then
+    return 0
+  fi
+  _hook_attention_clear sticky
 }
 
 # Muse-only child tracking for the foreground veto below. Production Muse runs
@@ -1218,7 +1588,30 @@ _hook_activity_is_foreground() {
   if [ "$_busy_agent_name" = muse ] && [ -e "$_HOOK_STATE_DIR/muse-child-session" ]; then
     return 1
   fi
+  if [ "$_busy_agent_name" = muse ] && _hook_muse_side_session; then
+    return 1
+  fi
   _HOOK_ACTIVITY_FOREGROUND=1
+}
+
+# Return whether this Muse payload names a session other than the root whose
+# key its hooks run under. Muse runs side agents (its reminder judge) as
+# their own sessions inside the user's process, with no SubagentStart and no
+# transcript, like the root: only the session id tells them apart. Their
+# hooks carry the root's MUSE_SESSION_ID, so the state key is the root's
+# session while the payload names the side session. Without MUSE_SESSION_ID
+# the launcher keys on its parent pid, which no payload names, so the rule
+# needs that key to be the session id itself. Side sessions send only tool
+# events, so a prompt, Stop or notification is never one, whatever session
+# it names. Builtins only: every Muse hook asks this.
+_hook_muse_side_session() {
+  _hook_hm_read_input
+  case "$_HOOK_INPUT_EVENT" in
+    PreToolUse | PostToolUse | PostToolUseFailure) ;;
+    *) return 1 ;;
+  esac
+  [ -n "${MUSE_SESSION_ID:-}" ] && [ "$_HOOK_SESSION_KEY" = "$MUSE_SESSION_ID" ] &&
+    [ -n "$_HOOK_INPUT_SESSION" ] && [ "$_HOOK_INPUT_SESSION" != "$_HOOK_SESSION_KEY" ]
 }
 
 # Set or clear the busy mark on the agent's tmux pane, so the terminal can show

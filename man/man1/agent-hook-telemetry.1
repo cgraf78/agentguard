@@ -1,4 +1,4 @@
-.TH AGENT-HOOK-TELEMETRY 1 "2026-10-12" "agentguard" "User Commands"
+.TH AGENT-HOOK-TELEMETRY 1 "2026-11-11" "agentguard" "User Commands"
 .SH NAME
 agent-hook-telemetry \- record an agent hook event in the audit trail
 .SH SYNOPSIS
@@ -34,10 +34,11 @@ A
 .B StopFailure
 or
 .B Interrupt
-event for the foreground turn ends it without a Stop callback, and only this hook is wired to
-those events, so while recording is enabled it also clears the agent's busy
-tmux pane mark with
-.BR "term-pane-mark clear busy" .
+event for the foreground turn ends it without a Stop callback, and only this
+hook is wired to those events, so it also clears the agent's busy tmux pane
+mark with
+.BR "term-pane-mark clear busy" ,
+whether or not recording is enabled.
 A subagent's event (one carrying
 .BR agent_id )
 and an
@@ -47,6 +48,87 @@ whose
 is
 .B superseded
 (sent after the steering prompt that replaced the turn) leave the mark set.
+After the busy clear, a foreground
+.B StopFailure
+rings
+.B term-notify-sound
+with attention kind
+.B blocked
+when it wins the prompt cycle's single bell (the one a ringing
+.BR agent-hook-stop (1)
+holds) and records the session's
+.I attention-sticky
+flag. A blocked mark stays until the next prompt or the end of the session.
+Any other foreground turn end clears a waiting or blocked mark with
+.BR "term-pane-mark clear pending \-\-if sticky" .
+.PP
+Waiting attention (see
+.BR agent-hook-notification (1))
+ends with the agent's next activity. A
+.B PreToolUse
+event only tests whether the flag file exists, which starts no process while
+nothing waits; when it exists and the tool's actor (the root agent, or the
+child routed by the payload's
+.B agent_id
+or Muse's child session) raised it, or the flag accepts any actor, the hook clears it with
+.BR "term-pane-mark clear pending \-\-if waiting" .
+A child's
+.B SubagentStop
+or
+.B StopFailure
+does the same for a waiting mark that child raised.
+A
+.B PostToolUse
+or
+.B PostToolUseFailure
+from the raising actor clears it too for a permission prompt raised with the
+fingerprint of that very tool, since a prompted tool returns only after its
+prompt is answered. A parallel sibling's result, which can arrive while the
+dialog is still open, has another fingerprint and clears nothing, and so
+does any result for a prompt raised without one (a question, an
+elicitation, an OpenCode or Gemini CLI prompt, a stale request). While no
+flag exists a tool result costs the same single file test, and a flag
+without a fingerprint starts no process. The flag is removed before
+the mark is cleared. A release of
+.B term-pane-mark
+that rejects
+.B \-\-if
+only loses the flag; the hook never falls back to a plain clear, which would
+erase unseen attention.
+A Muse side session (its reminder judge), whose tool events name a session
+other than
+.B MUSE_SESSION_ID
+and which no
+.B SubagentStart
+introduced, is background work like Codex's transcript-less sessions: its
+tools neither clear the root's marks nor mark the pane busy. Side sessions
+send only tool events, so a prompt, Stop or notification is always the
+root's.
+A
+.B PermissionRequest
+raises nothing, because another hook may resolve it before a prompt shows,
+but records its time, actor and a fingerprint of its tool (the tool name and
+a hash of
+.B tool_input
+without the
+.BR description ,
+.B answers
+and
+.B annotations
+fields that only one side carries) in the session's
+.I attention-request
+file. The
+.B permission_prompt
+notification that follows about 6 seconds later names no tool, and Claude's
+no
+.B agent_id
+either;
+.BR agent-hook-notification (1)
+reads both from there.
+Gemini CLI reports tools as
+.BR BeforeTool ,
+which this hook does not observe, so its waiting mark lasts until the turn
+ends.
 .PP
 For Claude, each subagent or teammate turn keeps the pane busy from its
 .B SubagentStart
@@ -63,7 +145,11 @@ whose
 is
 .B idle_prompt
 means the parent and every child agent are idle, so it clears the mark and
-retires children whose Stop never arrived.
+retires children whose Stop never arrived. Claude runs no hook when Esc
+interrupts a running tool and sends no
+.B idle_prompt
+afterwards, so that turn's busy mark stays until the next prompt or turn
+replaces it.
 The team state also records each child's latest start time, which hook
 extensions read through
 .BR _hook_child_working .
@@ -89,5 +175,7 @@ in the AgentGuard checkout.
 .SH EXIT STATUS
 Always 0.
 .SH SEE ALSO
+.BR agent-hook-notification (1),
 .BR agentguard-telemetry (1),
+.BR term-notify-sound (1),
 .BR term-pane-mark (1)

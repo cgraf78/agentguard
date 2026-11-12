@@ -1,0 +1,788 @@
+#!/usr/bin/env bash
+# agent-hook-attention-test — attention kinds the hooks raise and clear.
+#
+# Fixture providers model the pane's pending mark in a state file, so each
+# case can check the kind the pane ends up with as well as the exact provider
+# calls and the session's attention-sticky flag.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+# shellcheck disable=SC2016 # child snippets expand in the child shell.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+ATT_DIR=$(_tmpdir)
+_install_hook_fixture "$ATT_DIR" agent-hook-notification agent-hook-telemetry \
+  agent-hook-stop agent-hook-prompt-submit agent-hook-session-end
+
+# term-notify-sound: ATT_LEGACY_KIND=1 behaves like a release without --kind
+# (usage error 64 before ringing). Each call also records whether the flag
+# already existed, which pins the mark-before-flag order.
+cat >"$ATT_DIR/bin/term-notify-sound" <<'MOCK'
+#!/usr/bin/env bash
+if [[ ${ATT_LEGACY_KIND:-0} == 1 && "$*" == *--kind* ]]; then exit 64; fi
+flag=absent
+[[ ! -e $ATT_FLAG ]] || flag=present
+printf '%s flag=%s\n' "$*" "$flag" >>"$ATT_LOG.notify"
+kind=1 all="$*"
+[[ $all != *'--kind '* ]] || kind=${all##*--kind }
+printf '%s\n' "${kind%% *}" >"$ATT_LOG.pending"
+MOCK
+# term-pane-mark: logs every call; ATT_LEGACY_IF=1 rejects --if with 64.
+# A conditional pending clear compares the modelled kind like the provider.
+cat >"$ATT_DIR/bin/term-pane-mark" <<'MOCK'
+#!/usr/bin/env bash
+if [[ ${ATT_LEGACY_IF:-0} == 1 && "$*" == *'--if '* ]]; then exit 64; fi
+flag=absent
+[[ ! -e $ATT_FLAG ]] || flag=present
+printf '%s flag=%s\n' "$*" "$flag" >>"$ATT_LOG"
+if [[ $1 == clear && $2 == pending ]]; then
+  all="$*"
+  want=${all##*--if }
+  want=${want%% *}
+  have=''
+  [[ ! -f $ATT_LOG.pending ]] || have=$(cat "$ATT_LOG.pending")
+  case "$want:$have" in
+    sticky:waiting | sticky:blocked | waiting:waiting | blocked:blocked)
+      rm -f "$ATT_LOG.pending"
+      ;;
+  esac
+fi
+MOCK
+chmod +x "$ATT_DIR/bin/term-notify-sound" "$ATT_DIR/bin/term-pane-mark"
+
+ATT_CASE=0
+# Start a case: a fresh session, log and modelled pane.
+_case() {
+  ATT_CASE=$((ATT_CASE + 1))
+  ATT_SESSION="$TEST_SID-attention-$ATT_CASE"
+  ATT_LOG="$ATT_DIR/case-$ATT_CASE.log"
+  ATT_FLAG="$XDG_RUNTIME_DIR/agentguard/hook-state/$ATT_SESSION/attention-sticky"
+}
+
+# _hook HOOK AGENT PAYLOAD [ENV...] runs HOOK for the case's session. A
+# wrapper stands in for the agent process, as in the busy-mark tests.
+_hook() {
+  local hook="$1" agent="$2" payload="$3"
+  shift 3
+  printf '%s' "$payload" |
+    env "$@" AGENTGUARD_SESSION_ID="$ATT_SESSION" TMPDIR="$TEST_TMPDIR" \
+      AGENTGUARD_NAME="$agent" AGENTGUARD_TELEMETRY=0 ATT_LOG="$ATT_LOG" \
+      ATT_FLAG="$ATT_FLAG" PATH="$ATT_DIR/bin:$PATH" \
+      bash -c 'printf "%s" "$$" >"$1.owner"; "$2"; exit "$?"' _ "$ATT_LOG" \
+      "$ATT_DIR/bin/$hook" >/dev/null 2>&1
+  return "${PIPESTATUS[1]}"
+}
+
+_owner() { cat "$ATT_LOG.owner"; }
+_notify_calls() { cat "$ATT_LOG.notify" 2>/dev/null; }
+_pending_calls() { grep -h 'pending' "$ATT_LOG" 2>/dev/null; }
+_pending_kind() { cat "$ATT_LOG.pending" 2>/dev/null; }
+_flag() { cat "$ATT_FLAG" 2>/dev/null; }
+_request() { cat "${ATT_FLAG%/*}/attention-request" 2>/dev/null; }
+_payload() { jq -nc --arg s "$ATT_SESSION" "{session_id:\$s} + ($1)"; }
+
+# Set up a sticky mark as a notification would leave it.
+_seed() {
+  mkdir -p "${ATT_FLAG%/*}"
+  printf '%s\n' "$1 $2" >"$ATT_FLAG"
+  printf '%s\n' "$1" >"$ATT_LOG.pending"
+}
+
+echo ""
+echo "=== attention: notifications raise waiting ==="
+
+for spec in \
+  'claude|{hook_event_name:"Notification",notification_type:"permission_prompt"}' \
+  'claude|{hook_event_name:"Notification",notification_type:"elicitation_dialog"}' \
+  'muse|{hook_event_name:"Notification",notification_type:"permission_prompt"}' \
+  'muse|{hook_event_name:"Notification",notification_type:"question_prompt"}' \
+  'grok|{hookEventName:"Notification",notificationType:"permission_prompt"}' \
+  'gemini|{hook_event_name:"Notification",notification_type:"ToolPermission"}' \
+  'codex|{hook_event_name:"PermissionRequest",turn_id:"t1",transcript_path:"/tmp/r.jsonl"}' \
+  'opencode|{hook_event_name:"PermissionRequest",permission:{type:"bash"}}'; do
+  _case
+  agent=${spec%%|*}
+  _hook agent-hook-notification "$agent" "$(_payload "${spec#*|}")"
+  _assert_eq "notification ($agent ${spec#*|}): rings waiting" \
+    "--owner $(_owner) --kind waiting flag=absent" "$(_notify_calls)"
+  # Claude names no agent_id even for a subagent's prompt; without a recent
+  # PermissionRequest record any actor's next activity retires it. The
+  # others name their children.
+  want_actor=root
+  [ "$agent" != claude ] || want_actor=any
+  _assert_eq "notification ($agent): records the waiting flag's actor" \
+    "waiting $want_actor" "$(_flag)"
+  _assert_eq "notification ($agent): pane waits" waiting "$(_pending_kind)"
+done
+
+_case
+_hook agent-hook-notification opencode \
+  "$(_payload '{hook_event_name:"PermissionRequest",agent_id:"ses_child"}')"
+_assert_eq "notification: a child's permission request records the child" \
+  "waiting ses_child" "$(_flag)"
+_case
+_hook agent-hook-notification claude \
+  "$(_payload '{notification_type:"permission_prompt",agent_id:"a b"}')"
+_assert_eq "notification: an id outside the flag charset collapses" \
+  "waiting child" "$(_flag)"
+
+echo ""
+echo "=== attention: other notifications ==="
+
+for payload in '{notification_type:"agent_message"}' '{hook_event_name:"Notification"}' \
+  '{notificationType:7}'; do
+  _case
+  _hook agent-hook-notification claude "$(_payload "$payload")"
+  _assert_eq "notification $payload: rings done" \
+    "--owner $(_owner) --kind done flag=absent" "$(_notify_calls)"
+  _assert_eq "notification $payload: records no flag" "" "$(_flag)"
+done
+for payload in '' 'not-json' '{not json' '[1]' '[1,2]'; do
+  _case
+  _hook agent-hook-notification claude "$payload"
+  _assert_eq "notification ${payload:-without a payload}: exits 0" 0 "$?"
+  _assert_eq "notification ${payload:-without a payload}: rings done" \
+    "--owner $(_owner) --kind done flag=absent" "$(_notify_calls)"
+done
+_case
+_hook agent-hook-notification claude "$(_payload '{notification_type:"auth_success"}')"
+_assert_eq "notification: auth_success stays silent" "" "$(_notify_calls)"
+_assert_eq "notification: auth_success touches no mark" "" "$(_pending_calls)"
+
+echo ""
+echo "=== attention: idle_prompt ==="
+
+idle='{hook_event_name:"Notification",notification_type:"idle_prompt"}'
+_case
+_hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Work.",prompt_id:"p1"}')"
+_hook agent-hook-stop claude "$(_payload '{prompt_id:"p1"}')"
+_assert_eq "idle: the Stop rang done" "--owner $(_owner) --kind done flag=absent" "$(_notify_calls)"
+_hook agent-hook-notification claude "$(_payload "$idle")"
+_assert_eq "idle: after a ringing Stop it stays silent" "1" "$(_notify_calls | wc -l | tr -d ' ')"
+
+_case
+_hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Work.",prompt_id:"p1"}')"
+_hook agent-hook-stop claude "$(_payload '{prompt_id:"p1",stop_hook_active:true}')"
+_assert_eq "idle: a runtime continuation Stop did not ring" "" "$(_notify_calls)"
+_hook agent-hook-notification claude "$(_payload "$idle")"
+_assert_eq "idle: after a Stop that did not ring it rings done once" \
+  "--owner $(_owner) --kind done flag=absent" "$(_notify_calls)"
+_hook agent-hook-notification claude "$(_payload "$idle")"
+_assert_eq "idle: a repeated idle prompt stays silent" "1" "$(_notify_calls | wc -l | tr -d ' ')"
+
+# Esc at a permission prompt: no Stop, and the idle prompt retires the
+# waiting mark before it rings the backstop bell.
+_case
+_hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Work.",prompt_id:"p1"}')"
+_hook agent-hook-notification claude "$(_payload '{notification_type:"permission_prompt"}')"
+_hook agent-hook-notification claude "$(_payload '{notificationType:"idle_prompt"}')"
+_assert_eq "idle: clears waiting after removing the flag" \
+  "clear pending --if waiting --owner $(_owner) flag=absent" "$(_pending_calls)"
+_assert_eq "idle: then rings the backstop done" \
+  "--owner $(_owner) --kind done flag=absent" "$(_notify_calls | tail -n 1)"
+_assert_eq "idle: the pane shows done" "done" "$(_pending_kind)"
+
+_case
+_hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Work.",prompt_id:"p1"}')"
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"StopFailure"}')"
+: >"$ATT_LOG"
+_hook agent-hook-notification claude "$(_payload "$idle")"
+_assert_eq "idle: leaves a blocked mark alone" "" "$(_pending_calls)"
+_assert_eq "idle: keeps the blocked flag" "blocked root" "$(_flag)"
+_assert_eq "idle: the failed turn's bell holds the claim" "1" "$(_notify_calls | wc -l | tr -d ' ')"
+
+_case
+_seed waiting root
+_hook agent-hook-notification claude "$(_payload "$idle + {agent_id:\"child-1\"}")"
+_assert_eq "idle: a child's idle prompt neither clears nor rings" \
+  "waiting root" "$(_flag)"
+_assert_eq "idle: a child's idle prompt stays silent" "" "$(_notify_calls)"
+
+echo ""
+echo "=== attention: tools and child ends clear waiting ==="
+
+_case
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"PreToolUse",tool_name:"Read"}')"
+_assert_eq "tool: without a flag no pending call" "" "$(_pending_calls)"
+
+_case
+_seed waiting root
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"PreToolUse",tool_name:"Read"}')"
+_assert_eq "tool: a root tool clears the root's waiting mark, flag first" \
+  "clear pending --if waiting --owner $(_owner) flag=absent" "$(_pending_calls)"
+_assert_eq "tool: the flag is gone" "" "$(_flag)"
+_assert_eq "tool: the pane no longer waits" "" "$(_pending_kind)"
+
+_case
+_seed waiting child-a
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"PreToolUse",tool_name:"Read"}')"
+_assert_eq "tool: a root tool keeps a child's waiting mark" "" "$(_pending_calls)"
+_hook agent-hook-telemetry claude \
+  "$(_payload '{hook_event_name:"PreToolUse",tool_name:"Read",agent_id:"child-b"}')"
+_assert_eq "tool: another child's tool keeps it too" "waiting child-a" "$(_flag)"
+_hook agent-hook-telemetry claude \
+  "$(_payload '{hook_event_name:"PreToolUse",tool_name:"Read",agentId:"child-a"}')"
+_assert_eq "tool: the child's own tool clears it" "" "$(_flag)"
+_assert_contains "tool: with a conditional clear" "clear pending --if waiting" "$(_pending_calls)"
+
+_case
+_seed blocked root
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"PreToolUse",tool_name:"Read"}')"
+_assert_eq "tool: a tool never clears blocked" "blocked root" "$(_flag)"
+_assert_eq "tool: and makes no pending call" "" "$(_pending_calls)"
+
+for child_end in SubagentStop StopFailure; do
+  _case
+  _seed waiting child-a
+  _hook agent-hook-telemetry claude "$(_payload "{hook_event_name:\"$child_end\",agent_id:\"child-b\"}")"
+  _assert_eq "child $child_end: another child's end keeps the mark" "waiting child-a" "$(_flag)"
+  _hook agent-hook-telemetry claude "$(_payload "{hook_event_name:\"$child_end\",agent_id:\"child-a\"}")"
+  _assert_eq "child $child_end: the raising child's end clears it" "" "$(_flag)"
+  _assert_eq "child $child_end: conditionally" \
+    "clear pending --if waiting --owner $(_owner) flag=absent" "$(_pending_calls)"
+  _assert_eq "child $child_end: never rings" "" "$(_notify_calls)"
+done
+
+echo ""
+echo "=== attention: failed and interrupted turns ==="
+
+_case
+_hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Work.",prompt_id:"p1"}')"
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"StopFailure",prompt_id:"p1"}')"
+_assert_contains "StopFailure: clears busy as before" "clear busy" "$(cat "$ATT_LOG")"
+_assert_eq "StopFailure: rings blocked" "--owner $(_owner) --kind blocked flag=absent" "$(_notify_calls)"
+_assert_eq "StopFailure: records the blocked flag" "blocked root" "$(_flag)"
+_assert_eq "StopFailure: the pane is blocked" blocked "$(_pending_kind)"
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"PreToolUse",tool_name:"Read"}')"
+_assert_eq "StopFailure: blocked survives a tool" "blocked root" "$(_flag)"
+_hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Retry.",prompt_id:"p2"}')"
+_assert_eq "StopFailure: the next prompt clears blocked" "" "$(_flag)"
+_assert_contains "StopFailure: with a sticky clear" \
+  "clear pending --if sticky --owner $(_owner) flag=absent" "$(_pending_calls)"
+_assert_eq "StopFailure: the pane no longer shows it" "" "$(_pending_kind)"
+
+_case
+_hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Work.",prompt_id:"p1"}')"
+_hook agent-hook-stop claude "$(_payload '{prompt_id:"p1"}')"
+_seed waiting root
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"StopFailure",prompt_id:"p1"}')"
+_assert_eq "StopFailure: after a ringing Stop it stays silent" "1" "$(_notify_calls | wc -l | tr -d ' ')"
+_assert_eq "StopFailure: and leaves nothing sticky" "" "$(_flag)"
+
+_case
+_hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Work.",prompt_id:"p1"}')"
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"StopFailure",agent_id:"child-1"}')"
+_assert_eq "StopFailure: a child's failure does not ring" "" "$(_notify_calls)"
+_assert_eq "StopFailure: a child's failure records no flag" "" "$(_flag)"
+
+for agent in codex muse; do
+  _case
+  _seed waiting root
+  _hook agent-hook-telemetry "$agent" "$(_payload '{hook_event_name:"Interrupt"}')"
+  _assert_eq "Interrupt ($agent): clears the sticky mark" "" "$(_flag)"
+  _assert_eq "Interrupt ($agent): conditionally" \
+    "clear pending --if sticky --owner $(_owner) flag=absent" "$(_pending_calls)"
+  _assert_eq "Interrupt ($agent): never rings" "" "$(_notify_calls)"
+done
+
+echo ""
+echo "=== attention: turn and session ends ==="
+
+_case
+_hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Work.",prompt_id:"p1"}')"
+_seed waiting root
+_hook agent-hook-stop claude "$(_payload '{prompt_id:"p1"}')"
+_assert_eq "Stop: a ringing Stop removes the flag before ringing done" \
+  "--owner $(_owner) --kind done flag=absent" "$(_notify_calls)"
+_assert_eq "Stop: done replaces waiting without a pending clear" "" "$(_pending_calls)"
+_assert_eq "Stop: the pane shows done" "done" "$(_pending_kind)"
+_seed waiting root
+_hook agent-hook-stop claude "$(_payload '{prompt_id:"p1"}')"
+_assert_eq "Stop: a Stop that does not ring clears sticky" \
+  "clear pending --if sticky --owner $(_owner) flag=absent" "$(_pending_calls)"
+_assert_eq "Stop: the flag is gone" "" "$(_flag)"
+
+_case
+_seed waiting root
+_hook agent-hook-stop grok "$(_payload '{hook_event_name:"subagent_stop",subagentType:"explore"}')"
+_assert_eq "Stop: a subagent Stop keeps the mark" "waiting root" "$(_flag)"
+
+_case
+_seed waiting root
+_hook agent-hook-session-end claude "$(_payload '{}')"
+_assert_eq "SessionEnd: clears the sticky mark" "" "$(_flag)"
+_assert_contains "SessionEnd: conditionally" \
+  "clear pending --if sticky --owner $(_owner) flag=absent" "$(_pending_calls)"
+
+_case
+_seed blocked root
+_hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Work.",agent_id:"child-1"}')"
+_assert_eq "prompt: a child's prompt keeps the sticky mark" "blocked root" "$(_flag)"
+
+_case
+_hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Work."}')"
+_assert_eq "prompt: without a flag no pending call" "" "$(_pending_calls)"
+
+echo ""
+echo "=== attention: older tmux-tools ==="
+
+_case
+_hook agent-hook-notification claude "$(_payload '{notification_type:"permission_prompt"}')" \
+  ATT_LEGACY_KIND=1
+_assert_eq "legacy: a rejected --kind retries once without it" \
+  "--owner $(_owner) flag=absent" "$(_notify_calls)"
+_assert_eq "legacy: the plain pending mark gets no flag" "" "$(_flag)"
+_assert_eq "legacy: the pane still shows attention" 1 "$(_pending_kind)"
+
+_case
+_hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Work.",prompt_id:"p1"}')" ATT_LEGACY_KIND=1
+_hook agent-hook-stop claude "$(_payload '{prompt_id:"p1"}')" ATT_LEGACY_KIND=1
+_assert_eq "legacy: a Stop still rings" "--owner $(_owner) flag=absent" "$(_notify_calls)"
+
+_case
+_hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Work.",prompt_id:"p1"}')" ATT_LEGACY_KIND=1
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"StopFailure"}')" ATT_LEGACY_KIND=1
+_assert_eq "legacy: a failed turn still rings" "--owner $(_owner) flag=absent" "$(_notify_calls)"
+_assert_eq "legacy: a failed turn records no flag" "" "$(_flag)"
+
+for clearer in tool prompt; do
+  _case
+  _seed waiting root
+  printf 'done\n' >"$ATT_LOG.pending"
+  if [ "$clearer" = tool ]; then
+    _hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"PreToolUse",tool_name:"Read"}')" ATT_LEGACY_IF=1
+  else
+    _hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Work."}')" ATT_LEGACY_IF=1
+  fi
+  _assert_eq "legacy ($clearer): a rejected --if drops the flag" "" "$(_flag)"
+  _assert_eq "legacy ($clearer): and never falls back to a plain clear" "" "$(_pending_calls)"
+  _assert_eq "legacy ($clearer): an unseen done mark survives" "done" "$(_pending_kind)"
+done
+
+echo ""
+echo "=== attention: self-started turns ==="
+
+# A turn that starts without a prompt (a teammate message, a background task,
+# a scheduled wakeup) ends with a Stop that lost the cycle's bell; the idle
+# prompt rings for it once.
+_case
+_hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Work.",prompt_id:"p1"}')"
+_hook agent-hook-stop claude "$(_payload '{prompt_id:"p1"}')"
+_hook agent-hook-stop claude "$(_payload '{prompt_id:"p1"}')"
+_assert_eq "self-started: the second Stop stays silent" "1" "$(_notify_calls | wc -l | tr -d ' ')"
+_hook agent-hook-notification claude "$(_payload "$idle")"
+_assert_eq "self-started: the idle prompt rings done for it" \
+  "--kind done flag=absent
+--kind done flag=absent" "$(_notify_calls | sed 's/^--owner [0-9]* //')"
+_hook agent-hook-notification claude "$(_payload "$idle")"
+_assert_eq "self-started: a second idle prompt stays silent" "2" "$(_notify_calls | wc -l | tr -d ' ')"
+
+# A runtime continuation is not a self-started turn.
+_case
+_hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Work.",prompt_id:"p1"}')"
+_hook agent-hook-stop claude "$(_payload '{prompt_id:"p1"}')"
+_hook agent-hook-stop claude "$(_payload '{prompt_id:"p1",stop_hook_active:true}')"
+_hook agent-hook-notification claude "$(_payload "$idle")"
+_assert_eq "self-started: a continuation Stop leaves the idle prompt silent" \
+  "1" "$(_notify_calls | wc -l | tr -d ' ')"
+
+echo ""
+echo "=== attention: actors ==="
+
+# Claude's subagent prompt names no actor; the subagent's own tool clears it.
+_case
+_hook agent-hook-notification claude "$(_payload '{hook_event_name:"Notification",notification_type:"permission_prompt"}')"
+_hook agent-hook-telemetry claude \
+  "$(_payload '{hook_event_name:"PreToolUse",tool_name:"Read",agent_id:"sub-1"}')"
+_assert_eq "actor: a subagent's tool clears an any-actor prompt" "" "$(_flag)"
+_case
+_hook agent-hook-notification claude "$(_payload '{hook_event_name:"Notification",notification_type:"permission_prompt"}')"
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"SubagentStop",agent_id:"sub-1"}')"
+_assert_eq "actor: a subagent's end clears an any-actor prompt" "" "$(_flag)"
+
+# Claude's PermissionRequest names the actor that its permission_prompt
+# Notification, about 6 s later, does not.
+perm='{hook_event_name:"Notification",notification_type:"permission_prompt"}'
+_case
+_hook agent-hook-telemetry claude \
+  "$(_payload '{hook_event_name:"PermissionRequest",tool_name:"AskUserQuestion"}')"
+_assert_eq "request: a PermissionRequest rings nothing" "" "$(_notify_calls)"
+_assert_eq "request: and marks nothing" "" "$(_pending_calls)"
+_assert_eq "request: and raises no flag" "" "$(_flag)"
+_assert_contains "request: it records the root actor" " root" "$(_request)"
+_hook agent-hook-notification claude "$(_payload "$perm")"
+_assert_eq "request: the root's question is attributed to the root" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry claude \
+  "$(_payload '{hook_event_name:"PreToolUse",tool_name:"Read",agent_id:"sib-1"}')"
+_hook agent-hook-telemetry claude \
+  "$(_payload '{hook_event_name:"PostToolUse",tool_name:"Read",agent_id:"sib-1"}')"
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"SubagentStop",agent_id:"sib-1"}')"
+_assert_eq "request: a sibling child's tools and end keep the root's question" \
+  "waiting root" "$(_flag)"
+_assert_eq "request: the pane still waits" waiting "$(_pending_kind)"
+_assert_eq "request: no pending clear ran" "" "$(_pending_calls)"
+_hook agent-hook-telemetry claude \
+  "$(_payload '{hook_event_name:"PostToolUse",tool_name:"AskUserQuestion"}')"
+_assert_eq "request: the answered question's PostToolUse clears it" "" "$(_flag)"
+_assert_eq "request: conditionally, flag first" \
+  "clear pending --if waiting --owner $(_owner) flag=absent" "$(_pending_calls)"
+_assert_eq "request: the pane no longer waits" "" "$(_pending_kind)"
+
+_case
+_hook agent-hook-telemetry claude \
+  "$(_payload '{hook_event_name:"PermissionRequest",tool_name:"Bash",agent_id:"kid-a"}')"
+_hook agent-hook-notification claude "$(_payload "$perm")"
+_assert_eq "request: a child's prompt is attributed to that child" "waiting kid-a" "$(_flag)"
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"PreToolUse",tool_name:"Read"}')"
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"PostToolUse",tool_name:"Agent"}')"
+_assert_eq "request: the root's tools keep the child's prompt" "waiting kid-a" "$(_flag)"
+_hook agent-hook-telemetry claude \
+  "$(_payload '{hook_event_name:"PostToolUseFailure",tool_name:"Read",agent_id:"kid-b"}')"
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"StopFailure",agent_id:"kid-b"}')"
+_assert_eq "request: a sibling's failed tool and failed end keep it" "waiting kid-a" "$(_flag)"
+_assert_eq "request: no pending clear ran for others" "" "$(_pending_calls)"
+_hook agent-hook-telemetry claude \
+  "$(_payload '{hook_event_name:"PostToolUse",tool_name:"Bash",agent_id:"kid-a"}')"
+_assert_eq "request: the child's approved tool returning clears it" "" "$(_flag)"
+_assert_eq "request: the pane no longer waits for the child" "" "$(_pending_kind)"
+
+for clearer in PreToolUse SubagentStop; do
+  _case
+  _hook agent-hook-telemetry claude \
+    "$(_payload '{hook_event_name:"PermissionRequest",tool_name:"Bash",agent_id:"kid-a"}')"
+  _hook agent-hook-notification claude "$(_payload "$perm")"
+  _hook agent-hook-telemetry claude \
+    "$(_payload "{hook_event_name:\"$clearer\",tool_name:\"Read\",agent_id:\"kid-a\"}")"
+  _assert_eq "request: the child's own $clearer clears its prompt" "" "$(_flag)"
+done
+
+# The record is the newest request's; a second notification reuses it.
+_case
+_hook agent-hook-telemetry claude \
+  "$(_payload '{hook_event_name:"PermissionRequest",tool_name:"Bash",agent_id:"kid-a"}')"
+_hook agent-hook-telemetry claude \
+  "$(_payload '{hook_event_name:"PermissionRequest",tool_name:"Bash",agent_id:"kid-b"}')"
+_hook agent-hook-notification claude "$(_payload "$perm")"
+_assert_eq "request: the newest request names the actor" "waiting kid-b" "$(_flag)"
+_hook agent-hook-notification claude "$(_payload "$perm")"
+_assert_eq "request: a repeated notification keeps that actor" "waiting kid-b" "$(_flag)"
+
+# A stale, future-dated or malformed record, or none, leaves the actor
+# unknown; so does an elicitation, which follows no PermissionRequest.
+now_epoch=$(date +%s)
+for record in "$((now_epoch - 61)) kid-a" "$((now_epoch + 30)) kid-a" \
+  "x kid-a" "$now_epoch" "$now_epoch any" "$now_epoch a/b"; do
+  _case
+  mkdir -p "${ATT_FLAG%/*}"
+  printf '%s\n' "$record" >"${ATT_FLAG%/*}/attention-request"
+  _hook agent-hook-notification claude "$(_payload "$perm")"
+  _assert_eq "request: record '$record' falls back to any" "waiting any" "$(_flag)"
+done
+_case
+mkdir -p "${ATT_FLAG%/*}"
+printf '%s kid-a\n' "$((now_epoch - 50))" >"${ATT_FLAG%/*}/attention-request"
+_hook agent-hook-notification claude "$(_payload "$perm")"
+_assert_eq "request: a record inside the window attributes" "waiting kid-a" "$(_flag)"
+_case
+_hook agent-hook-telemetry claude \
+  "$(_payload '{hook_event_name:"PermissionRequest",tool_name:"Bash",agent_id:"kid-a"}')"
+_hook agent-hook-notification claude \
+  "$(_payload '{hook_event_name:"Notification",notification_type:"elicitation_dialog"}')"
+_assert_eq "request: an elicitation stays any-actor" "waiting any" "$(_flag)"
+
+# Other agents name their actors on the notification itself, but a Muse
+# request still records the tool its permission prompt asks about.
+_case
+_hook agent-hook-telemetry muse "$(_payload '{hook_event_name:"PermissionRequest",tool_name:"Bash"}')"
+_assert_contains "request: a Muse PermissionRequest records the root and its tool" \
+  " root " "$(_request)"
+
+echo ""
+echo "=== attention: only the prompted tool's result clears ==="
+
+# Parallel tool calls: a sibling's result can arrive while the prompted
+# tool's dialog is still open (shapes from captured Muse, Claude and Codex
+# sessions; no PermissionRequest names a call id).
+muse_tool() {
+  # $1 event, $2 command, $3 tool_use_id (none on a PermissionRequest).
+  _payload "{hook_event_name:\"$1\",tool_name:\"bash\",turn_id:\"m1\",transcript_path:null,
+    tool_input:{command:\"$2\",description:\"Run it\",workdir:\"/w\"}} +
+    (if \"$3\" == \"\" then {} else {tool_use_id:\"$3\"} end)"
+}
+_case
+_hook agent-hook-telemetry muse "$(muse_tool PreToolUse "sleep 30" call_a)"
+_hook agent-hook-telemetry muse "$(muse_tool PreToolUse "rm x" call_b)"
+_hook agent-hook-telemetry muse "$(muse_tool PermissionRequest "rm x" "")"
+_hook agent-hook-notification muse "$(_payload "$perm")"
+_assert_eq "prompted: a Muse prompt for one of two parallel tools waits" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry muse "$(muse_tool PostToolUse "sleep 30" call_a)"
+_assert_eq "prompted: the sibling's result keeps the open dialog waiting" "waiting root" "$(_flag)"
+_assert_eq "prompted: the pane still waits" waiting "$(_pending_kind)"
+_assert_eq "prompted: no pending clear ran" "" "$(_pending_calls)"
+_hook agent-hook-telemetry muse "$(muse_tool PostToolUse "rm x" call_b)"
+_assert_eq "prompted: the prompted tool's own result clears it" "" "$(_flag)"
+_assert_eq "prompted: and the pane no longer waits" "" "$(_pending_kind)"
+
+codex_tool() {
+  # $1 event, $2 command, $3 extra tool_input fields.
+  jq -nc --arg s "$ATT_SESSION" --arg e "$1" --arg c "$2" --argjson x "$3" \
+    '{session_id:$s,turn_id:"c1",transcript_path:"/tmp/r.jsonl",hook_event_name:$e,
+      tool_name:"Bash",tool_input:({command:$c} + $x)}'
+}
+claude_bash() {
+  # $1 event, $2 command, $3 agent_id (empty for the root).
+  _payload "{hook_event_name:\"$1\",tool_name:\"Bash\",
+    tool_input:{command:\"$2\",description:\"Run $2\"}} +
+    (if \"$3\" == \"\" then {} else {agent_id:\"$3\"} end)"
+}
+_case
+_hook agent-hook-telemetry claude "$(claude_bash PermissionRequest "rm x" "")"
+_hook agent-hook-notification claude "$(_payload "$perm")"
+_assert_eq "prompted: a Claude prompt for one of two Bash calls waits" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry claude "$(claude_bash PostToolUse "ls" "")"
+_hook agent-hook-telemetry claude \
+  "$(claude_bash PostToolUse "ls" "" | jq -c '.hook_event_name = "PostToolUseFailure"')"
+_assert_eq "prompted: the other Bash call's result or failure keeps it" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry claude "$(claude_bash PostToolUse "rm x" kid-b)"
+_assert_eq "prompted: the same tool from another actor keeps it" "waiting root" "$(_flag)"
+_assert_eq "prompted: no pending clear ran for either" "" "$(_pending_calls)"
+_hook agent-hook-telemetry claude "$(claude_bash PostToolUse "rm x" "")"
+_assert_eq "prompted: only the prompted Bash call's result clears it" "" "$(_flag)"
+
+# Each agent's captured request and result differ only in fields left out of
+# the fingerprint: Claude's answered question adds answers and annotations.
+_case
+ask='{questions:[{question:"Pick a color",header:"Color",options:[{label:"Red"},{label:"Blue"}],multiSelect:false}]}'
+_hook agent-hook-telemetry claude \
+  "$(_payload "{hook_event_name:\"PermissionRequest\",tool_name:\"AskUserQuestion\",tool_input:$ask}")"
+_hook agent-hook-notification claude "$(_payload "$perm")"
+_hook agent-hook-telemetry claude \
+  "$(_payload "{hook_event_name:\"PostToolUse\",tool_name:\"AskUserQuestion\",
+    tool_input:($ask + {answers:{\"Pick a color\":\"Red\"},annotations:{}})}")"
+_assert_eq "prompted: an answered Claude question's result clears it" "" "$(_flag)"
+
+# Codex's request adds a description its result does not carry.
+_case
+_hook agent-hook-notification codex "$(codex_tool PermissionRequest "rm -rf junk" \
+  '{"description":"Allow removing junk?"}')"
+_assert_eq "prompted: a Codex request waits" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry codex "$(codex_tool PostToolUse "ls" '{}')"
+_assert_eq "prompted: a parallel Codex exec's result keeps it" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry codex "$(codex_tool PostToolUse "rm -rf junk" '{}')"
+_assert_eq "prompted: the approved Codex exec's result clears it" "" "$(_flag)"
+
+# Without a fingerprint a tool result never clears: the other clearers
+# (the next tool, a child end, a prompt, Stop, Interrupt, session end) do.
+for spec in \
+  'claude|{hook_event_name:"Notification",notification_type:"elicitation_dialog"}' \
+  'muse|{hook_event_name:"Notification",notification_type:"question_prompt"}' \
+  'gemini|{hook_event_name:"Notification",notification_type:"ToolPermission"}' \
+  'opencode|{hook_event_name:"PermissionRequest",permission:{type:"bash"}}' \
+  'codex|{hook_event_name:"PermissionRequest",turn_id:"t1",transcript_path:"/tmp/r.jsonl"}'; do
+  _case
+  agent=${spec%%|*}
+  _hook agent-hook-telemetry "$agent" "$(claude_bash PermissionRequest "rm x" "")"
+  _hook agent-hook-notification "$agent" "$(_payload "${spec#*|}")"
+  flag=$(_flag)
+  _hook agent-hook-telemetry "$agent" "$(claude_bash PostToolUse "rm x" "")"
+  _assert_eq "unprompted ($agent ${spec#*|}): a tool result keeps the mark" "$flag" "$(_flag)"
+  _assert_eq "unprompted ($agent): no pending clear ran" "" "$(_pending_calls)"
+  _hook agent-hook-telemetry "$agent" "$(claude_bash PreToolUse "ls" "")"
+  _assert_eq "unprompted ($agent): the next tool clears it" "" "$(_flag)"
+done
+
+# A stale request names no tool, so its prompt is not the tool's to clear.
+for agent in claude muse; do
+  _case
+  _hook agent-hook-telemetry "$agent" "$(claude_bash PermissionRequest "rm x" "")"
+  read -r _ request_actor request_fp <"${ATT_FLAG%/*}/attention-request"
+  printf '%s %s %s\n' "$((now_epoch - 61))" "$request_actor" "$request_fp" \
+    >"${ATT_FLAG%/*}/attention-request"
+  _hook agent-hook-notification "$agent" "$(_payload "$perm")"
+  flag=$(_flag)
+  _hook agent-hook-telemetry "$agent" "$(claude_bash PostToolUse "rm x" "")"
+  _assert_eq "unprompted ($agent): a stale request's tool result keeps the mark" \
+    "$flag" "$(_flag)"
+done
+
+# Every raise replaces the fingerprint: a later question raised without one
+# is not cleared by the earlier prompt's tool.
+_case
+_hook agent-hook-telemetry muse "$(muse_tool PermissionRequest "rm x" "")"
+_hook agent-hook-notification muse "$(_payload "$perm")"
+_hook agent-hook-prompt-submit muse "$(_payload '{hook_event_name:"UserPromptSubmit",prompt:"More."}')"
+_assert_eq "prompted: the next prompt clears the permission prompt" "" "$(_flag)"
+_hook agent-hook-notification muse \
+  "$(_payload '{hook_event_name:"Notification",notification_type:"question_prompt"}')"
+_hook agent-hook-telemetry muse "$(muse_tool PostToolUse "rm x" call_b)"
+_assert_eq "prompted: the earlier prompt's tool cannot clear a later question" \
+  "waiting root" "$(_flag)"
+
+_case
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"PostToolUse",tool_name:"Read"}')"
+_assert_eq "tool result: without a flag no pending call" "" "$(_pending_calls)"
+_case
+_seed blocked root
+_hook agent-hook-telemetry claude "$(_payload '{hook_event_name:"PostToolUse",tool_name:"Read"}')"
+_assert_eq "tool result: never clears blocked" "blocked root" "$(_flag)"
+
+# Muse children share the root's state dir and are routed by session id.
+_case
+mkdir -p "${ATT_FLAG%/*}"
+: >"${ATT_FLAG%/*}/muse-child-session"
+_hook agent-hook-notification muse \
+  "$(jq -nc '{session_id:"muse-child-a",hook_event_name:"Notification",notification_type:"permission_prompt"}')"
+_assert_eq "actor: a Muse child's prompt records the routed child" \
+  "waiting muse-child-a" "$(_flag)"
+_hook agent-hook-telemetry muse \
+  "$(jq -nc '{session_id:"muse-child-b",hook_event_name:"PreToolUse",tool_name:"Read",turn_id:"t"}')"
+_assert_eq "actor: a sibling Muse child's tool keeps it" "waiting muse-child-a" "$(_flag)"
+_hook agent-hook-telemetry muse \
+  "$(_payload '{hook_event_name:"PreToolUse",tool_name:"Read"}')"
+_assert_eq "actor: the Muse root's tool keeps it" "waiting muse-child-a" "$(_flag)"
+_hook agent-hook-telemetry muse \
+  "$(jq -nc '{session_id:"muse-child-a",hook_event_name:"PreToolUse",tool_name:"Read",turn_id:"t"}')"
+_assert_eq "actor: the raising Muse child's tool clears it" "" "$(_flag)"
+_seed waiting muse-child-a
+_hook agent-hook-telemetry muse \
+  "$(_payload '{hook_event_name:"SubagentStop",child_session_id:"muse-child-b"}')"
+_assert_eq "actor: a sibling Muse child's end keeps it" "waiting muse-child-a" "$(_flag)"
+: >"${ATT_FLAG%/*}/muse-child-session"
+_hook agent-hook-telemetry muse \
+  "$(_payload '{hook_event_name:"SubagentStop",child_session_id:"muse-child-a"}')"
+_assert_eq "actor: the raising Muse child's end clears it" "" "$(_flag)"
+
+# Muse's reminder judge runs as its own session under the root's
+# MUSE_SESSION_ID, with no SubagentStart: its tools are background work, not
+# the root's (shapes from a captured session, ids replaced; the full turn
+# replays in test/muse-side-session.py). Captured side sessions send only
+# tool events; a Stop naming one is fenced as a turn the hooks never saw.
+muse_side() {
+  jq -nc --arg e "$1" '{session_id:"01a1c0d2-0000-7000-8000-00000000b001",
+    turn_id:"01a1c0d2-0000-7000-8000-00000000b001",transcript_path:null,
+    hook_event_name:$e,tool_name:"submit_reminder_decision",
+    tool_input:{decision:"none"}}'
+}
+_case
+_seed waiting root
+for event in PreToolUse PostToolUse; do
+  _hook agent-hook-telemetry muse "$(muse_side "$event")" MUSE_SESSION_ID="$ATT_SESSION"
+done
+_assert_eq "actor: a Muse side session's tools keep the root's prompt" \
+  "waiting root" "$(_flag)"
+_hook agent-hook-stop muse "$(muse_side Stop)" MUSE_SESSION_ID="$ATT_SESSION"
+_assert_eq "actor: so does its Stop" "waiting root" "$(_flag)"
+_assert_eq "actor: which rings nothing" "" "$(_notify_calls)"
+_assert_eq "actor: and no pending clear ran" "" "$(_pending_calls)"
+_hook agent-hook-telemetry muse \
+  "$(_payload '{hook_event_name:"PreToolUse",tool_name:"bash",transcript_path:null}')" \
+  MUSE_SESSION_ID="$ATT_SESSION"
+_assert_eq "actor: the root's next tool still clears it" "" "$(_flag)"
+# Muse's request_user_input dialog runs no tool hooks, so after the answer
+# the root's next tool (or its Stop) retires the question's waiting mark.
+_case
+_hook agent-hook-notification muse \
+  "$(_payload '{hook_event_name:"Notification",notification_type:"question_prompt",turn_id:"q1",transcript_path:null}')" \
+  MUSE_SESSION_ID="$ATT_SESSION"
+_assert_eq "actor: a Muse question records the root" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry muse "$(muse_side PreToolUse)" MUSE_SESSION_ID="$ATT_SESSION"
+_assert_eq "actor: a Muse side session's tool keeps the question" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry muse \
+  "$(_payload '{hook_event_name:"PreToolUse",tool_name:"bash",turn_id:"q1",transcript_path:null}')" \
+  MUSE_SESSION_ID="$ATT_SESSION"
+_assert_eq "actor: the root's next tool clears the answered question" "" "$(_flag)"
+_assert_eq "actor: and the pane no longer waits" "" "$(_pending_kind)"
+# Only tool events are a side session's: a root whose payloads name another
+# session than MUSE_SESSION_ID (a stale id) keeps its prompt and Stop marks.
+muse_stale() {
+  jq -nc --arg e "$1" --argjson x "$2" \
+    '{session_id:"01a1c0d2-0000-7000-8000-00000000c001",hook_event_name:$e} + $x'
+}
+_case
+_hook agent-hook-prompt-submit muse "$(muse_stale UserPromptSubmit '{"prompt":"Go."}')" \
+  MUSE_SESSION_ID="$ATT_SESSION"
+_hook agent-hook-notification muse \
+  "$(muse_stale Notification '{"notification_type":"permission_prompt"}')" \
+  MUSE_SESSION_ID="$ATT_SESSION"
+_assert_eq "actor: a stale-id Muse root's prompt is the root's" "waiting root" "$(_flag)"
+_hook agent-hook-stop muse "$(muse_stale Stop '{"stop_hook_active":false}')" \
+  MUSE_SESSION_ID="$ATT_SESSION"
+_assert_eq "actor: its Stop clears it" "" "$(_flag)"
+_assert_eq "actor: and rings done" "done" "$(_pending_kind)"
+# A launcher without MUSE_SESSION_ID keys on its parent pid, which no payload
+# names, so the payload's session cannot be compared and stays the root's.
+_case
+_seed waiting root
+_hook agent-hook-telemetry muse "$(muse_side PreToolUse)"
+_assert_eq "actor: without MUSE_SESSION_ID any session's tool is the root's" "" "$(_flag)"
+
+# A sibling child's tool cannot clear another child's prompt.
+_case
+_hook agent-hook-notification codex \
+  "$(jq -nc --arg s "$ATT_SESSION" '{session_id:$s,turn_id:"c1",transcript_path:"/tmp/r.jsonl",hook_event_name:"PermissionRequest",agent_id:"kid-a"}')"
+_assert_eq "actor: a Codex child's request records the child" "waiting kid-a" "$(_flag)"
+_hook agent-hook-telemetry codex \
+  "$(jq -nc --arg s "$ATT_SESSION" '{session_id:$s,turn_id:"c2",transcript_path:"/tmp/r.jsonl",hook_event_name:"PreToolUse",tool_name:"Bash",agent_id:"kid-b"}')"
+_assert_eq "actor: a sibling Codex child's tool keeps it" "waiting kid-a" "$(_flag)"
+
+echo ""
+echo "=== attention: turn identities ==="
+
+codex_payload() {
+  jq -nc --arg s "$ATT_SESSION" --arg t "$1" \
+    "{session_id:\$s,turn_id:\$t,transcript_path:\"/tmp/r.jsonl\"} + ($2)"
+}
+# A turn the hooks did not see start (U: no prompt submit) still raises a
+# tracked mark, so its own next tool, or the next prompt after its Stop
+# (which the fence leaves silent), retires it.
+_case
+_hook agent-hook-prompt-submit codex "$(codex_payload A '{hook_event_name:"UserPromptSubmit",prompt:"Work."}')"
+_hook agent-hook-stop codex "$(codex_payload A '{hook_event_name:"Stop"}')"
+: >"$ATT_LOG.notify"
+_hook agent-hook-notification codex "$(codex_payload U '{hook_event_name:"PermissionRequest"}')"
+_assert_eq "tagged: a request from a turn the hooks did not record still rings" \
+  "--owner $(_owner) --kind waiting flag=absent" "$(_notify_calls)"
+_assert_eq "tagged: and records the flag, so the mark stays tracked" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry codex "$(codex_payload U '{hook_event_name:"PreToolUse",tool_name:"Bash"}')"
+_assert_eq "tagged: that turn's next tool clears it" "" "$(_flag)"
+_assert_eq "tagged: and the pane no longer waits" "" "$(_pending_kind)"
+
+_case
+_hook agent-hook-prompt-submit codex "$(codex_payload A '{hook_event_name:"UserPromptSubmit",prompt:"Work."}')"
+_hook agent-hook-stop codex "$(codex_payload A '{hook_event_name:"Stop"}')"
+_hook agent-hook-notification codex "$(codex_payload U '{hook_event_name:"PermissionRequest"}')"
+_hook agent-hook-stop codex "$(codex_payload U '{hook_event_name:"Stop"}')"
+_assert_eq "tagged: the unrecorded turn's Stop is fenced and leaves the mark" "waiting" "$(_pending_kind)"
+_hook agent-hook-prompt-submit codex "$(codex_payload B '{hook_event_name:"UserPromptSubmit",prompt:"More."}')"
+_assert_eq "tagged: the next prompt clears it" "" "$(_flag)"
+_assert_eq "tagged: and the pane no longer waits" "" "$(_pending_kind)"
+
+_case
+_hook agent-hook-prompt-submit codex "$(codex_payload B '{hook_event_name:"UserPromptSubmit",prompt:"More."}')"
+_hook agent-hook-notification codex "$(codex_payload B '{hook_event_name:"PermissionRequest"}')"
+_assert_eq "tagged: the current turn's request rings waiting" \
+  "--owner $(_owner) --kind waiting flag=absent" "$(_notify_calls)"
+_assert_eq "tagged: and records the flag" "waiting root" "$(_flag)"
+_hook agent-hook-telemetry codex "$(codex_payload B '{hook_event_name:"PreToolUse",tool_name:"Bash"}')"
+_assert_eq "tagged: the next tool clears it" "" "$(_flag)"
+_hook agent-hook-notification codex \
+  "$(codex_payload B '{hook_event_name:"PermissionRequest",tool_name:"Bash",tool_input:{command:"ls"}}')"
+_hook agent-hook-telemetry codex \
+  "$(codex_payload B '{hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:"ls"}}')"
+_assert_eq "tagged: so does the approved tool returning" "" "$(_flag)"
+
+_case
+_hook agent-hook-prompt-submit codex "$(codex_payload A '{hook_event_name:"UserPromptSubmit",prompt:"Work."}')"
+_hook agent-hook-notification codex "$(codex_payload A '{hook_event_name:"PermissionRequest"}')"
+_hook agent-hook-stop codex "$(codex_payload A '{hook_event_name:"Stop"}')"
+_assert_eq "tagged: the Stop's done follows the waiting bell" \
+  "--kind waiting flag=absent
+--kind done flag=absent" "$(_notify_calls | sed 's/^--owner [0-9]* //')"
+_assert_eq "tagged: the ringing Stop removed the flag" "" "$(_flag)"
+
+_case
+_hook agent-hook-notification codex "$(codex_payload A '{hook_event_name:"PermissionRequest"}')"
+_assert_eq "tagged: a session with no recorded turn still rings waiting" \
+  "--owner $(_owner) --kind waiting flag=absent" "$(_notify_calls)"
+
+_test_summary

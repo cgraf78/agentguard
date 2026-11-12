@@ -61,7 +61,7 @@ _hook_read_input || true
 # the pane helper caches the turn identity to avoid touching tmux per tool.
 if command -v term-pane-mark >/dev/null 2>&1; then
   case "${_HOOK_INPUT:-}" in
-    *PreToolUse* | *SubagentStart* | *SubagentStop* | *StopFailure* | *idle_prompt*)
+    *PreToolUse* | *SubagentStart* | *SubagentStop* | *StopFailure* | *idle_prompt* | *PermissionRequest*)
       _busy_event=$(printf '%s' "$_HOOK_INPUT" | jq -r '.hook_event_name // .hookEventName // empty' 2>/dev/null)
       case "$_busy_event" in
         PreToolUse)
@@ -81,6 +81,15 @@ if command -v term-pane-mark >/dev/null 2>&1; then
               [ -e "$_HOOK_STATE_DIR/muse-child/child.$_HOOK_SESSION_KEY" ]; then
               _busy_child="$_busy_sid"
             fi
+          fi
+          # The agent's next tool means an answered prompt: clear the waiting
+          # mark this tool's actor raised, matched on the routed child so a
+          # sibling cannot clear another child's open prompt. A builtin test
+          # keeps tools free of forks while nothing is sticky.
+          if [ -e "$_HOOK_STATE_DIR/attention-sticky" ]; then
+            _busy_actor=root
+            _hook_attention_payload_actor _busy_actor "$_busy_child"
+            _hook_attention_clear waiting "$_busy_actor"
           fi
           if [ -n "$_busy_child" ] && { [ "${AGENTGUARD_NAME:-}" = codex ] ||
             [ "${AGENTGUARD_NAME:-}" = muse ]; }; then
@@ -107,6 +116,12 @@ if command -v term-pane-mark >/dev/null 2>&1; then
             _hook_pane_busy set
           fi
           ;;
+        PermissionRequest)
+          # The permission Notification that may follow names no tool, and
+          # Claude's no agent_id either; note this request's actor and tool
+          # for it (no mark here).
+          _hook_attention_note_request
+          ;;
         SubagentStart)
           if [ "${AGENTGUARD_NAME:-}" = muse ] && _hook_mkstate "$_HOOK_STATE_DIR"; then
             _hook_muse_child_begin || true
@@ -115,6 +130,8 @@ if command -v term-pane-mark >/dev/null 2>&1; then
           case "${AGENTGUARD_NAME:-}" in codex | claude | muse) _hook_team_busy child set || true ;; esac
           ;;
         SubagentStop)
+          # Before the Muse routing state that names the child is retired.
+          _hook_attention_child_end
           if [ "${AGENTGUARD_NAME:-}" = muse ]; then
             rm -f -- "$_HOOK_STATE_DIR/muse-child-turn" 2>/dev/null || true
             _hook_muse_child_end || true
@@ -128,6 +145,7 @@ if command -v term-pane-mark >/dev/null 2>&1; then
             jq -e '(.agent_id // "") != ""' >/dev/null 2>&1; then
             _hook_team_busy child clear || true
           fi
+          _hook_attention_child_end
           ;;
         Notification)
           # Claude sends its idle prompt only once the parent is idle and no
@@ -139,6 +157,17 @@ if command -v term-pane-mark >/dev/null 2>&1; then
           fi
           ;;
       esac
+      ;;
+  esac
+  # The prompted tool cannot return before its prompt is answered, so its
+  # own PostToolUse retires the waiting mark. A parallel sibling's result
+  # can arrive while the dialog is open, so the result must match the tool
+  # fingerprint the prompt recorded; a prompt without one waits for the
+  # actor's next tool or turn end. While nothing is sticky a tool result
+  # costs one builtin file test.
+  case "${_HOOK_INPUT:-}" in
+    *PostToolUse*)
+      [ ! -e "$_HOOK_STATE_DIR/attention-sticky" ] || _hook_attention_tool_done
       ;;
   esac
 fi
@@ -153,6 +182,9 @@ if _hook_turn_aborted; then
     _hook_muse_child_reap_turn || true
   fi
   _hook_pane_busy clear
+  # After the busy clear: a failed turn turns red, any other end leaves no
+  # sticky kind behind.
+  _hook_attention_turn_aborted
 fi
 
 _agentguard_telemetry_enabled || {

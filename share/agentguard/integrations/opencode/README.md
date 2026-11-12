@@ -141,7 +141,8 @@ and its tool records carry `agent_id`. Tool guards and the subagent's shell
 also use the top-level session, as Claude's subagent tool hooks do, so guard
 state such as edit churn is shared with the delegating agent. Like Claude, a
 subagent runs no lifecycle guards (session start and end, prompt, stop), and
-its permission notice runs on the top-level session with `agent_id`, so no
+its permission notice runs on the top-level session with `agent_id` (the
+pane is marked `waiting` until that child's next tool or end), so no
 hook ever runs under the child's own ID and no guard record opens a separate
 telemetry session for it. Links come from V1 `session.created` and V2
 `session.get` or `session.created`. A V1 session seen without

@@ -383,7 +383,7 @@ for ext_agent in claude grok muse gemini blockfixture; do
   _assert_eq "stop ($ext_agent): the continued Stop ends the turn" \
     "0" "$(_ext_stop "$ext_agent" "$label" '{"stop_hook_active":true}')"
   _assert_file_content "stop ($ext_agent): the continued Stop that ends the turn rings once" \
-    "--owner $(cat "$MOCK_EXT_STOP_DIR/$label.owner")" "$notify_log"
+    "--owner $(cat "$MOCK_EXT_STOP_DIR/$label.owner") --kind done" "$notify_log"
   _ext_stop "$ext_agent" "$label" '{"stopHookActive":true}' >/dev/null
   _ext_stop "$ext_agent" "$label" '' >/dev/null
   _assert_eq "stop ($ext_agent): later Stops after the real end stay silent" \
@@ -425,7 +425,7 @@ for fail_open in 'codex:' 'opencode:AGENTGUARD_STOP_BLOCK_ENDS_TURN=1' \
   : >"$MOCK_EXT_STOP_DIR/$label.block"
   _ext_stop "$ext_agent" "$label" '' ${fail_open_env[@]+"${fail_open_env[@]}"} >/dev/null
   _assert_file_content "stop ($fail_open): a fail-open blocked Stop rings once" \
-    "--owner $(cat "$MOCK_EXT_STOP_DIR/$label.owner")" "$notify_log"
+    "--owner $(cat "$MOCK_EXT_STOP_DIR/$label.owner") --kind done" "$notify_log"
   _ext_stop "$ext_agent" "$label" '{"stop_hook_active":true}' \
     ${fail_open_env[@]+"${fail_open_env[@]}"} >/dev/null
   _ext_stop "$ext_agent" "$label" '' ${fail_open_env[@]+"${fail_open_env[@]}"} >/dev/null
@@ -458,7 +458,7 @@ for crash_agent in crashexit:1 crashunbound:1; do
   _assert_eq "stop ($ext_agent): a crashing extension's Stop fails non-blocking" \
     "${crash_agent#*:}" "$(_ext_stop "$ext_agent" "$label" '')"
   _assert_file_content "stop ($ext_agent): a crashing extension's Stop still rings once" \
-    "--owner $(cat "$MOCK_EXT_STOP_DIR/$label.owner")" "$notify_log"
+    "--owner $(cat "$MOCK_EXT_STOP_DIR/$label.owner") --kind done" "$notify_log"
   _ext_stop "$ext_agent" "$label" '{"stop_hook_active":true}' >/dev/null
   _assert_eq "stop ($ext_agent): Stops after a crash stay silent" \
     "1" "$(wc -l <"$notify_log" | tr -d ' ')"
@@ -1511,6 +1511,9 @@ _assert_eq 'busy: root set still records its turn' 'notif-a' \
 python3 "$AGENTGUARD_ROOT/test/muse-busy-team.py" "$MOCK_BUSY_DIR" \
   "$TEST_SID-muse-team"
 _assert_eq 'busy: Muse parent and child turns share one owned mark' 0 "$?"
+python3 "$AGENTGUARD_ROOT/test/muse-side-session.py" "$MOCK_BUSY_DIR" \
+  "01a1c0d1-0000-7000-8000-$(printf '%012d' "$$")"
+_assert_eq 'busy: a Muse side session neither clears waiting nor claims busy' 0 "$?"
 python3 "$AGENTGUARD_ROOT/test/busy-team-owner.py" "$MOCK_BUSY_DIR" \
   "$TEST_SID-owner" "$AGENTGUARD_ROOT/lib/agentguard/busy-team.py"
 _assert_eq 'busy: late SessionEnd cannot clear a resumed team' 0 "$?"
@@ -1763,7 +1766,7 @@ for notify_hook in agent-hook-stop agent-hook-notification; do
   busy_log="$MOCK_BUSY_DIR/notify-owner-$notify_hook.log"
   _busy_hook "$notify_hook" claude "$busy_log" >/dev/null
   _assert_file_content "busy: $notify_hook passes its agent to term-notify-sound" \
-    "--owner $(cat "$busy_log.owner")" "$busy_log.notify"
+    "--owner $(cat "$busy_log.owner") --kind done" "$busy_log.notify"
 done
 
 # A runtime continuation Stop still ends a foreground turn unless it blocks.
@@ -1810,9 +1813,10 @@ _assert_file_content "busy: a Stop whose extension crashes still clears the mark
 for waiting_payload in '' '{"notification_type":"permission_prompt"}' \
   '{"notification_type":"idle_prompt"}' 'not-json'; do
   busy_log="$MOCK_BUSY_DIR/notify-waiting.log"
+  rm -f "$busy_log"
   _busy_hook agent-hook-notification claude "$busy_log" "$waiting_payload" >/dev/null
-  _assert_file_missing "busy: notification ${waiting_payload:-without a payload} keeps the mark" \
-    "$busy_log"
+  _assert_not_contains "busy: notification ${waiting_payload:-without a payload} keeps the mark" \
+    'busy' "$(cat "$busy_log" 2>/dev/null)"
 done
 
 for end_payload in '' '{"session_id":"sess-busy-end"}'; do
