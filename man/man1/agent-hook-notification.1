@@ -24,6 +24,7 @@ whose
 is
 .BR permission_prompt ,
 .BR elicitation_dialog ,
+.BR elicitation_url_dialog ,
 Muse's
 .B question_prompt
 (its
@@ -45,8 +46,7 @@ takes the actor of the session's latest
 .B PermissionRequest
 when
 .BR agent-hook-telemetry (1)
-recorded it within the last 60 seconds. Otherwise (an
-.BR elicitation_dialog ,
+recorded it within the last 60 seconds. Otherwise (an MCP elicitation,
 or no recent request) its flag accepts any actor. Two actors requesting
 permission within that window can be confused; the newer request wins.
 A
@@ -55,7 +55,9 @@ whose actor matches such a recent request, or a Codex
 .B PermissionRequest
 itself, also records a fingerprint of the prompted tool in
 .IR attention-tool ,
-which every raise rewrites or removes.
+which every raise rewrites or removes; an MCP elicitation records itself
+there instead (see
+.BR elicitation_response ).
 A glance does not acknowledge a waiting mark; the actor's next tool, the
 result of the very tool a fingerprinted prompt asked about (not a parallel
 sibling's), the end of the child that raised it, or the end of the turn or
@@ -77,6 +79,17 @@ started without a prompt), so it is the backstop for a turn whose Stop did
 not ring.
 .BR agent-hook-telemetry (1)
 still repairs the busy mark from it.
+.TP
+.BR elicitation_response ", " elicitation_complete
+Claude Code sends
+.B elicitation_response
+once the user accepts, declines or cancels an MCP elicitation (after any
+.B ElicitationResult
+hook), and
+.B elicitation_complete
+when the server of a URL elicitation confirms it. Neither rings: the agent
+works on. Each clears the waiting mark when an elicitation from the same
+actor raised it, and leaves a permission prompt or question raised since.
 .TP
 .B auth_success
 Nothing.

@@ -1313,9 +1313,10 @@ _hook_attention_request_actor() {
 # soon as the approved tool finishes or the question's answer lands, instead
 # of at the actor's next tool. Only that tool's result clears: a parallel
 # sibling of the same actor returns while the dialog is still open. A prompt
-# without a fingerprint (an elicitation or question, OpenCode, Gemini, a
-# stale request) waits for the other clearers. Callers test the flag first,
-# so tools pay nothing while nothing is sticky, and a flag without a
+# without a fingerprint (a question, OpenCode, Gemini, a stale request) waits
+# for the other clearers, and an elicitation also for its answer
+# notification (_hook_attention_elicitation_done). Callers test the flag
+# first, so tools pay nothing while nothing is sticky, and a flag without a
 # fingerprint costs no jq.
 _hook_attention_tool_done() {
   local _td_event="${_HOOK_INPUT_EVENT:-}" _td_tool="$_HOOK_STATE_DIR/attention-tool"
@@ -1331,7 +1332,8 @@ _hook_attention_tool_done() {
   esac
   [ -f "$_td_tool" ] || return 0
   IFS=' ' read -r _td_want_actor _td_want_fp <"$_td_tool" 2>/dev/null || true
-  [ -n "$_td_want_fp" ] || return 0
+  # An elicitation's record is no tool's: its answer notification clears it.
+  case "$_td_want_fp" in '' | *[!0-9-]*) return 0 ;; esac
   IFS=' ' read -r _td_kind _td_flag_actor <"$_HOOK_STATE_DIR/attention-sticky" 2>/dev/null || true
   [ "$_td_kind" = waiting ] && [ "$_td_flag_actor" = "$_td_want_actor" ] || return 0
   _hook_attention_tool_identity _td_child _td_fp
@@ -1339,6 +1341,28 @@ _hook_attention_tool_done() {
   _hook_attention_tool_actor _td_actor "$_td_child"
   [ "$_td_actor" = "$_td_want_actor" ] || return 0
   _hook_attention_clear waiting "$_td_actor"
+}
+
+# The attention-tool record of a waiting mark an MCP elicitation raised, in
+# place of a tool fingerprint (fingerprints are digits and a dash).
+_HOOK_ATTENTION_ELICITATION=elicitation
+
+# The answer to an MCP elicitation (Claude's elicitation_response or
+# elicitation_complete notification) from actor $1: clear the waiting mark
+# when an elicitation from that actor raised it. Every raise rewrites or
+# drops attention-tool, so a permission prompt or question raised since
+# keeps its mark, and an answer whose dialog never notified clears nothing.
+# Builtins only.
+_hook_attention_elicitation_done() {
+  local _ed_actor='' _ed_what='' _ed_kind='' _ed_flag_actor=''
+  [ -e "$_HOOK_STATE_DIR/attention-sticky" ] || return 0
+  # A failed input redirection reports before 2>/dev/null applies.
+  [ -f "$_HOOK_STATE_DIR/attention-tool" ] || return 0
+  IFS=' ' read -r _ed_actor _ed_what <"$_HOOK_STATE_DIR/attention-tool" 2>/dev/null || true
+  [ "$_ed_what" = "$_HOOK_ATTENTION_ELICITATION" ] && [ "$_ed_actor" = "$1" ] || return 0
+  IFS=' ' read -r _ed_kind _ed_flag_actor <"$_HOOK_STATE_DIR/attention-sticky" 2>/dev/null || true
+  [ "$_ed_kind" = waiting ] && [ "$_ed_flag_actor" = "$1" ] || return 0
+  _hook_attention_clear waiting "$1"
 }
 
 # Clear kind $1 for foreground activity only (prompt, Stop, Interrupt,

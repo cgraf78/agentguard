@@ -94,6 +94,7 @@ echo "=== attention: notifications raise waiting ==="
 for spec in \
   'claude|{hook_event_name:"Notification",notification_type:"permission_prompt"}' \
   'claude|{hook_event_name:"Notification",notification_type:"elicitation_dialog"}' \
+  'claude|{hook_event_name:"Notification",notification_type:"elicitation_url_dialog"}' \
   'muse|{hook_event_name:"Notification",notification_type:"permission_prompt"}' \
   'muse|{hook_event_name:"Notification",notification_type:"question_prompt"}' \
   'grok|{hookEventName:"Notification",notificationType:"permission_prompt"}' \
@@ -724,6 +725,120 @@ _assert_eq "actor: a Codex child's request records the child" "waiting kid-a" "$
 _hook agent-hook-telemetry codex \
   "$(jq -nc --arg s "$ATT_SESSION" '{session_id:$s,turn_id:"c2",transcript_path:"/tmp/r.jsonl",hook_event_name:"PreToolUse",tool_name:"Bash",agent_id:"kid-b"}')"
 _assert_eq "actor: a sibling Codex child's tool keeps it" "waiting kid-a" "$(_flag)"
+
+echo ""
+echo "=== attention: an elicitation's answer clears it ==="
+
+# Claude 2.1.321 notifies once the user answers an MCP elicitation
+# (elicitation_response, after any ElicitationResult hook, for accept,
+# decline and cancel alike) and once a URL elicitation's server confirms it
+# (elicitation_complete). Neither names an agent_id. The agent works on, so
+# neither rings; each clears only the waiting an elicitation raised.
+elicit() { _payload "{hook_event_name:\"Notification\",notification_type:\"$1\",message:\"An MCP server needs your input\"}"; }
+answer() {
+  _payload "{hook_event_name:\"Notification\",notification_type:\"$1\",message:\"Elicitation response: accept\"}"
+}
+_tool_record() { cat "${ATT_FLAG%/*}/attention-tool" 2>/dev/null; }
+
+for spec in elicitation_dialog:elicitation_response elicitation_url_dialog:elicitation_response \
+  elicitation_url_dialog:elicitation_complete; do
+  _case
+  _hook agent-hook-notification claude "$(elicit "${spec%%:*}")"
+  _assert_eq "elicit ($spec): the dialog waits" "waiting any" "$(_flag)"
+  _assert_eq "elicit ($spec): and records the elicitation" "any elicitation" "$(_tool_record)"
+  _hook agent-hook-notification claude "$(answer "${spec#*:}")"
+  _assert_eq "elicit ($spec): the answer clears the flag" "" "$(_flag)"
+  _assert_eq "elicit ($spec): and the pane no longer waits" "" "$(_pending_kind)"
+  _assert_eq "elicit ($spec): with a conditional clear" \
+    "clear pending --if waiting --owner $(_owner) flag=absent" "$(_pending_calls)"
+  _assert_eq "elicit ($spec): the answer rings nothing" \
+    "--kind waiting flag=absent" "$(_notify_calls | sed 's/^--owner [0-9]* //')"
+done
+
+# An answer that beat its dialog's notification, or repeats, rings nothing
+# and clears nothing.
+_case
+_hook agent-hook-notification claude "$(answer elicitation_response)"
+_hook agent-hook-notification claude "$(answer elicitation_complete)"
+_assert_eq "elicit: an answer with nothing waiting rings nothing" "" "$(_notify_calls)"
+_assert_eq "elicit: and clears nothing" "" "$(_pending_calls)"
+_assert_eq "elicit: and records no flag" "" "$(_flag)"
+_case
+_hook agent-hook-notification claude "$(elicit elicitation_dialog)"
+_hook agent-hook-notification claude "$(answer elicitation_response)"
+_hook agent-hook-notification claude "$(answer elicitation_complete)"
+_assert_eq "elicit: a repeated answer runs no second clear" \
+  "clear pending --if waiting flag=absent" "$(_pending_calls | sed 's/--owner [0-9]* //')"
+
+# A permission prompt raised after the elicitation owns the mark now; the
+# elicitation's answer must not clear it, whichever actor it names.
+_case
+_hook agent-hook-notification claude "$(elicit elicitation_dialog)"
+_hook agent-hook-telemetry claude "$(claude_bash PermissionRequest "rm x" "")"
+_hook agent-hook-notification claude "$(_payload "$perm")"
+_assert_eq "elicit: a later root permission prompt waits" "waiting root" "$(_flag)"
+_hook agent-hook-notification claude "$(answer elicitation_response)"
+_assert_eq "elicit: the answer keeps the root's prompt" "waiting root" "$(_flag)"
+_assert_eq "elicit: no pending clear ran" "" "$(_pending_calls)"
+_assert_eq "elicit: and the pane still waits" waiting "$(_pending_kind)"
+_hook agent-hook-telemetry claude "$(claude_bash PostToolUse "rm x" "")"
+_assert_eq "elicit: the prompted tool still clears its own prompt" "" "$(_flag)"
+_case
+_hook agent-hook-notification claude "$(elicit elicitation_dialog)"
+_hook agent-hook-telemetry claude "$(claude_bash PermissionRequest "rm x" kid-a)"
+_hook agent-hook-notification claude "$(_payload "$perm")"
+_hook agent-hook-notification claude "$(answer elicitation_response)"
+_assert_eq "elicit: the answer keeps a child's later prompt" "waiting kid-a" "$(_flag)"
+# A permission prompt with no fresh request is any-actor like an
+# elicitation, but records no elicitation.
+_case
+_hook agent-hook-notification claude "$(elicit elicitation_dialog)"
+_hook agent-hook-notification claude "$(_payload "$perm")"
+_assert_eq "elicit: an unattributed permission prompt waits for any actor" "waiting any" "$(_flag)"
+_hook agent-hook-notification claude "$(answer elicitation_response)"
+_assert_eq "elicit: the answer keeps the unattributed prompt" "waiting any" "$(_flag)"
+_assert_eq "elicit: still no pending clear ran" "" "$(_pending_calls)"
+# That prompt left no attention-tool record; the answer must stay quiet.
+_assert_eq "elicit: no record left for the answer to read" "" "$(_tool_record)"
+answer_err=$(answer elicitation_response | env AGENTGUARD_SESSION_ID="$ATT_SESSION" \
+  TMPDIR="$TEST_TMPDIR" AGENTGUARD_NAME=claude AGENTGUARD_TELEMETRY=0 ATT_LOG="$ATT_LOG" \
+  ATT_FLAG="$ATT_FLAG" PATH="$ATT_DIR/bin:$PATH" "$ATT_DIR/bin/agent-hook-notification" 2>&1 >/dev/null)
+_assert_eq "elicit: an answer without a record writes no stderr" "" "$answer_err"
+# Only waiting goes, and only for the recorded actor.
+_case
+_seed blocked any
+printf 'any elicitation\n' >"${ATT_FLAG%/*}/attention-tool"
+_hook agent-hook-notification claude "$(answer elicitation_response)"
+_assert_eq "elicit: a blocked mark survives an answer" "blocked any" "$(_flag)"
+_case
+_seed waiting root
+printf 'root elicitation\n' >"${ATT_FLAG%/*}/attention-tool"
+_hook agent-hook-notification claude "$(answer elicitation_response)"
+_assert_eq "elicit: a Claude answer (any) keeps another actor's record" "waiting root" "$(_flag)"
+_case
+_hook agent-hook-notification claude "$(elicit elicitation_dialog)"
+_hook agent-hook-notification claude "$(answer elicitation_response | jq -c '.agent_id = "kid-a"')"
+_assert_eq "elicit: a child-named answer keeps an any-actor elicitation" "waiting any" "$(_flag)"
+
+# Tool results never take the elicitation for a fingerprint, and the other
+# clearers still retire it.
+_case
+_hook agent-hook-notification claude "$(elicit elicitation_dialog)"
+_hook agent-hook-telemetry claude "$(claude_bash PostToolUse "ls" "")"
+_assert_eq "elicit: a tool result keeps the elicitation" "waiting any" "$(_flag)"
+_hook agent-hook-telemetry claude "$(claude_bash PreToolUse "ls" "")"
+_assert_eq "elicit: the next tool still clears it" "" "$(_flag)"
+_case
+_hook agent-hook-notification claude "$(elicit elicitation_dialog)"
+_hook agent-hook-notification claude "$(_payload '{hook_event_name:"Notification",notification_type:"idle_prompt"}')"
+_assert_eq "elicit: an idle prompt still clears it" "" "$(_flag)"
+
+# Other agents' answers use the payload's actor.
+_case
+_hook agent-hook-notification muse "$(elicit elicitation_dialog)"
+_assert_eq "elicit: a Muse elicitation is the root's" "root elicitation" "$(_tool_record)"
+_hook agent-hook-notification muse "$(answer elicitation_response)"
+_assert_eq "elicit: the root's answer clears it" "" "$(_flag)"
 
 echo ""
 echo "=== attention: turn identities ==="

@@ -367,10 +367,10 @@ without guessing a session-to-terminal association.
 Each notification also tells the terminal what kind of attention the pane
 needs, as the value of tmux-tools' pending mark: `done` when a turn finished
 (a ringing Stop, or a notification AgentGuard does not classify), `waiting`
-when the agent needs an answer (a Notification of type `permission_prompt` or
-`elicitation_dialog`, either key spelling, Muse's `question_prompt`, Gemini
-CLI's `ToolPermission`, and the `PermissionRequest` that Codex and the
-OpenCode adapter deliver), and
+when the agent needs an answer (a Notification of type `permission_prompt`,
+`elicitation_dialog` or `elicitation_url_dialog`, either key spelling,
+Muse's `question_prompt`, Gemini CLI's `ToolPermission`, and the
+`PermissionRequest` that Codex and the OpenCode adapter deliver), and
 `blocked` when a root turn fails (`StopFailure`, if it wins the prompt cycle's
 single bell). A glance acknowledges `done`; `waiting` and `blocked` stay until
 the agent moves on. The next tool of the actor that raised `waiting` (the root
@@ -383,9 +383,13 @@ No `PermissionRequest` names a call id, so `agent-hook-telemetry` records
 each one's actor and a fingerprint of its tool (the tool name and a hash of
 `tool_input` without `description`, `answers` and `annotations`, which only
 one side carries), and only the same actor's matching result clears the
-prompt. A question, an `elicitation_dialog`, an OpenCode or Gemini CLI
-prompt, or a prompt whose request is stale has no fingerprint and waits for
-the other clearers. Claude names no actor on its permission notifications, a
+prompt. A question, an OpenCode or Gemini CLI prompt, or a prompt whose
+request is stale has no fingerprint and waits for the other clearers. An MCP
+elicitation clears silently once Claude reports its answer (an
+`elicitation_response` Notification for accept, decline or cancel, or
+`elicitation_complete` when a URL elicitation's server confirms it), unless
+a permission prompt or question was raised since; neither of those
+notifications rings. Claude names no actor on its permission notifications, a
 subagent's included, so a Claude `permission_prompt` within 60 seconds of
 its recorded `PermissionRequest` (which raises nothing itself, since another
 hook may resolve it before a prompt shows) takes that request's actor;

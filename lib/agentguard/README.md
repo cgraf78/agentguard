@@ -149,8 +149,9 @@ command is installed.
 
 Notifications pass tmux-tools the kind of attention: `done` for a ringing Stop
 and unclassified notifications, `waiting` for permission prompts and questions
-(Notification `permission_prompt`/`elicitation_dialog`, Muse `question_prompt`,
-Gemini `ToolPermission`, Codex and OpenCode `PermissionRequest`), and
+(Notification `permission_prompt`, `elicitation_dialog` or
+`elicitation_url_dialog`, Muse `question_prompt`, Gemini `ToolPermission`,
+Codex and OpenCode `PermissionRequest`), and
 `blocked` for a root
 `StopFailure` that wins the prompt cycle's bell. Waiting and blocked are
 sticky: the session's `attention-sticky` flag (`<kind> <actor>`, the actor
@@ -176,7 +177,9 @@ whose actor matches a fresh record, or a Codex `PermissionRequest` itself,
 raises with that fingerprint in `attention-tool` (`<actor> <tool>`, which
 every raise rewrites or drops), and the matching `PostToolUse` or
 `PostToolUseFailure` of that actor clears `waiting`; a parallel sibling's
-result does not. Older
+result does not. An MCP elicitation's raise records `<actor> elicitation`
+there instead, and Claude's `elicitation_response` or `elicitation_complete`
+Notification from that actor clears its `waiting` without ringing. Older
 tmux-tools that reject `--kind` get the plain bell; a rejected `--if` only
 drops the flag. Gemini's `BeforeTool` is not observed, so its waiting lasts
 until the turn ends.
