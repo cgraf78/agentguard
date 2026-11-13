@@ -235,7 +235,9 @@ interrupts, and session start/end. Events outside that set are not wired:
   runtime's own transcript for model traffic.
 - Events with no equivalent elsewhere, or that describe configuration rather
   than agent actions: Claude `Setup`, `UserPromptExpansion`, `PostToolBatch`,
-  `MessageDisplay`, `Elicitation`, `ElicitationResult`, `TaskCreated`,
+  `MessageDisplay`, `Elicitation`, `ElicitationResult` (an answered
+  elicitation also arrives as an `elicitation_response` Notification, which
+  is wired), `TaskCreated`,
   `TaskCompleted`, `TeammateIdle`, `InstructionsLoaded`, `ConfigChange`,
   `CwdChanged`, `DirectoryAdded`, `FileChanged`, `WorktreeCreate`,
   `WorktreeRemove`, `PreModelSwitch`, and `PostModelSwitch`; Muse

@@ -163,8 +163,9 @@ if command -v term-pane-mark >/dev/null 2>&1; then
   # own PostToolUse retires the waiting mark. A parallel sibling's result
   # can arrive while the dialog is open, so the result must match the tool
   # fingerprint the prompt recorded; a prompt without one waits for the
-  # actor's next tool or turn end. While nothing is sticky a tool result
-  # costs one builtin file test.
+  # actor's next tool or turn end (an elicitation also clears on its answer
+  # notification, in agent-hook-notification). While nothing is sticky a
+  # tool result costs one builtin file test.
   case "${_HOOK_INPUT:-}" in
     *PostToolUse*)
       [ ! -e "$_HOOK_STATE_DIR/attention-sticky" ] || _hook_attention_tool_done

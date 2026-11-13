@@ -86,7 +86,9 @@ fingerprint of that very tool, since a prompted tool returns only after its
 prompt is answered. A parallel sibling's result, which can arrive while the
 dialog is still open, has another fingerprint and clears nothing, and so
 does any result for a prompt raised without one (a question, an
-elicitation, an OpenCode or Gemini CLI prompt, a stale request). While no
+elicitation, an OpenCode or Gemini CLI prompt, a stale request); an
+elicitation also clears on its answer notification (see
+.BR agent-hook-notification (1)). While no
 flag exists a tool result costs the same single file test, and a flag
 without a fingerprint starts no process. The flag is removed before
 the mark is cleared. A release of

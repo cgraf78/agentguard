@@ -47,10 +47,13 @@ source "$_HOOK_BIN_DIR/../lib/agentguard/hook-helpers.sh" || {
 # END GENERATED LAUNCHER BOOTSTRAP
 
 # Permission prompts and questions wait for an answer (Claude, Grok and Muse
-# Notification types, Muse's question_prompt for its request_user_input
-# dialog, Gemini's ToolPermission, and the PermissionRequest event Codex and
-# the OpenCode adapter deliver here); they stay marked until the agent moves
-# on. Claude's idle prompt arrives about a minute after a turn ends or a
+# Notification types, Claude's form and URL MCP elicitation dialogs, Muse's
+# question_prompt for its request_user_input dialog, Gemini's ToolPermission,
+# and the PermissionRequest event Codex and the OpenCode adapter deliver
+# here); they stay marked until the agent moves on. Claude reports the
+# answer to an MCP elicitation (and a URL elicitation's completion) with a
+# notification of its own, which retires that elicitation's mark silently.
+# Claude's idle prompt arrives about a minute after a turn ends or a
 # prompt is dismissed with Esc (never after Esc interrupts a running tool), so
 # it rings only as the backstop for a turn whose Stop never rang and otherwise
 # just retires a waiting mark answered by Esc; agent-hook-telemetry repairs
@@ -73,7 +76,8 @@ if _hook_read_input && [ -n "${_HOOK_INPUT:-}" ]; then
   ) || true
 fi
 case "$_notify_event:$_notify_type" in
-  PermissionRequest:* | *:permission_prompt | *:elicitation_dialog | *:question_prompt | *:ToolPermission)
+  PermissionRequest:* | *:permission_prompt | *:elicitation_dialog | *:elicitation_url_dialog | \
+    *:question_prompt | *:ToolPermission)
     if [ -n "$_notify_child" ]; then
       _hook_attention_actor _notify_actor "$_notify_child"
     elif _hook_agent_name _notify_agent && [ "$_notify_agent" = claude ]; then
@@ -90,15 +94,36 @@ case "$_notify_event:$_notify_type" in
       _hook_attention_payload_actor _notify_actor
     fi
     # A permission prompt names no tool, but the same actor's fresh
-    # PermissionRequest record does (Claude and Muse). Elicitations and
-    # questions get no fingerprint, so only the other clearers retire them.
+    # PermissionRequest record does (Claude and Muse). Questions get no
+    # fingerprint, so only the other clearers retire them; elicitations
+    # record themselves below.
     if [ "$_notify_type" = permission_prompt ] &&
       _hook_attention_request_actor _notify_request_actor _notify_request_fp &&
       [ "$_notify_request_actor" = "$_notify_actor" ]; then
       _notify_fp="$_notify_request_fp"
     fi
     [ "$_notify_actor" != any ] || _notify_fp=''
+    # An elicitation's own answer notification retires it (below), so its
+    # raise records the elicitation in place of a tool fingerprint.
+    case "$_notify_type" in
+      elicitation_dialog | elicitation_url_dialog) _notify_fp="$_HOOK_ATTENTION_ELICITATION" ;;
+    esac
     _hook_attention_raise_fenced waiting "$_notify_actor" "$_notify_fp"
+    ;;
+  *:elicitation_response | *:elicitation_complete)
+    # Claude sends elicitation_response once the user answers, declines or
+    # cancels an MCP elicitation (after any ElicitationResult hook), and
+    # elicitation_complete when a URL elicitation's server confirms it. The
+    # agent works on, so neither rings; each clears only the waiting mark an
+    # elicitation raised, never a permission prompt raised since.
+    if [ -n "$_notify_child" ]; then
+      _hook_attention_actor _notify_actor "$_notify_child"
+    elif _hook_agent_name _notify_agent && [ "$_notify_agent" = claude ]; then
+      _notify_actor=any
+    else
+      _hook_attention_payload_actor _notify_actor
+    fi
+    _hook_attention_elicitation_done "$_notify_actor"
     ;;
   *:idle_prompt)
     if _hook_activity_is_foreground; then
