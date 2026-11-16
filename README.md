@@ -402,7 +402,7 @@ Stop's `done` replaces it. Claude's `idle_prompt`, which Claude sends about a
 minute after a turn ends or a prompt is dismissed with Esc (but not after Esc
 interrupts a running tool), clears `waiting` (a dismissed prompt ends no turn)
 and rings only as the backstop for a turn whose Stop did not ring: one with
-no Stop, or a turn
+no Stop, a last Stop that left a background task running, or a turn
 that started without a prompt (a teammate message, a background task, a
 scheduled wakeup), whose Stop finds the prompt cycle's bell already taken;
 `auth_success` rings nothing. A permission prompt always rings and is always
@@ -432,12 +432,18 @@ Claude marks each subagent and teammate turn from its `SubagentStart` to its
 `SubagentStop`. Claude's task snapshots list an idle teammate as running until
 it shuts down, so they only retire children whose Stop never arrived, and
 Claude's idle prompt, sent once the parent and every child agent are idle,
-clears any that remain. A busy mark clears only when a hook reports the end:
+clears any that remain. The same state records each child's latest start, so
+hook extensions can ask whether one child is still working through
+`_hook_child_working` (see Shared Helpers). A busy mark clears only when a hook
+reports the end:
 Claude runs no hook when Esc interrupts a running tool, and sends no
 `idle_prompt` afterwards, so that turn's mark stays until the next prompt or
-turn replaces it. The same state records each child's latest start, so hook
-extensions can ask whether one child is still working through
-`_hook_child_working` (see Shared Helpers).
+turn replaces it. A Claude Stop whose `background_tasks` still lists a running
+background shell (Monitor included) or subagent is an interim one: Claude wakes
+the lead again when that task finishes, so the mark stays set and the Stop
+neither rings nor marks done. The Stop that leaves no such task rings once, or,
+for a task that outlives the last turn (a dev server, a persistent Monitor),
+Claude's idle prompt about a minute later does.
 
 The launcher trust boundary includes the fixed platform Bash, awk, and env
 paths and the absolute Bash candidate files above. Termux uses its

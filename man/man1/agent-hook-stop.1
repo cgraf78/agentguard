@@ -57,6 +57,17 @@ leaves it alone. A Claude Code interrupt fires no Stop or other turn-ending
 hook, so after one the mark stays set until the next prompt's turn ends or the
 session ends.
 .PP
+A Claude Code Stop whose
+.B background_tasks
+still lists a running background shell (Monitor included) or subagent leaves
+the mark set and rings nothing: Claude starts another turn when that task
+finishes. The Stop that leaves no such task rings once and clears the mark;
+for a task that outlives the last turn, the
+.B idle_prompt
+notification does both. Teammates and workflows listed there do not hold the
+mark. Such a Stop clears only the root's own waiting or blocked mark, never a
+background child's.
+.PP
 A ringing Stop's
 .B done
 replaces any waiting or blocked attention mark on the pane, so it only removes
