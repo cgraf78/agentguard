@@ -1240,17 +1240,48 @@ kill "$cb_lock_pid" 2>/dev/null
 wait "$cb_lock_pid" 2>/dev/null
 _assert_file_missing 'busy hold: neither fallback Stop rings' "$cb_log.notify"
 
+# A tagged turn (a host that sends turn IDs) whose Stop is no longer current
+# takes the fallback, which clears its exact token unless work is live.
 _claude_case hold-not-current
-mkdir -p "$(_cb_dir)"
-printf 'legacy:\n' >"$(_cb_dir)/attention-turn"
-_claude_prompt a
+_claude_hook agent-hook-prompt-submit "{session_id:\$s,turn_id:\"ta\",prompt_id:\"a\",hook_event_name:\"UserPromptSubmit\",prompt:\"Work.\"}"
+_assert_eq 'busy hold: a tagged prompt marks its exact turn' \
+  "${#cb_session}:$cb_session:ta" "$(cat "$cb_state" 2>/dev/null)"
 : >"$(_cb_dir)/attention-disabled.test"
-_claude_stop a "$claude_sh"
+_claude_hook agent-hook-stop "{session_id:\$s,turn_id:\"ta\",prompt_id:\"a\",hook_event_name:\"Stop\",background_tasks:$claude_sh}"
 _assert_file_exists 'busy hold: a Stop outside the current turn takes the fallback and holds' "$cb_state"
 _assert_file_missing 'busy hold: and stays silent' "$cb_log.notify"
+_claude_hook agent-hook-stop "{session_id:\$s,turn_id:\"ta\",prompt_id:\"a\",hook_event_name:\"Stop\",background_tasks:[]}"
+_assert_file_missing 'busy hold: the same fallback clears without live work' "$cb_state"
 rm -f "$(_cb_dir)/attention-disabled.test"
+
+# An interim Stop in a cycle that has not rung leaves no silent-end marker,
+# even when the prompt cycle already exists (a blocked Stop made it): the
+# final Stop rings, and the idle prompt must not ring a second time.
+_claude_case hold-continued
+# shellcheck disable=SC2016 # expanded by the hook that sources the extension
+printf '%s\n' '[ -z "${BUSY_STOP_BLOCK:-}" ] || _hook_block "keep going"' \
+  >"$MOCK_BUSY_DIR/bin/agent-hook-stop-claude"
+_claude_prompt a
+BUSY_STOP_BLOCK=1 _claude_stop a '[]'
+_claude_hook agent-hook-stop "{session_id:\$s,prompt_id:\"a\",hook_event_name:\"Stop\",stop_hook_active:true,background_tasks:$claude_sh}"
+_assert_file_exists 'busy hold: the continued interim Stop holds' "$cb_state"
+_assert_file_missing 'busy hold: and leaves no silent-end marker' "$(_cb_dir)/prompt-cycle/stop-silent"
 _claude_stop a '[]'
-_assert_file_missing 'busy hold: a current Stop without live work then clears' "$cb_state"
+_claude_idle_full a
+_assert_eq 'busy hold: blocked, interim and final Stops ring once in all' \
+  1 "$(_cb_count '--kind done' "$cb_log.notify")"
+rm -f "$MOCK_BUSY_DIR/bin/agent-hook-stop-claude"
+
+# A bell claim an older release left as a directory still means the cycle
+# rang, so the interim Stop leaves its silent end to the idle prompt.
+_claude_case hold-claim-dir
+_claude_prompt a
+mkdir -p "$(_cb_dir)/prompt-cycle/stop-notified"
+_claude_stop a "$claude_sh"
+_assert_file_exists 'busy hold: a directory claim gets the silent-end marker' \
+  "$(_cb_dir)/prompt-cycle/stop-silent"
+_claude_idle_full a
+_assert_eq 'busy hold: the idle prompt rings for it once' 1 "$(_cb_count '--kind done' "$cb_log.notify")"
 
 # The interim Stop retires only the root's own sticky attention: a background
 # child's question stays on the pane until that child moves on.
@@ -1327,6 +1358,30 @@ _claude_stop a "$claude_sub"
 _claude_child Stop a asub-1 "$claude_sub"
 _claude_abort a StopFailure
 _assert_file_missing 'busy hold: a root StopFailure clears a held team' "$cb_state"
+
+# A stale idle prompt for an older turn cannot release the newer turn's hold.
+_claude_case hold-stale-idle
+_claude_prompt a
+_claude_child Start a asub-1
+_claude_stop a "$claude_sub"
+_claude_child Stop a asub-1 "$claude_sub"
+_claude_prompt b
+_claude_stop b "$claude_sh"
+_claude_idle a
+_assert_file_exists "busy hold: a stale idle prompt keeps the newer turn's hold" "$cb_state"
+jq -e '.background == "b"' "$cb_team" >/dev/null 2>&1
+_assert_eq 'busy hold: the team still holds turn b' 0 "$?"
+_claude_idle b
+_assert_file_missing "busy hold: the current turn's idle prompt releases it" "$cb_state"
+
+# A failed turn never holds, even when its payload lists live work.
+_claude_case hold-abort-team-live
+_claude_prompt a
+_claude_child Start a asub-1
+_claude_stop a "$claude_sub"
+_claude_child Stop a asub-1 "$claude_sub"
+_claude_hook agent-hook-telemetry "{session_id:\$s,prompt_id:\"a\",hook_event_name:\"StopFailure\",error:\"server_error\",background_tasks:$claude_sub}"
+_assert_file_missing 'busy hold: a StopFailure listing a live subagent clears the team' "$cb_state"
 
 _claude_case hold-idle-team
 _claude_prompt a
