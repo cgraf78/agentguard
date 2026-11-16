@@ -435,7 +435,13 @@ Claude's idle prompt, sent once the parent and every child agent are idle,
 clears any that remain. A busy mark clears only when a hook reports the end:
 Claude runs no hook when Esc interrupts a running tool, and sends no
 `idle_prompt` afterwards, so that turn's mark stays until the next prompt or
-turn replaces it. The same state records each child's latest start, so hook
+turn replaces it. A Claude Stop whose `background_tasks` still lists a running
+background shell (Monitor included) or subagent is an interim one: Claude wakes
+the lead again when that task finishes, so the mark stays set and the Stop
+neither rings nor marks done. The Stop that leaves no such task rings once, or,
+for a task that outlives the last turn (a dev server, a persistent Monitor),
+Claude's idle prompt about a minute later does. The same state records each
+child's latest start, so hook
 extensions can ask whether one child is still working through
 `_hook_child_working` (see Shared Helpers).
 

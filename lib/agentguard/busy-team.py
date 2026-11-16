@@ -136,6 +136,27 @@ def claude_survivors(payload: dict[str, object]) -> tuple[set[str], bool] | None
     return subagents, teammates
 
 
+def claude_background_live(payload: dict[str, object]) -> bool:
+    """Return whether a root Stop leaves a background shell or subagent running.
+
+    Claude wakes the parent with a new turn as each one finishes, so the Stop
+    is an interim one and the pane stays busy. Monitor reports as a shell.
+    Teammates (listed while idle), workflows and unknown types never count.
+    The shell hook applies the same test to the same payload.
+    """
+    if payload.get("hook_event_name", payload.get("hookEventName")) != "Stop":
+        return False
+    tasks = payload.get("background_tasks")
+    if not isinstance(tasks, list):
+        return False
+    return any(
+        isinstance(task, dict)
+        and task.get("type") in ("shell", "subagent")
+        and task.get("status") not in CLAUDE_TERMINAL
+        for task in tasks
+    )
+
+
 def claude_reconcile(state: dict[str, Any], survivors: tuple[set[str], bool]) -> None:
     """Retire Claude children that a root Stop snapshot proves have ended."""
     live, teammates = survivors
@@ -273,6 +294,7 @@ def run() -> int:
                 state["child_started"] = {}
             before = (
                 state.get("root"),
+                state.get("background"),
                 dict(state["children"]),
                 state.get("ended"),
                 state.get("owner"),
@@ -301,6 +323,7 @@ def run() -> int:
                 if action == "set":
                     state["root"] = turn
                     state["last_root"] = turn
+                    state.pop("background", None)
                     state["ended"] = False
                     state["owner"] = owner
                     if agent == "muse":
@@ -318,6 +341,19 @@ def run() -> int:
                     if owns_turn:
                         state["root"] = None
                         state["last_root"] = turn
+                        # A Claude Stop that leaves background work running
+                        # holds the mark for its turn, kept apart from the
+                        # children so reconciliation and _hook_child_working
+                        # never see it. The next prompt, idle prompt, an owned
+                        # Stop without such work, or a failed turn releases it.
+                        if (
+                            agent == "claude"
+                            and action == "clear"
+                            and claude_background_live(payload)
+                        ):
+                            state["background"] = turn
+                        else:
+                            state.pop("background", None)
                     if owns_turn and action == "idle":
                         # Claude sends its idle prompt only when the parent is
                         # idle and no subagent or teammate is working, so it
@@ -369,6 +405,7 @@ def run() -> int:
             }
             after = (
                 state.get("root"),
+                state.get("background"),
                 dict(state["children"]),
                 state.get("ended"),
                 state.get("owner"),
@@ -396,20 +433,16 @@ def run() -> int:
                     state["root"] = turn
                     state["last_root"] = turn
                     publish(state_path, state)
-            if was_pending and not state.get("root") and not state["children"]:
+            held = bool(state.get("root") or state["children"] or state.get("background"))
+            if was_pending and not held:
                 # A failed first team set may have left the previous direct
                 # token on the pane. Replace it before clearing the team.
                 if not mark("set", owner, token):
                     return 1
-            if not mark("set" if state.get("root") or state["children"] else "clear", owner, token):
+            if not mark("set" if held else "clear", owner, token):
                 return 1
             state["pending"] = False
-            if (
-                agent == "claude"
-                and not state.get("root")
-                and not state["children"]
-                and not state.get("ended")
-            ):
+            if agent == "claude" and not held and not state.get("ended"):
                 # An empty Claude team hands the pane back to per-turn direct
                 # marks, so a session that once ran a subagent does not pay
                 # for this transition on every later turn.
@@ -417,7 +450,7 @@ def run() -> int:
             else:
                 publish(state_path, state)
             if action == "end":
-                for old_child in before[1]:
+                for old_child in before[2]:
                     child_cache(directory, old_child, None)
             elif actor == "child" and agent in ("codex", "muse"):
                 child_cache(directory, child, state["children"].get(child))

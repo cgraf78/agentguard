@@ -51,6 +51,9 @@ _HOOK_TURN_TOKEN=''
 # Set while a Stop hook has not yet settled whether its turn ends; see
 # _hook_stop_arm.
 _HOOK_STOP_PENDING=''
+# Set by _hook_stop_settle while a root Claude Stop leaves background work
+# running (see _hook_stop_background_live), so the turn's busy mark holds.
+_HOOK_STOP_HOLD_BUSY=''
 # Telemetry accumulators: block/warn/remind messages joined by ASCII record
 # separators so multi-line messages survive intact into the audit record.
 _HOOK_TELEMETRY_BLOCKS=''
@@ -964,6 +967,9 @@ _hook_stop_settle() {
   local settled=0
   if _hook_stop_is_foreground; then
     _hook_turn_identity
+    if [ "$1" != 1 ] && _hook_stop_background_live; then
+      _HOOK_STOP_HOLD_BUSY=1
+    fi
     if _hook_attention_managed; then
       if _hook_attention_locked _hook_stop_settle_current "$1"; then
         settled=1
@@ -980,6 +986,35 @@ _hook_stop_settle() {
     fi
   fi
   _HOOK_STOP_PENDING=''
+}
+
+# Return whether this root Claude Stop leaves a background shell (Monitor
+# included) or subagent running. Claude wakes the lead with a new turn when
+# each one finishes, so this Stop is an interim one: the busy mark holds, and
+# the bell waits for the Stop that leaves no such work, or for the idle
+# prompt (which backstops unbounded shells). The snapshot lists only running
+# tasks; teammates (listed while idle), workflows and unknown types never
+# count. A builtin prefilter keeps a Stop without such tasks fork-free.
+_hook_stop_background_live() {
+  local agent=''
+  case "${_HOOK_INPUT:-}" in
+    *'"background_tasks"'*) ;;
+    *) return 1 ;;
+  esac
+  case "$_HOOK_INPUT" in
+    *'"shell"'* | *'"subagent"'*) ;;
+    *) return 1 ;;
+  esac
+  _hook_agent_name agent
+  [ "$agent" = claude ] || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  printf '%s' "$_HOOK_INPUT" | jq -e '
+    (.hook_event_name // .hookEventName) == "Stop"
+    and (.background_tasks | type == "array")
+    and any(.background_tasks[]; type == "object"
+      and (.type == "shell" or .type == "subagent")
+      and .status != "completed" and .status != "failed" and .status != "killed")
+  ' >/dev/null 2>&1
 }
 
 _hook_stop_clear_busy() {
@@ -1002,6 +1037,17 @@ _hook_stop_settle_current() {
   fi
   if [ "$1" = 1 ]; then
     _hook_stop_mark_continued
+  elif [ -n "$_HOOK_STOP_HOLD_BUSY" ]; then
+    # An interim Stop neither rings nor claims the cycle's bell, which the
+    # Stop that leaves no background work or the idle prompt then rings once.
+    # Only a cycle that already rang needs the idle prompt's ring for this
+    # silent end, as after a lost claim; an unconditional marker would let a
+    # later idle prompt ring a second time. A claim an older release left as
+    # a directory counts too. Background children keep their own attention.
+    [ ! -e "$_HOOK_STATE_DIR/prompt-cycle/stop-notified" ] ||
+      : >"$_HOOK_STATE_DIR/prompt-cycle/stop-silent" 2>/dev/null || true
+    _hook_attention_clear sticky root
+    _hook_pane_busy clear
   else
     if _hook_stop_should_notify; then
       # Done replaces any sticky kind on the pane, so only the flag goes.
@@ -1847,6 +1893,15 @@ _hook_pane_busy() {
     if [ "$1" = set ] && [ "$cached" = "$_HOOK_BUSY_TURN_KEY" ]; then
       rm -f -- "$cache_file" 2>/dev/null || true
     fi
+    return 0
+  fi
+  if [ "$team_status" = 1 ] && [ "$1" = clear ] && [ -n "$_HOOK_STOP_HOLD_BUSY" ]; then
+    # An interim Claude Stop keeps the direct mark, and its cache, so a child
+    # started in the woken turn still inherits this turn, and the idle prompt
+    # or the final Stop, which share its prompt ID, clears the same token.
+    # The race re-check below is skipped too: a child that creates a team at
+    # this moment inherits the live turn as its root instead of the hold,
+    # which still holds the mark until the next owned Stop or idle prompt.
     return 0
   fi
   if [ "$team_status" = 1 ]; then

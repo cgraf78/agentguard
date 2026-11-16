@@ -838,6 +838,14 @@ _claude_child() { _claude_hook agent-hook-telemetry "{session_id:\$s,prompt_id:\
 _claude_end() { _claude_hook agent-hook-session-end "{session_id:\$s,hook_event_name:\"SessionEnd\"}"; }
 _claude_idle() { _claude_hook agent-hook-telemetry "{session_id:\$s,prompt_id:\"$1\",hook_event_name:\"Notification\",notification_type:\"idle_prompt\",message:\"Claude is waiting for your input\"$2}"; }
 claude_tm='[{"id":"tq1","type":"teammate","status":"running"}]'
+# Claude delivers an idle prompt to both hooks: telemetry settles the busy mark
+# and the notification hook rings a deferred done.
+_claude_idle_full() {
+  _claude_idle "$1" "${2-}"
+  _claude_hook agent-hook-notification "{session_id:\$s,prompt_id:\"$1\",hook_event_name:\"Notification\",notification_type:\"idle_prompt\",message:\"Claude is waiting for your input\"${2-}}"
+}
+# A root turn that ends without Stop; $2 is the event (default Interrupt).
+_claude_abort() { _claude_hook agent-hook-telemetry "{session_id:\$s,prompt_id:\"$1\",hook_event_name:\"${2:-Interrupt}\",error:\"server_error\"}"; }
 
 _claude_case idle-teammate
 _claude_prompt a
@@ -876,11 +884,16 @@ _assert_file_exists 'busy: child of an idle parent marks the pane' "$cb_state"
 _claude_child Stop a ateam-1 "$claude_tm"
 _assert_file_missing 'busy: child of an idle parent does not inherit a root turn' "$cb_state"
 
+# A live background shell holds the lead's direct mark until the Stop of the
+# turn its completion wakes; the listed idle teammate never holds it.
 _claude_case snapshot-only
 _claude_prompt a
 _claude_stop a "[{\"id\":\"tq1\",\"type\":\"teammate\",\"status\":\"running\"},{\"id\":\"sh1\",\"type\":\"shell\",\"status\":\"running\"}]"
-_assert_file_missing 'busy: listed idle teammates alone do not mark the pane' "$cb_state"
+_assert_eq 'busy: a live background shell holds the direct mark' \
+  "p:${#cb_session}:$cb_session:a" "$(cat "$cb_state" 2>/dev/null)"
 _assert_file_missing 'busy: snapshots alone do not enter Claude team mode' "$cb_team"
+_claude_stop a "$claude_tm"
+_assert_file_missing 'busy: listed idle teammates alone do not mark the pane' "$cb_state"
 
 _claude_case missed-subagent
 _claude_prompt a
@@ -955,7 +968,9 @@ _assert_file_exists 'busy: current snapshot keeps its listed subagent' "$cb_stat
 jq -e '.children | keys == ["asub-b"]' "$cb_team" >/dev/null 2>&1
 _assert_eq 'busy: current snapshot retires the unlisted subagent' 0 "$?"
 _claude_child Stop b asub-b '[{"id":"asub-b","type":"subagent","status":"running"}]'
-_assert_file_missing 'busy: last Claude child Stop clears the team' "$cb_state"
+_assert_file_exists 'busy: a subagent live at the last Stop holds the team past its own Stop' "$cb_state"
+_claude_stop b '[]'
+_assert_file_missing 'busy: the woken Stop clears the team' "$cb_state"
 
 # Extensions ask _hook_child_working whether a child still owns its work. It
 # reads the team state these hooks keep, so a child counts as working exactly
@@ -1013,7 +1028,9 @@ _claude_stop a '[{"id":"asub-1","type":"subagent","status":"running"}]'
 _assert_eq 'busy: next event retries a failed Claude team set' \
   "team:$cb_session" "$(cat "$cb_state" 2>/dev/null)"
 _claude_child Stop a asub-1 '[{"id":"asub-1","type":"subagent","status":"running"}]'
-_assert_file_missing 'busy: retried Claude team clears at its last child Stop' "$cb_state"
+_assert_file_exists 'busy: retried Claude team holds past a subagent live at the Stop' "$cb_state"
+_claude_stop a '[]'
+_assert_file_missing 'busy: retried Claude team clears at the woken Stop' "$cb_state"
 
 _claude_case retry-end
 _claude_prompt a
@@ -1107,6 +1124,259 @@ _claude_prompt a
 _claude_child Start a ateam-1
 _claude_stop a '[{"id":"tq1","type":"teammate","status":"killed"}]'
 _assert_file_missing 'busy: a killed teammate cannot keep an unlisted child' "$cb_state"
+
+# A Claude lead that ends its turn while background shells or subagents run
+# is woken by each task's completion. Its pane stays busy across those
+# interim Stops, which neither ring nor mark done: the turn that finally
+# leaves no live background work rings once, or Claude's idle prompt does
+# for work that outlives the last turn.
+claude_sh='[{"id":"bsh1","type":"shell","status":"running"}]'
+claude_sub='[{"id":"asub-1","type":"subagent","status":"running"}]'
+# Count the lines of file $2 matching fixed string $1 (0 for a missing file).
+_cb_count() {
+  local count
+  count=$(grep -cF -- "$1" "$2" 2>/dev/null) || true
+  printf '%s' "${count:-0}"
+}
+_cb_dir() { printf '%s' "${cb_team%/busy-team/*}"; }
+
+_claude_case hold-shell-woken
+_claude_prompt a
+_claude_stop a "$claude_sh"
+_assert_eq 'busy hold: a live background shell keeps the direct mark' \
+  "p:${#cb_session}:$cb_session:a" "$(cat "$cb_state" 2>/dev/null)"
+_assert_eq 'busy hold: the interim Stop sends no busy clear' 0 "$(_cb_count 'clear busy' "$cb_log")"
+_assert_file_missing 'busy hold: the interim Stop neither rings nor marks done' "$cb_log.notify"
+_assert_eq 'busy hold: the turn cache survives for a child of the woken turn' \
+  "legacy:p:${#cb_session}:$cb_session:a" "$(cat "$(_cb_dir)/busy-mark-turn" 2>/dev/null)"
+_claude_prompt b
+_assert_eq 'busy hold: the task-notification prompt sends no busy clear' 0 "$(_cb_count 'clear busy' "$cb_log")"
+_claude_stop b '[]'
+_assert_file_missing 'busy hold: the woken Stop without live work clears' "$cb_state"
+_assert_eq 'busy hold: the only busy clear is the final Stop' 1 "$(_cb_count 'clear busy' "$cb_log")"
+_claude_idle_full b
+_assert_eq 'busy hold: one done bell in the whole cycle' 1 "$(_cb_count '--kind done' "$cb_log.notify")"
+_assert_eq 'busy hold: the idle prompt does not ring again' 1 "$(wc -l <"$cb_log.notify" | tr -d ' ')"
+
+_claude_case hold-subagent-woken
+_claude_prompt a
+_claude_child Start a asub-1
+_claude_stop a "$claude_sub"
+_claude_child Stop a asub-1 "$claude_sub"
+_assert_eq 'busy hold: a subagent live at the Stop holds the team past its own Stop' \
+  "team:$cb_session" "$(cat "$cb_state" 2>/dev/null)"
+jq -e '.background == "a" and .root == null and .children == {}' "$cb_team" >/dev/null 2>&1
+_assert_eq 'busy hold: the team records the held turn apart from its children' 0 "$?"
+_claude_prompt b
+_claude_stop b '[]'
+_assert_file_missing 'busy hold: the woken Stop clears the team' "$cb_state"
+_assert_eq 'busy hold: no busy clear edge before the woken Stop' 1 "$(_cb_count 'clear busy' "$cb_log")"
+_assert_eq 'busy hold: the woken Stop rings once' 1 "$(_cb_count '--kind done' "$cb_log.notify")"
+
+_claude_case hold-shell-idle
+_claude_prompt a
+_claude_stop a "$claude_sh"
+_assert_file_exists 'busy hold: an unbounded shell holds past the last Stop' "$cb_state"
+_claude_idle_full a
+_assert_file_missing 'busy hold: the idle prompt clears the held mark' "$cb_state"
+_assert_eq 'busy hold: the idle prompt rings the deferred done once' \
+  "1:1" "$(_cb_count '--kind done' "$cb_log.notify"):$(wc -l <"$cb_log.notify" | tr -d ' ')"
+
+# A turn woken without a prompt hook keeps the prompt ID; its Stop rings.
+_claude_case hold-woken-no-prompt
+_claude_prompt a
+_claude_stop a "$claude_sh"
+_claude_stop a '[]'
+_assert_file_missing 'busy hold: a same-prompt Stop without live work clears' "$cb_state"
+_assert_eq 'busy hold: that Stop rings' 1 "$(_cb_count '--kind done' "$cb_log.notify")"
+_claude_idle_full a
+_assert_eq 'busy hold: the idle prompt after it stays silent' 1 "$(wc -l <"$cb_log.notify" | tr -d ' ')"
+
+# As today, a Stop that already rang leaves a later woken Stop's silent end to
+# the idle prompt, which rings for it.
+_claude_case hold-after-ring
+_claude_prompt a
+_claude_stop a '[]'
+_claude_stop a "$claude_sh"
+_assert_file_exists 'busy hold: a woken Stop after the bell records its silent end' \
+  "$(_cb_dir)/prompt-cycle/stop-silent"
+_claude_idle_full a
+_assert_eq 'busy hold: the idle prompt rings for that end (two bells, as today)' \
+  2 "$(_cb_count '--kind done' "$cb_log.notify")"
+
+for claude_abort in StopFailure Interrupt; do
+  _claude_case "hold-abort-$claude_abort"
+  _claude_prompt a
+  _claude_stop a "$claude_sh"
+  _claude_abort a "$claude_abort"
+  _assert_file_missing "busy hold: a root $claude_abort clears the held mark" "$cb_state"
+done
+_assert_eq 'busy hold: StopFailure after an interim Stop rings blocked once' \
+  1 "$(_cb_count '--kind blocked' "$MOCK_BUSY_DIR/claude-hold-abort-StopFailure.log.notify")"
+_assert_eq 'busy hold: and nothing else' \
+  1 "$(wc -l <"$MOCK_BUSY_DIR/claude-hold-abort-StopFailure.log.notify" | tr -d ' ')"
+
+# A live attention fence makes the Stop take its lock, and the fallback clear
+# runs when the lock cannot be had; that fallback holds a live task too.
+_claude_case hold-lock-failure
+mkdir -p "$(_cb_dir)"
+printf 'legacy:\n' >"$(_cb_dir)/attention-turn"
+_claude_prompt a
+cb_ready="$MOCK_BUSY_DIR/claude-hold-lock.ready"
+python3 -c '
+import fcntl, sys, time
+lock = open(sys.argv[1], "a")
+fcntl.flock(lock, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(30)
+' "$(_cb_dir)/attention-lock" "$cb_ready" &
+cb_lock_pid=$!
+_claude_await_delay "$cb_ready"
+_claude_stop a "$claude_sh"
+_assert_file_exists 'busy hold: the lock-failure fallback holds a live task' "$cb_state"
+_claude_stop a '[]'
+_assert_file_missing 'busy hold: the same fallback still clears without one' "$cb_state"
+kill "$cb_lock_pid" 2>/dev/null
+wait "$cb_lock_pid" 2>/dev/null
+_assert_file_missing 'busy hold: neither fallback Stop rings' "$cb_log.notify"
+
+_claude_case hold-not-current
+mkdir -p "$(_cb_dir)"
+printf 'legacy:\n' >"$(_cb_dir)/attention-turn"
+_claude_prompt a
+: >"$(_cb_dir)/attention-disabled.test"
+_claude_stop a "$claude_sh"
+_assert_file_exists 'busy hold: a Stop outside the current turn takes the fallback and holds' "$cb_state"
+_assert_file_missing 'busy hold: and stays silent' "$cb_log.notify"
+rm -f "$(_cb_dir)/attention-disabled.test"
+_claude_stop a '[]'
+_assert_file_missing 'busy hold: a current Stop without live work then clears' "$cb_state"
+
+# The interim Stop retires only the root's own sticky attention: a background
+# child's question stays on the pane until that child moves on.
+_claude_case hold-child-waiting
+_claude_prompt a
+_claude_child Start a asub-1
+_claude_hook agent-hook-telemetry "{session_id:\$s,prompt_id:\"a\",agent_id:\"asub-1\",hook_event_name:\"PermissionRequest\",tool_name:\"Bash\"}"
+_claude_hook agent-hook-notification "{session_id:\$s,prompt_id:\"a\",hook_event_name:\"Notification\",notification_type:\"permission_prompt\",message:\"Claude needs your permission\"}"
+_assert_eq 'busy hold: the background child is waiting' "waiting asub-1" \
+  "$(cat "$(_cb_dir)/attention-sticky" 2>/dev/null)"
+_claude_stop a "$claude_sub"
+_assert_eq "busy hold: the interim Stop keeps the child's waiting flag" "waiting asub-1" \
+  "$(cat "$(_cb_dir)/attention-sticky" 2>/dev/null)"
+_assert_eq "busy hold: and sends no pending clear" 0 "$(_cb_count 'clear pending' "$cb_log")"
+
+_claude_case hold-root-waiting
+_claude_prompt a
+printf 'waiting root\n' >"$(_cb_dir)/attention-sticky"
+_claude_stop a "$claude_sh"
+_assert_file_missing "busy hold: the interim Stop retires the root's own waiting flag" \
+  "$(_cb_dir)/attention-sticky"
+_assert_eq "busy hold: and clears its sticky mark" 1 "$(_cb_count 'clear pending --if sticky' "$cb_log")"
+
+for claude_kind in teammate workflow mystery; do
+  _claude_case "hold-none-$claude_kind"
+  _claude_prompt a
+  _claude_stop a "[{\"id\":\"x1\",\"type\":\"$claude_kind\",\"status\":\"running\"}]"
+  _assert_file_missing "busy hold: a $claude_kind task alone does not hold the mark" "$cb_state"
+  _assert_eq "busy hold: a $claude_kind task alone still rings" 1 "$(_cb_count '--kind done' "$cb_log.notify")"
+done
+
+for claude_status in completed failed killed; do
+  for claude_type in shell subagent; do
+    _claude_case "hold-ended-$claude_type-$claude_status"
+    _claude_prompt a
+    _claude_stop a "[{\"id\":\"x1\",\"type\":\"$claude_type\",\"status\":\"$claude_status\"}]"
+    _assert_file_missing "busy hold: a $claude_status $claude_type is not live work" "$cb_state"
+  done
+done
+
+# A stale Stop for an older prompt cannot claim the newer turn's hold.
+_claude_case hold-stale
+_claude_prompt a
+_claude_child Start a asub-1
+_claude_stop a "$claude_sub"
+_claude_child Stop a asub-1 "$claude_sub"
+_claude_prompt b
+jq -e '.background == null and .root == "b"' "$cb_team" >/dev/null 2>&1
+_assert_eq 'busy hold: the next prompt replaces the held turn' 0 "$?"
+_claude_stop a "$claude_sh"
+jq -e '.background == null' "$cb_team" >/dev/null 2>&1
+_assert_eq 'busy hold: a stale Stop with live work holds nothing' 0 "$?"
+_claude_stop b '[]'
+_assert_file_missing 'busy hold: the current Stop then clears' "$cb_state"
+
+_claude_case hold-end-direct
+_claude_prompt a
+_claude_stop a "$claude_sh"
+_claude_end
+_assert_file_missing 'busy hold: SessionEnd clears a held direct mark' "$cb_state"
+
+_claude_case hold-end-team
+_claude_prompt a
+_claude_child Start a asub-1
+_claude_stop a "$claude_sub"
+_claude_child Stop a asub-1 "$claude_sub"
+_claude_end
+_assert_file_missing 'busy hold: SessionEnd clears a held team' "$cb_state"
+
+_claude_case hold-abort-team
+_claude_prompt a
+_claude_child Start a asub-1
+_claude_stop a "$claude_sub"
+_claude_child Stop a asub-1 "$claude_sub"
+_claude_abort a StopFailure
+_assert_file_missing 'busy hold: a root StopFailure clears a held team' "$cb_state"
+
+_claude_case hold-idle-team
+_claude_prompt a
+_claude_child Start a asub-1
+_claude_stop a "$claude_sub"
+_claude_child Stop a asub-1 "$claude_sub"
+_claude_idle a
+_assert_file_missing 'busy hold: the idle prompt clears a held team' "$cb_state"
+
+# A Stop an extension blocks keeps the turn going, as today.
+_claude_case hold-blocked
+# shellcheck disable=SC2016 # expanded by the hook that sources the extension
+printf '%s\n' '[ -z "${BUSY_STOP_BLOCK:-}" ] || _hook_block "keep going"' \
+  >"$MOCK_BUSY_DIR/bin/agent-hook-stop-claude"
+_claude_prompt a
+BUSY_STOP_BLOCK=1 _claude_stop a "$claude_sh"
+_assert_eq 'busy hold: a blocked Stop leaves the mark' \
+  "p:${#cb_session}:$cb_session:a" "$(cat "$cb_state" 2>/dev/null)"
+_assert_file_missing 'busy hold: a blocked Stop stays silent' "$cb_log.notify"
+_assert_file_exists 'busy hold: a blocked Stop marks the turn continued' \
+  "$(_cb_dir)/prompt-cycle/stop-continued"
+_claude_hook agent-hook-stop "{session_id:\$s,prompt_id:\"a\",hook_event_name:\"Stop\",stop_hook_active:true,background_tasks:[]}"
+_assert_file_missing 'busy hold: its continuation ends the turn' "$cb_state"
+_assert_eq 'busy hold: and rings once' 1 "$(_cb_count '--kind done' "$cb_log.notify")"
+rm -f "$MOCK_BUSY_DIR/bin/agent-hook-stop-claude"
+
+# Only Claude holds: the same snapshot leaves Codex, Grok and Muse as before.
+for hold_agent in codex grok muse; do
+  hold_log="$MOCK_BUSY_DIR/hold-other-$hold_agent.log"
+  hold_session="$TEST_SID-hold-other-$hold_agent"
+  case "$hold_agent" in
+    grok)
+      hold_prompt="{\"sessionId\":\"$hold_session\",\"promptId\":\"root-a\",\"prompt\":\"Work.\"}"
+      hold_stop="{\"sessionId\":\"$hold_session\",\"promptId\":\"root-a\",\"hookEventName\":\"stop\",\"background_tasks\":$claude_sh,\"backgroundTasks\":$claude_sh}"
+      ;;
+    *)
+      hold_prompt="{\"session_id\":\"$hold_session\",\"turn_id\":\"root-a\",\"transcript_path\":\"/tmp/hold.jsonl\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Work.\"}"
+      hold_stop="{\"session_id\":\"$hold_session\",\"turn_id\":\"root-a\",\"transcript_path\":\"/tmp/hold.jsonl\",\"hook_event_name\":\"Stop\",\"background_tasks\":$claude_sh}"
+      ;;
+  esac
+  _busy_hook agent-hook-prompt-submit "$hold_agent" "$hold_log" "$hold_prompt" "$hold_session" >/dev/null
+  _busy_hook agent-hook-stop "$hold_agent" "$hold_log" "$hold_stop" "$hold_session" >/dev/null
+  hold_token="team:$hold_session"
+  [ "$hold_agent" != grok ] || hold_token="p:${#hold_session}:$hold_session:root-a"
+  _assert_eq "busy hold: $hold_agent Stop with a live shell clears as before" \
+    "set busy --owner N --token $hold_token"$'\n'"clear busy --owner N --token $hold_token" \
+    "$(sed 's/--owner [0-9]*/--owner N/' "$hold_log")"
+  _assert_eq "busy hold: $hold_agent Stop with a live shell rings as before" \
+    "--owner N --kind done" "$(sed 's/--owner [0-9]*/--owner N/' "$hold_log.notify")"
+done
 
 # busy-team.py rejects transitions that no hook can legitimately request.
 claude_argv_dir=$(_tmpdir)
