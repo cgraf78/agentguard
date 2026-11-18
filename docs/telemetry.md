@@ -160,7 +160,7 @@ normal finish path.
 | `agent` | all | Runtime identity (`AGENTGUARD_NAME` or detection). |
 | `session_key` | all | The durable session key; the directory name. |
 | `state_key` | all | AgentGuard's guard-state key, only when it differs from `session_key` (Gemini, Grok subagents). |
-| `launcher_key` | all | The launcher-provided id (`AGENTGUARD_SESSION_ID`), only when it differs from both keys (a Codex subagent's own thread id). |
+| `launcher_key` | all | The launcher-provided id (`AGENTGUARD_SESSION_ID`), only when it differs from both keys (a Codex subagent's own thread id, or the outer session's id a nested `claude -p` inherited). |
 | `session_id` | all | The payload's own session id (a string) when it has one; never a launcher fallback. |
 | `event` | all | The payload's native event name (`PreToolUse`, `BeforeTool`, ...); for a hook that received no payload, AgentGuard's canonical name for that hook. |
 | `hook` | all | Executable that wrote the record. |

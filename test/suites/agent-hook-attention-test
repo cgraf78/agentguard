@@ -315,6 +315,18 @@ _assert_eq "SessionEnd: clears the sticky mark" "" "$(_flag)"
 _assert_contains "SessionEnd: conditionally" \
   "clear pending --if sticky --owner $(_owner) flag=absent" "$(_pending_calls)"
 
+# A nested `claude -p` from the outer session's tool shell inherits the outer
+# id as AGENTGUARD_SESSION_ID, but its payload names its own session.
+_case
+_seed waiting any
+nested_payload() { jq -nc --arg s "$ATT_SESSION-nested" "{session_id:\$s} + ($1)"; }
+_hook agent-hook-prompt-submit claude "$(nested_payload '{prompt:"Work."}')"
+_assert_eq "nested claude: its prompt keeps the outer mark" "waiting any" "$(_flag)"
+_assert_eq "nested claude: and the outer pane still waits" waiting "$(_pending_kind)"
+_hook agent-hook-session-end claude "$(nested_payload '{}')"
+_assert_eq "nested claude: its SessionEnd keeps the outer mark" "waiting any" "$(_flag)"
+_assert_eq "nested claude: no pending clear reached the pane" "" "$(_pending_calls)"
+
 _case
 _seed blocked root
 _hook agent-hook-prompt-submit claude "$(_payload '{prompt:"Work.",agent_id:"child-1"}')"
