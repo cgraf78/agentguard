@@ -249,10 +249,14 @@ _assert_eq "concurrent: every record parses with full payload" "16" "$valid"
 # inside its total bound instead. The timeout guard keeps a future
 # regression of that bound from hanging the suite.
 _fresh_root
-( { printf '%s' "${big_payload:0:150000}"; sleep 2; printf '%s' "${big_payload:150000}"; } 2>/dev/null |
+({
+  printf '%s' "${big_payload:0:150000}"
+  sleep 2
+  printf '%s' "${big_payload:150000}"
+} 2>/dev/null |
   AGENTGUARD_HOOK_STDIN_TIMEOUT=10 AGENTGUARD_HOOK_STDIN_DRAIN_TIMEOUT=1 \
     AGENTGUARD_SESSION_ID="$TEST_SID" AGENTGUARD_NAME=agent \
-    _with_timeout 15 "$TELEMETRY_HOOK" >/dev/null 2>&1 )
+    _with_timeout 15 "$TELEMETRY_HOOK" >/dev/null 2>&1)
 _assert_eq "stalled producer: one record" "1" "$(_record_count)"
 _assert_eq "stalled producer: full payload recorded" "300000" \
   "$(_records | jq -r '.payload.tool_response.stdout | length')"
@@ -262,10 +266,14 @@ _assert_eq "stalled producer: full payload recorded" "300000" \
 # which is where the production truncation happened (bash 3.2 with the
 # default fractional first-byte timeout).
 _fresh_root
-( { printf '%s' "${big_payload:0:150000}"; sleep 2; printf '%s' "${big_payload:150000}"; } 2>/dev/null |
+({
+  printf '%s' "${big_payload:0:150000}"
+  sleep 2
+  printf '%s' "${big_payload:150000}"
+} 2>/dev/null |
   AGENTGUARD_HOOK_STDIN_TIMEOUT=0.5 AGENTGUARD_HOOK_STDIN_DRAIN_TIMEOUT=1 \
     AGENTGUARD_SESSION_ID="$TEST_SID" AGENTGUARD_NAME=agent \
-    _with_timeout 15 "$TELEMETRY_HOOK" >/dev/null 2>&1 )
+    _with_timeout 15 "$TELEMETRY_HOOK" >/dev/null 2>&1)
 _assert_eq "stalled producer (fractional timeout): one record" "1" "$(_record_count)"
 _assert_eq "stalled producer (fractional timeout): full payload recorded" "300000" \
   "$(_records | jq -r '.payload.tool_response.stdout | length')"
@@ -737,7 +745,7 @@ _run_cli_as "AGENTGUARD_SESSION_ID=gemini-4242" path current
 _assert_eq "current: live session beats a stale pid directory" \
   "$AGENTGUARD_TELEMETRY_DIR/sessions/gemini/g-sess-1" "$CLI_OUT"
 _fresh_root
-_run_hook_as claude "AGENTGUARD_SESSION_ID=claude-outer" "$TELEMETRY_HOOK" "$PRE_TOOL"
+_run_hook_as claude "AGENTGUARD_SESSION_ID=claude-outer" "$TELEMETRY_HOOK" "$(jq -c '.session_id = "claude-outer"' <<<"$PRE_TOOL")"
 _run_hook_as gemini "AGENTGUARD_SESSION_ID=gemini-4242" "$TELEMETRY_HOOK" "$gemini_tool"
 _run_cli_as "CLAUDE_CODE_SESSION_ID=claude-outer AGENTGUARD_SESSION_ID=gemini-4242" path current
 _assert_eq "current: nested agent resolves to the inner session" \
@@ -783,7 +791,7 @@ _assert_eq "sessions: grok first prompt" "grok ask" "$(jq -r .first_prompt <<<"$
 
 # current from the env each real tool shell exports.
 _fresh_root
-_run_hook_as claude "AGENTGUARD_SESSION_ID=claude-s" "$TELEMETRY_HOOK" "$PRE_TOOL"
+_run_hook_as claude "AGENTGUARD_SESSION_ID=claude-s" "$TELEMETRY_HOOK" "$(jq -c '.session_id = "claude-s"' <<<"$PRE_TOOL")"
 _run_hook_as muse "MUSE_SESSION_ID=muse-s AGENTGUARD_SESSION_ID=muse-s" "$TELEMETRY_HOOK" "$PRE_TOOL"
 _run_hook_as opencode "AGENTGUARD_SESSION_ID=ses_cur" "$TELEMETRY_HOOK" "$PRE_TOOL"
 _run_cli_as "CLAUDE_CODE_SESSION_ID=claude-s" path current
@@ -987,7 +995,7 @@ _assert_eq "symlinked sessions dir: nothing created through the link" "0" \
 
 # The sessions table keeps its columns aligned for every agent name.
 _fresh_root
-_run_hook_as claude "AGENTGUARD_SESSION_ID=col-c" "$TELEMETRY_HOOK" "$PRE_TOOL"
+_run_hook_as claude "AGENTGUARD_SESSION_ID=col-c" "$TELEMETRY_HOOK" "$(jq -c '.session_id = "col-c"' <<<"$PRE_TOOL")"
 _run_hook_as opencode "AGENTGUARD_SESSION_ID=col-o" "$TELEMETRY_HOOK" "$PRE_TOOL"
 _run_cli sessions
 header_col=$(printf '%s\n' "$CLI_OUT" | head -n 1 | awk '{print index($0, "SESSION")}')

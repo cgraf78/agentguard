@@ -565,6 +565,44 @@ _assert_eq "state_dir: codex JSON session id wins over process fallback" "0" "$?
 ) | _stdin_contains PASS
 _assert_eq "state_dir: codex JSON session id beats inherited env ids" "0" "$?"
 
+# A `claude -p` started from a Claude tool shell inherits the outer
+# CLAUDE_CODE_CURRENT_SESSION_ID, which its hook command passes on as
+# AGENTGUARD_SESSION_ID. Sharing the outer key let the nested run clear the
+# outer's attention flag and remove its state at SessionEnd.
+(
+  AGENTGUARD_NAME="claude"
+  AGENTGUARD_SESSION_ID="outer-claude"
+  CLAUDE_CODE_CURRENT_SESSION_ID="outer-claude"
+  XDG_RUNTIME_DIR="$TEST_TMPDIR/claude-nested-test"
+  _HOOK_INPUT='{"session_id":"inner-claude"}'
+  source "$HELPERS"
+  [ "$_HOOK_STATE_DIR" = "$TEST_TMPDIR/claude-nested-test/agentguard/hook-state/inner-claude" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | _stdin_contains PASS
+_assert_eq "state_dir: claude JSON session id beats inherited env ids" "0" "$?"
+
+# Without a payload id (an event that carries none), the launcher id still
+# names the session, as before.
+(
+  AGENTGUARD_NAME="claude"
+  AGENTGUARD_SESSION_ID="outer-claude"
+  XDG_RUNTIME_DIR="$TEST_TMPDIR/claude-noid-test"
+  _HOOK_INPUT='{}'
+  source "$HELPERS"
+  [ "$_HOOK_STATE_DIR" = "$TEST_TMPDIR/claude-noid-test/agentguard/hook-state/outer-claude" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | _stdin_contains PASS
+_assert_eq "state_dir: claude without a payload id keeps the launcher id" "0" "$?"
+
+# A root session's payload id equals its launcher id, so its key is unchanged.
+(
+  AGENTGUARD_NAME="claude"
+  AGENTGUARD_SESSION_ID="root-claude"
+  XDG_RUNTIME_DIR="$TEST_TMPDIR/claude-root-test"
+  _HOOK_INPUT='{"session_id":"root-claude"}'
+  source "$HELPERS"
+  [ "$_HOOK_STATE_DIR" = "$TEST_TMPDIR/claude-root-test/agentguard/hook-state/root-claude" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
+) | _stdin_contains PASS
+_assert_eq "state_dir: claude root session keeps its key" "0" "$?"
+
 # _hook_state_root cascade: XDG_RUNTIME_DIR is preferred as the per-user,
 # system-cleaned root for ephemeral session state, so it wins over XDG_STATE_HOME.
 # shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
@@ -853,10 +891,11 @@ _assert_eq "state_dir: Grok subagentType suffixes when sessionId is absent" "0" 
 ) | _stdin_contains PASS
 _assert_eq "state_dir: Grok promptId separates same-type children" "0" "$?"
 
-# Existing env-derived keys continue to win over JSON session_id.
+# Without a managed runtime name (AGENTGUARD_NAME unset), env-derived keys
+# still win over JSON session_id.
 # shellcheck disable=SC2034  # env vars consumed by sourced helpers, not direct use
 (
-  unset CODEX_THREAD_ID 2>/dev/null
+  unset CODEX_THREAD_ID AGENTGUARD_NAME 2>/dev/null
   CLAUDE_CODE_CURRENT_SESSION_ID="test123"
   XDG_RUNTIME_DIR="$TEST_TMPDIR/test"
   source "$HELPERS"
@@ -864,7 +903,7 @@ _assert_eq "state_dir: Grok promptId separates same-type children" "0" "$?"
   _hook_refresh_state_dir
   [ "$_HOOK_STATE_DIR" = "$TEST_TMPDIR/test/agentguard/hook-state/test123" ] && echo "PASS" || echo "FAIL: $_HOOK_STATE_DIR"
 ) | _stdin_contains PASS
-_assert_eq "state_dir: claude env wins over input session_id" "0" "$?"
+_assert_eq "state_dir: unnamed runtime: claude env wins over input session_id" "0" "$?"
 
 # Parsing command JSON refreshes state from session_id for agents without env
 # session IDs.

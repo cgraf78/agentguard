@@ -495,8 +495,8 @@ _hook_agent_ancestor_key() {
 }
 
 # Session key for state directory isolation. Prefer stable runtime ids. Codex
-# hook commands can inherit CODEX_THREAD_ID from an outer Codex process when a
-# user launches nested Codex, so once Codex JSON has been read its session_id is
+# and Claude hook commands can inherit an outer session's id when a user
+# launches a nested run, so once their JSON has been read its session_id is
 # the authoritative key. If Codex does not expose one, managed hooks fall back
 # to the long-lived Codex parent process instead of each short-lived hook
 # process. Grok injects GROK_SESSION_ID on hook processes. Gemini exports its
@@ -549,7 +549,15 @@ _hook_refresh_state_dir() {
   # matters for synthetic co-occurrence. MUSE ranks below GROK here while
   # `_hook_agent_shell_session_keys` ranks it second; both orders agree
   # whenever at most one launcher id is set, which is the only real case.
-  if [ "${AGENTGUARD_NAME:-}" = "codex" ] && [ -n "$input_session" ]; then
+  # Codex and Claude both inherit an outer session's ids into a nested launch
+  # (`codex exec` or `claude -p` from a tool shell), and Claude's hook command
+  # turns the inherited id into AGENTGUARD_SESSION_ID. The payload names the
+  # session that actually fired, so it wins: a nested run sharing the outer
+  # key would clear the outer's attention flags, and a SessionEnd extension
+  # could remove the outer's state. A Claude subagent's payload carries its
+  # parent's id, so subagents keep the parent's key.
+  if { [ "${AGENTGUARD_NAME:-}" = "codex" ] || [ "${AGENTGUARD_NAME:-}" = "claude" ]; } &&
+    [ -n "$input_session" ]; then
     session_key="$input_session"
   elif [ -n "${AGENTGUARD_SESSION_ID:-}" ]; then
     session_key="$AGENTGUARD_SESSION_ID"
@@ -2075,7 +2083,8 @@ _hook_state_roots() {
 }
 
 # Candidate hook session keys visible from an agent tool shell, best first:
-# explicit runtime ids (same precedence as _hook_refresh_state_dir, plus
+# explicit runtime ids (the env precedence _hook_refresh_state_dir uses when a
+# hook has no payload session_id, since a tool shell never has one, plus
 # MUSE_SESSION_ID, which launchers map to AGENTGUARD_SESSION_ID only in hook
 # env), then the agent-ancestor fallback. Unsafe ids are skipped here, so
 # every downstream consumer is safe by construction; consumers re-check

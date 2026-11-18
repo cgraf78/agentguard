@@ -224,9 +224,17 @@ done
 
 # --- Guards that keep a hook untracked ---
 
+# Muse keys hook state by the inherited launcher id, so a nested run whose
+# payload id differs shares its parent's key and must stay untracked.
+_delivery_case
+_run_hook agent-hook-prompt-submit muse parent-session "$(_prompt_payload nested-session)" >/dev/null
+_assert_not_contains "nested session (payload id differs from key): untracked" "--delivery" "$(_log)"
+
+# Claude keys hook state by the payload id, so a nested `claude -p` owns its
+# own key and context window and tracks delivery there.
 _delivery_case
 _run_hook agent-hook-prompt-submit claude parent-session "$(_prompt_payload nested-session)" >/dev/null
-_assert_not_contains "nested session (payload id differs from key): untracked" "--delivery" "$(_log)"
+_assert_contains "nested claude session: tracked under its own key" "--delivery" "$(_log)"
 
 for field in agent_id agentId; do
   _delivery_case

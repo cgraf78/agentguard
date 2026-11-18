@@ -537,11 +537,12 @@ Each hook emits one JSON response through `_hook_finish`.
 
 The per-session state directory is computed once at source time and refreshed
 after hook JSON is read. A neutral `AGENTGUARD_SESSION_ID` wins when a launcher
-supplies one. Managed Codex hooks prefer JSON `session_id` after stdin is
-available, because nested Codex launches can inherit an outer
-`CODEX_THREAD_ID`. Without JSON, Codex uses `CODEX_THREAD_ID` or its parent
-process key; Grok uses `GROK_SESSION_ID`, then its nearest `grok` ancestor
-key, then `grok-$PPID`; Muse uses `MUSE_SESSION_ID`; Claude uses
+supplies one. Managed Codex and Claude hooks prefer JSON `session_id` after
+stdin is available, because nested launches (`codex exec` or `claude -p` from
+a tool shell) inherit the outer session's ids, and Claude's hook command turns
+the inherited id into `AGENTGUARD_SESSION_ID`. Without JSON, Codex uses
+`CODEX_THREAD_ID` or its parent process key; Grok uses `GROK_SESSION_ID`,
+then its nearest `grok` ancestor key, then `grok-$PPID`; Muse uses `MUSE_SESSION_ID`; Claude uses
 `CLAUDE_CODE_CURRENT_SESSION_ID` or `CLAUDE_CODE_SESSION_ID`; and Gemini uses
 its nearest `gemini` ancestor key or `gemini-$PPID`. Any remaining hook uses
 the pid of its nearest `muse` ancestor when that is the closest agent
@@ -817,8 +818,10 @@ lose context is reported:
   times out the hook after `hm` returned, those memories wait for the next
   reset (compaction, clear, resume). Untracked prompt recall has the same gap.
 
-Subagents, nested sessions whose session variables point at a parent, other
-runtimes, and `AGENTGUARD_HIVE_MEMORY_DELIVERY=0` stay untracked. So does an
+Subagents, nested Muse sessions (Muse keys hook state by the inherited
+launcher id, so a nested run shares its parent's key; nested Codex and Claude
+runs get their own), other runtimes, and `AGENTGUARD_HIVE_MEMORY_DELIVERY=0`
+stay untracked. So does an
 `hm` that predates the flags; AgentGuard falls back automatically.
 
 Claude-specific extensions auto-name untitled sessions and run the daily
