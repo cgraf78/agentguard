@@ -244,6 +244,11 @@ trap _cleanup EXIT
 AGENTGUARD_TELEMETRY_DIR="$(_tmpdir)/telemetry"
 export AGENTGUARD_TELEMETRY_DIR
 
+# term-notify-sound logs every bell under the state home too; a suite that
+# runs a real hook with the real HOME must not add its bells to that log.
+TERM_NOTIFY_LOG="$(_tmpdir)/term-notify-sound.log"
+export TERM_NOTIFY_LOG
+
 # ---------------------------------------------------------------------------
 # Common test setup
 # ---------------------------------------------------------------------------
