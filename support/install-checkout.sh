@@ -15,6 +15,8 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 commands=(
   agent-hook-compact
   agent-hook-notification
+  agent-hook-permission-request
+  agent-hook-permission-request-claude
   agent-hook-post-bash
   agent-hook-post-edit
   agent-hook-post-mcp

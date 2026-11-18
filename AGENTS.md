@@ -36,7 +36,8 @@ protocol). AgentGuard never mutates an agent's configuration.
   boundary. See README for the loader-environment contract, whose
   wording `manpage-test` pins.
 - Integration assets exclude permissions, models, MCP servers, UI
-  settings, and machine policy.
+  settings, and machine policy; a hook may answer permission prompts
+  only behind an opt-in knob.
 - Muse gets the Codex-style `hookSpecificOutput.additionalContext`
   shape with no legacy `context` field and no `suppressOutput`.
 

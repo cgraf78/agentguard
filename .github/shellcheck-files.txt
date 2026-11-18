@@ -1,6 +1,8 @@
 # type<TAB>repository-relative path
 program	bin/agent-hook-compact
 program	bin/agent-hook-notification
+program	bin/agent-hook-permission-request
+program	bin/agent-hook-permission-request-claude
 program	bin/agent-hook-post-bash
 program	bin/agent-hook-post-edit
 program	bin/agent-hook-post-mcp
@@ -74,6 +76,7 @@ program	test/suites/agent-hook-muse-test
 program	test/suites/agent-hook-perf-char-test
 program	test/suites/agent-hook-perf-regression-test
 program	test/suites/agent-hook-performance-test
+program	test/suites/agent-hook-permission-request-test
 program	test/suites/agent-hook-session-test
 program	test/suites/agent-hook-search-test
 program	test/suites/agent-hook-telemetry-test

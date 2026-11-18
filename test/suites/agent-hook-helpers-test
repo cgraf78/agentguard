@@ -3105,7 +3105,8 @@ _assert_eq "agent name: a cached ask runs no subshell" "1" \
     rm -f "$trace"')"
 
 for _self in agent-hook-pre-bash agent-hook-post-bash agent-hook-stop agent-hook-session-start \
-  agent-hook-compact agent-hook-notification agent-hook-other; do
+  agent-hook-compact agent-hook-notification agent-hook-permission-request \
+  agent-hook-other; do
   _assert_eq "event name: stored equals printed for $_self" "SAME" \
     "$(_fixed_case "_HOOK_SELF=/x/$_self; _hook_event_name e; [ \"\$e\" = \"\$(_hook_event_name)\" ] && echo SAME")"
 done

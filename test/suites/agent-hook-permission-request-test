@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+# agent-hook-permission-request-test — opt-in PermissionRequest answers.
+
+# shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
+AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+. "$AGENTGUARD_TEST_HELPERS"
+
+HOOK="$BIN_DIR/agent-hook-permission-request"
+ALLOW='{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+AGENT=claude
+
+# Fresh telemetry root per check; every run writes into the current one.
+AGENTGUARD_TELEMETRY_DIR="$(_tmpdir)/telemetry"
+export AGENTGUARD_TELEMETRY_DIR
+
+_records() {
+  local dir="$AGENTGUARD_TELEMETRY_DIR/sessions/$AGENT/$TEST_SID" f
+  for f in "$dir"/*.json; do
+    [ -e "$f" ] && jq -c . "$f"
+  done
+}
+
+# Run $HOOK as $AGENT with the knob set to $1, or removed when $1 is `unset`,
+# so a knob exported by the shell running the suite cannot leak in.
+_run_permission() {
+  local knob="$1" input="$2"
+  local -a knob_env=(AGENTGUARD_PERMISSION_REQUEST_ALLOW="$knob")
+  [ "$knob" != unset ] || knob_env=(-u AGENTGUARD_PERMISSION_REQUEST_ALLOW)
+  # shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+  local _RUN_HOOK_ENV=(
+    -u AGENTGUARD_TELEMETRY
+    "${knob_env[@]}"
+    AGENTGUARD_SESSION_ID="$TEST_SID"
+    TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="$AGENT"
+    CODEX_THREAD_ID=
+  )
+  _run_hook_env "$HOOK" "$input"
+}
+
+_payload() {
+  # $1 permission_mode (`-` omits it), $2 tool_name.
+  jq -nc --arg sid "$TEST_SID" --arg mode "$1" --arg tool "$2" '{
+    session_id: $sid, hook_event_name: "PermissionRequest", tool_name: $tool,
+    tool_input: {command: "cd \"$d\" && rm -rf ./*"}
+  } + (if $mode == "-" then {} else {permission_mode: $mode} end)'
+}
+
+_assert_answer() {
+  # $1 label, $2 expected stdout, then the _run_permission arguments.
+  local label="$1" expected="$2"
+  shift 2
+  _run_permission "$@"
+  _assert_eq "$label: exit 0" "0" "$HOOK_EXIT"
+  _assert_eq "$label: response" "$expected" "$HOOK_STDOUT"
+}
+
+BYPASS_BASH=$(_payload bypassPermissions Bash)
+
+echo ""
+echo "=== permission-request: switched off, it leaves no trace ==="
+
+for knob in unset '' 0 false off 11 ' 1' Yes; do
+  AGENTGUARD_TELEMETRY_DIR="$(_tmpdir)/telemetry"
+  state_root=$(_tmpdir)
+  XDG_RUNTIME_DIR="$state_root" _assert_answer "knob '$knob'" '{}' "$knob" "$BYPASS_BASH"
+  _assert_eq "knob '$knob': no stderr" "" "$HOOK_STDERR"
+  _assert_path_missing "knob '$knob': no audit record" "$AGENTGUARD_TELEMETRY_DIR"
+  _assert_eq "knob '$knob': no hook state" "" "$(ls -A "$state_root")"
+done
+
+# Positive control: the same checks see the record and state an enabled run
+# leaves, so the empty results above are not vacuous.
+AGENTGUARD_TELEMETRY_DIR="$(_tmpdir)/telemetry"
+state_root=$(_tmpdir)
+XDG_RUNTIME_DIR="$state_root" _assert_answer "knob=1 control" "$ALLOW" 1 "$BYPASS_BASH"
+_assert_path_exists "knob=1 control: audit record" "$AGENTGUARD_TELEMETRY_DIR"
+_assert_path_exists "knob=1 control: hook state" "$state_root/agentguard"
+
+# The telemetry recorder's own PermissionRequest record is independent of
+# this hook and the knob.
+HOOK="$BIN_DIR/agent-hook-telemetry"
+for knob in unset 1; do
+  AGENTGUARD_TELEMETRY_DIR="$(_tmpdir)/telemetry"
+  _run_permission "$knob" "$BYPASS_BASH"
+  rec=$(_records)
+  _assert_eq "telemetry, knob $knob: one event record" "1" "$(jq -s length <<<"$rec")"
+  _assert_eq "telemetry, knob $knob: event record keeps its payload" "$BYPASS_BASH" \
+    "$(jq -c .payload <<<"$rec")"
+  _assert_eq "telemetry, knob $knob: event record carries no decision" "false" \
+    "$(jq 'has("decision")' <<<"$rec")"
+done
+HOOK="$BIN_DIR/agent-hook-permission-request"
+
+echo ""
+echo "=== permission-request: Claude approves only bypass-mode Bash and Monitor ==="
+
+_assert_answer "knob=1, bypass Bash" "$ALLOW" 1 "$BYPASS_BASH"
+_assert_answer "knob=1, bypass Monitor" "$ALLOW" 1 "$(_payload bypassPermissions Monitor)"
+
+# The knob takes the shared _hook_flag_enabled spellings.
+for knob in true YES on; do
+  _assert_answer "knob '$knob', bypass Bash" "$ALLOW" "$knob" "$BYPASS_BASH"
+done
+
+for mode in default acceptEdits auto plan dontAsk BYPASSPERMISSIONS ''; do
+  _assert_answer "knob=1, mode '$mode' Bash" '{}' 1 "$(_payload "$mode" Bash)"
+done
+_assert_answer "knob=1, no permission_mode" '{}' 1 "$(_payload - Bash)"
+_assert_answer "knob=1, no tool_name" '{}' 1 \
+  '{"hook_event_name":"PermissionRequest","permission_mode":"bypassPermissions"}'
+_assert_answer "knob=1, non-string permission_mode" '{}' 1 \
+  '{"hook_event_name":"PermissionRequest","tool_name":"Bash","permission_mode":["bypassPermissions"]}'
+
+for tool in AskUserQuestion Write bash BashOutput MonitorX; do
+  _assert_answer "knob=1, bypass $tool" '{}' 1 "$(_payload bypassPermissions "$tool")"
+done
+_assert_answer "knob=1, default Monitor" '{}' 1 "$(_payload default Monitor)"
+
+_assert_answer "knob=1, malformed payload" '{}' 1 '{"permission_mode":"bypassPermissions",'
+_assert_answer "knob=1, trailing garbage" '{}' 1 "$BYPASS_BASH }}garbage"
+_assert_answer "knob=1, a second payload after a declined one" '{}' 1 \
+  "$(_payload default Bash) $BYPASS_BASH"
+_assert_answer "knob=1, top-level array" '{}' 1 "[$BYPASS_BASH]"
+_assert_answer "knob=1, empty payload" '{}' 1 ''
+
+# Without a working jq the extension cannot read the payload, so it leaves
+# the prompt alone.
+NO_JQ_BIN=$(_tmpdir)
+printf '#!/bin/sh\nexit 127\n' >"$NO_JQ_BIN/jq"
+chmod +x "$NO_JQ_BIN/jq"
+PATH="$NO_JQ_BIN:$PATH" _assert_answer "knob=1, no jq" '{}' 1 "$BYPASS_BASH"
+
+# The Claude check lives in the -claude extension; other agents get none.
+AGENT=codex
+_assert_answer "codex, bypass Bash" '{}' 1 "$BYPASS_BASH"
+AGENT=claude
+
+echo ""
+echo "=== permission-request: extensions ==="
+
+EXT_DIR=$(_tmpdir)
+_install_hook_fixture "$EXT_DIR" agent-hook-permission-request agent-hook-permission-request-claude
+HOOK="$EXT_DIR/bin/agent-hook-permission-request"
+
+# Any agent's extension can answer, but only while the knob is on.
+printf '_hook_allow_permission\n' >"$EXT_DIR/bin/agent-hook-permission-request-work"
+AGENT=codex
+_assert_answer "work extension, knob=1" "$ALLOW" 1 "$BYPASS_BASH"
+_assert_answer "work extension, knob unset" '{}' unset "$BYPASS_BASH"
+_assert_answer "work extension, knob 0" '{}' 0 "$BYPASS_BASH"
+AGENT=claude
+
+# A block withdraws the allow; it never denies.
+AGENTGUARD_TELEMETRY_DIR="$(_tmpdir)/telemetry"
+printf '_hook_block "extension says no"\n' >"$EXT_DIR/bin/agent-hook-permission-request-work"
+_assert_answer "blocked by extension" '{}' 1 "$BYPASS_BASH"
+_assert_contains "blocked by extension: reason on stderr" "extension says no" "$HOOK_STDERR"
+rec=$(_records)
+_assert_eq "blocked by extension: record has no decision" "false" "$(jq 'has("decision")' <<<"$rec")"
+_assert_contains "blocked by extension: record keeps the block" "extension says no" \
+  "$(jq -r '.blocked[]?' <<<"$rec")"
+HOOK="$BIN_DIR/agent-hook-permission-request"
+
+echo ""
+echo "=== permission-request: audit record ==="
+
+AGENTGUARD_TELEMETRY_DIR="$(_tmpdir)/telemetry"
+_run_permission 1 "$BYPASS_BASH"
+rec=$(_records)
+_assert_eq "approved: one hook record" "1" "$(jq -s length <<<"$rec")"
+_assert_eq "approved: record hook" "agent-hook-permission-request" "$(jq -r .hook <<<"$rec")"
+_assert_eq "approved: record decision" "allow" "$(jq -r .decision <<<"$rec")"
+_assert_eq "approved: record event" "PermissionRequest" "$(jq -r .event <<<"$rec")"
+_assert_eq "approved: record tool" "Bash" "$(jq -r .tool_name <<<"$rec")"
+show=$(env -u XDG_STATE_HOME HOME="$(_tmpdir)" "$BIN_DIR/agentguard-telemetry" show "$TEST_SID" 2>&1)
+_assert_contains "approved: telemetry show prints the decision" "decision: allow" "$show"
+
+AGENTGUARD_TELEMETRY_DIR="$(_tmpdir)/telemetry"
+_run_permission 1 "$(_payload default Bash)"
+_assert_eq "declined: record has no decision" "false" "$(jq 'has("decision")' <<<"$(_records)")"
+
+AGENTGUARD_TELEMETRY_DIR="$(_tmpdir)/telemetry"
+_run_permission 1 ''
+_assert_eq "no payload: record names the event" "PermissionRequest" "$(jq -r .event <<<"$(_records)")"
+
+# The knob gate matches the hook's file name, not its path: a guard hook run
+# from a checkout directory named after this hook must still block.
+# shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+_RUN_HOOK_ENV=(
+  -u AGENTGUARD_PERMISSION_REQUEST_ALLOW
+  AGENTGUARD_HOOK_SELF="/wt/agent-hook-permission-request-wt/bin/agent-hook-pre-bash"
+  AGENTGUARD_SESSION_ID="$TEST_SID" TMPDIR="$TEST_TMPDIR" AGENTGUARD_NAME="$AGENT"
+)
+_run_hook_env "$BIN_DIR/agent-hook-pre-bash" \
+  "$(jq -nc --arg sid "$TEST_SID" '{session_id: $sid, tool_name: "Bash", tool_input: {command: "rm -rf /"}}')"
+_assert_eq "gate: a guard under a same-named checkout dir still blocks" "2" "$HOOK_EXIT"
+unset _RUN_HOOK_ENV
+
+_test_summary

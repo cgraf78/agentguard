@@ -10,6 +10,8 @@ root="${test_dir%/test}"
 runtime_shell_files=(
   "$root/bin/agent-hook-compact"
   "$root/bin/agent-hook-notification"
+  "$root/bin/agent-hook-permission-request"
+  "$root/bin/agent-hook-permission-request-claude"
   "$root/bin/agent-hook-post-bash"
   "$root/bin/agent-hook-post-edit"
   "$root/bin/agent-hook-post-mcp"

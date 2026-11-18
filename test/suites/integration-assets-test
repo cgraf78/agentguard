@@ -39,6 +39,10 @@ expected = {
         "SessionEnd": [(None, "agent-hook-session-end", 30)],
         "SessionStart": [(None, "agent-hook-session-start", 10)],
         "PreCompact": [(None, "agent-hook-compact", 10)],
+        # Opt-in bypass-mode prompt answers. A bare `Bash` matcher also runs
+        # on Monitor commands, but Claude ignores its allow there, so Monitor
+        # must be named.
+        "PermissionRequest": [("Bash|Monitor", "agent-hook-permission-request", 10)],
         "Stop": [("", "agent-hook-stop", None)],
         "UserPromptSubmit": [("", "agent-hook-prompt-submit", 10)],
     },
@@ -134,7 +138,6 @@ TELEMETRY = "agent-hook-telemetry"
 # out everywhere for volume.
 telemetry_only_events = {
     "claude": [
-        "PermissionRequest",
         "PermissionDenied",
         "SubagentStart",
         "SubagentStop",

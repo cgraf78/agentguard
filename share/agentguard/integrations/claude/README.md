@@ -3,7 +3,9 @@
 `hooks.json` is AgentGuard's complete hook-only Claude Code settings fragment.
 It owns Claude's lifecycle events, tool matchers, timeout budgets, hook commands,
 and session-identity wiring. It intentionally contains no permission rules or
-other user settings.
+other user settings. Its `agent-hook-permission-request` group answers
+bypass-mode Bash and Monitor prompts only when the user opts in with
+`AGENTGUARD_PERMISSION_REQUEST_ALLOW`; otherwise it does nothing.
 
 Consume it with `../_shared/reconcile-hooks.jq` as one provider-owned generation,
 then put personal or machine policy in a separate later layer. Reconciliation

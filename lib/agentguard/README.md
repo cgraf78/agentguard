@@ -238,7 +238,9 @@ Extension scripts are sourced, not executed:
   the hook's filename, so any runtime identity can have its own extension.
 - `-work` files are environment-specific overlays.
 
-Each hook emits one JSON response through `_hook_finish`.
+Each hook emits one JSON response through `_hook_finish`, except that a
+switched-off `agent-hook-permission-request` prints `{}` from the helpers'
+knob gate before anything else runs.
 
 ## Shared Helpers
 
@@ -268,7 +270,8 @@ Each hook emits one JSON response through `_hook_finish`.
   read as not working
 - target directory setup: `_hook_cd_to_target`
 - extension loading: `_hook_source_agent`, `_hook_source_work`
-- final JSON emission: `_hook_finish`
+- final JSON emission: `_hook_finish`; `_hook_allow_permission` makes it
+  answer a PermissionRequest with allow (unless the hook also blocked)
 
 The per-session state directory is computed once at source time and refreshed
 after hook JSON is read. A neutral `AGENTGUARD_SESSION_ID` wins when a launcher

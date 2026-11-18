@@ -22,6 +22,8 @@ _assert_contains "installer: wrapper identifies the shared generator" \
 commands=(
   agent-hook-compact
   agent-hook-notification
+  agent-hook-permission-request
+  agent-hook-permission-request-claude
   agent-hook-post-bash
   agent-hook-post-edit
   agent-hook-post-mcp

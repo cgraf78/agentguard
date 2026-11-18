@@ -30,8 +30,9 @@ different configuration-management strategies.
 
 The declarative fragments deliberately contain no permissions, allowlists,
 models, MCP servers, UI preferences, paths, hostnames, or environment-specific
-policy. Keeping them policy-free is what makes the same assets safe to consume
-outside the repository that first needed them.
+policy; a hook may answer permission prompts only behind an opt-in knob.
+Keeping them policy-free is what makes the same assets safe to consume outside
+the repository that first needed them.
 
 The fragments remain native JSON or TOML instead of being generated from a
 lowest-common-denominator schema. These runtimes differ in event vocabulary,
