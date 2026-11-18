@@ -117,6 +117,12 @@ agentguard-telemetry show "$s" --json |
   jq 'select(.kind=="event" and .event=="PostToolUse" and .tool_use_id=="toolu_...")
     | .payload.tool_response'
 
+# Every permission prompt AgentGuard answered (AGENTGUARD_PERMISSION_REQUEST_ALLOW).
+# The PermissionRequest event record next to each one holds the command.
+agentguard-telemetry show all --json |
+  jq -c 'select(.kind=="hook" and .decision=="allow")
+    | {ts, agent, session_key, tool_name}'
+
 # Everything AgentGuard blocked or warned about, across all sessions
 agentguard-telemetry show all --json |
   jq -c 'select(.kind=="hook" and (.blocked or .warnings))
@@ -175,6 +181,7 @@ normal finish path.
 | `command` | hook | Shell command parsed by a Bash guard. |
 | `edit_files` | hook | Files parsed by an edit guard. |
 | `mcp_server` | hook | Server parsed by an MCP guard. |
+| `decision` | hook | Permission decision a PermissionRequest hook answered with (`allow`); omitted when it left the prompt to the user. |
 | `payload` | event | The raw host payload (parsed JSON, or `{"unparsed": "..."}`). |
 | `payload_truncated_chars` | event | Original payload length when truncated. |
 

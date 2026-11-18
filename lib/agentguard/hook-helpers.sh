@@ -59,6 +59,11 @@ _HOOK_STOP_HOLD_BUSY=''
 _HOOK_TELEMETRY_BLOCKS=''
 _HOOK_TELEMETRY_WARNINGS=''
 _HOOK_TELEMETRY_REMINDERS=''
+# Permission decision a PermissionRequest hook answered with (`allow`), for
+# the audit record; empty when it left the prompt to the user.
+_HOOK_TELEMETRY_DECISION=''
+# Set by _hook_allow_permission.
+_HOOK_PERMISSION_ALLOW=''
 # Set by _hook_finish once it has written the response, so the exit trap only
 # supplies one when a hook died before reaching it.
 _HOOK_EMITTED=''
@@ -230,6 +235,40 @@ _hook_fail_closed() {
   _hook_block "AgentGuard internal error: $1; refusing to run the tool call unguarded."
   _hook_finish
 }
+
+# The true spellings for a default-off knob.
+_hook_flag_enabled() {
+  case "${1:-}" in
+    1 | true | TRUE | yes | YES | on | ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The false spellings for a default-on knob. An unset or unrecognized value is
+# not "disabled", so the default holds.
+_hook_flag_disabled() {
+  case "${1:-}" in
+    0 | false | FALSE | no | NO | off | OFF) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# agent-hook-permission-request is opt-in as a whole, extensions included.
+# Switched off, it must leave no trace: answer with no decision before the
+# exit trap (and with it the audit record), stderr capture, or session state
+# exist, and before the rest of this library is even read. Match the file
+# name only: a `*/` pattern would also match a checkout directory named after
+# the hook and silence every other hook run from it, guards included.
+_hook_gate_name="${_HOOK_SELF:-$0}"
+case "${_hook_gate_name##*/}" in
+  agent-hook-permission-request*)
+    if ! _hook_flag_enabled "${AGENTGUARD_PERMISSION_REQUEST_ALLOW:-}"; then
+      printf '{}\n'
+      exit 0
+    fi
+    ;;
+esac
+unset _hook_gate_name
 
 case "${_HOOK_SELF:-$0}" in
   agent-hook-* | */agent-hook-*)
@@ -703,6 +742,12 @@ _hook_warn() {
   # agents. Warnings are behavioral steer, so carry them through the protocol
   # context too while preserving stderr for logs and human debugging.
   _hook_context "$message"
+}
+
+# Ask _hook_finish to answer a PermissionRequest with an allow decision. An
+# extension's _hook_block still withdraws it (see _hook_finish).
+_hook_allow_permission() {
+  _HOOK_PERMISSION_ALLOW=1
 }
 
 _hook_remind() {
@@ -1945,22 +1990,6 @@ _hook_pane_busy() {
     _hook_agent_name busy_agent
     [ "$busy_agent" != claude ] || _hook_team_busy root "$1" || true
   fi
-}
-
-_hook_flag_enabled() {
-  case "${1:-}" in
-    1 | true | TRUE | yes | YES | on | ON) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-# The false spellings for a default-on knob. An unset or unrecognized value is
-# not "disabled", so the default holds.
-_hook_flag_disabled() {
-  case "${1:-}" in
-    0 | false | FALSE | no | NO | off | OFF) return 0 ;;
-    *) return 1 ;;
-  esac
 }
 
 _hook_edit_churn_file() {
@@ -3940,6 +3969,7 @@ _HOOK_TELEMETRY_JQ='
       command: $f[4],
       edit_files: ($f[5] | split("\n") | map(select(. != ""))),
       mcp_server: $f[6],
+      decision: $decision,
       payload_truncated_chars: (if $truncated == "" or $kind != "event" then null else ($truncated | tonumber) end)
     }
   | with_entries(select(.value | nonempty))
@@ -4047,6 +4077,7 @@ _hook_telemetry_exit() {
       session-end*) event=SessionEnd ;;
       prompt-submit*) event=UserPromptSubmit ;;
       compact*) event=PreCompact ;;
+      permission-request*) event=PermissionRequest ;;
       stop*) event=Stop ;;
       notification*) event=Notification ;;
     esac
@@ -4137,6 +4168,7 @@ _hook_telemetry_exit() {
         --arg status "$status" \
         --arg duration "$duration" \
         --arg truncated "$truncated" \
+        --arg decision "$_HOOK_TELEMETRY_DECISION" \
         "$_HOOK_TELEMETRY_JQ" >"$tmp" &&
       mv -f "$tmp" "$dir/$stem.json"
   } 2>/dev/null
@@ -4239,6 +4271,7 @@ _hook_event_name() {
     agent-hook-stop*) _event_name="Stop" ;;
     agent-hook-compact*) _event_name="PreCompact" ;;
     agent-hook-notification*) _event_name="PermissionRequest" ;;
+    agent-hook-permission-request*) _event_name="PermissionRequest" ;;
     *) _event_name="UserPromptSubmit" ;;
   esac
   if [ -n "${1:-}" ]; then
@@ -4316,6 +4349,19 @@ _hook_finish() {
       # across runtimes and strict runners reject unexpected fields, so a
       # warning stays on stderr and telemetry and the response is empty.
       printf '{}\n'
+      exit 0
+      ;;
+    agent-hook-permission-request*)
+      # Claude ignores exit 2 on PermissionRequest (only a decision object
+      # decides), and the response carries no additionalContext. A block
+      # (from an extension) therefore withdraws the allow: the response
+      # carries no decision and the user still sees the prompt.
+      if [ -n "$_HOOK_PERMISSION_ALLOW" ] && [ -z "$_HOOK_BLOCKED" ]; then
+        _HOOK_TELEMETRY_DECISION=allow
+        printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}'
+      else
+        printf '{}\n'
+      fi
       exit 0
       ;;
   esac

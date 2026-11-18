@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# agent-hook-permission-request-claude — Claude-specific PermissionRequest
+# extension. Sourced by agent-hook-permission-request via _hook_source_agent,
+# which runs only when AGENTGUARD_PERMISSION_REQUEST_ALLOW is enabled.
+# In bypassPermissions mode Claude Code still asks before some Bash and
+# Monitor commands, such as an `rm` whose target Claude cannot rule out, and
+# its documented skip switch has no effect while any PermissionRequest hook is
+# registered. Allow Bash and Monitor requests in that mode only; every other
+# mode prompts on purpose.
+
+_agentguard_claude_permission_request() {
+  [ -n "${_HOOK_INPUT:-}" ] || return 0
+  # Anything but exactly one JSON object (no jq, malformed or trailing input,
+  # several values) leaves the prompt to the user; slurping makes jq reject
+  # all of those.
+  local verdict
+  verdict=$(printf '%s' "$_HOOK_INPUT" | jq -sr '
+    if length == 1 and (.[0] | type == "object" and
+      .permission_mode == "bypassPermissions" and
+      (.tool_name == "Bash" or .tool_name == "Monitor"))
+    then "allow" else empty end' 2>/dev/null) || return 0
+  [ "$verdict" = allow ] && _hook_allow_permission
+  return 0
+}
+
+_agentguard_claude_permission_request "$@"

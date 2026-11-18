@@ -1,0 +1,65 @@
+.TH AGENT-HOOK-PERMISSION-REQUEST 1 "2026-11-18" "agentguard" "User Commands"
+.SH NAME
+agent-hook-permission-request \- answer agent permission prompts when opted in
+.SH SYNOPSIS
+.B agent-hook-permission-request
+.SH DESCRIPTION
+.B agent-hook-permission-request
+handles the
+.B PermissionRequest
+event. It is opt-in as a whole: unless
+.B AGENTGUARD_PERMISSION_REQUEST_ALLOW
+is enabled it prints empty JSON and exits before reading its input, loading
+extensions, writing an audit record, or creating session state.
+.PP
+When enabled, it reads the payload, sources its extensions, and answers with
+an allow decision if one of them called
+.BR _hook_allow_permission ;
+otherwise the response is empty JSON and the agent prompts as usual. The base
+hook decides nothing itself; the requests a runtime may answer are its
+extension's rule, such as
+.BR agent-hook-permission-request-claude (1).
+When another PermissionRequest hook denies the same request, the deny wins.
+.SH ENVIRONMENT
+.TP
+.B AGENTGUARD_PERMISSION_REQUEST_ALLOW
+Set to
+.B 1
+to let the hook and its extensions answer permission requests. Read from the
+hook/launcher environment, including a Claude Code settings-file
+.B env
+block; an
+.B export
+in an agent tool shell cannot reach hook processes, but an agent session it
+starts inherits the value.
+.SH EXTENSIONS
+AgentGuard sources
+.I agent-hook-permission-request-<agent>
+and
+.I agent-hook-permission-request-work
+only while the knob is enabled. An extension calls
+.B _hook_allow_permission
+to answer allow, or
+.B _hook_block
+to withdraw an allow; a block never turns the answer into a deny.
+.SH TELEMETRY
+While enabled, each run writes one hook record whose
+.B decision
+field is
+.B allow
+when it answered; see
+.BR agentguard-telemetry (1).
+.SH EXIT STATUS
+.TP
+.B 0
+Always, unless the install is broken (see 2), whether or not the hook
+answered.
+.TP
+.B 2
+A broken install: the hook cannot find its path or load the AgentGuard
+helpers. Claude ignores exit status 2 on this event and shows the prompt as
+usual; only a printed decision counts.
+.SH SEE ALSO
+.BR agent-hook-permission-request-claude (1),
+.BR agent-hook-telemetry (1),
+.BR agentguard-telemetry (1)

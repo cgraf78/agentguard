@@ -39,6 +39,7 @@ is opinionated, so read it before you install.
 | **Remind** | review the diff before committing; commit-message format and public-repo leak checks on `git commit`; after a push or `gh pr create`, the pull request is not done until its checks pass (suggests [`git pr-watch`](https://github.com/cgraf78/git-tools) when it is installed) |
 | **After edits** | format and lint edited files with sley and return findings to the agent (`AGENTGUARD_POST_EDIT_LINT=0` turns lint off) |
 | **Record** | every hook event in the [audit log](#audit-telemetry) (`AGENTGUARD_TELEMETRY=0` turns it off) |
+| **Approve (opt-in)** | Claude Code's Bash and Monitor permission prompts in a `bypassPermissions` session, such as one for an `rm` whose target Claude cannot rule out (`AGENTGUARD_PERMISSION_REQUEST_ALLOW=1` turns it on) |
 
 [Base Hook Policy](#base-hook-policy) has the full rules. Your own policy goes
 in hook extensions beside the installed hooks; see [`examples/`](examples/).
@@ -221,10 +222,10 @@ JSON-aware session-state layer in `hook-helpers.sh`.
 
 ## Audit Telemetry
 
-Every hook invocation is recorded, so you can audit exactly what an agent
+Every hook event is recorded, so you can audit exactly what an agent
 session did: each prompt, every tool call with its full input and output,
 every guard decision, and session lifecycle events. Records are owner-only
-JSON files, one per hook invocation, under:
+JSON files, one per recorded hook run, under:
 
 ```text
 ${XDG_STATE_HOME:-~/.local/state}/agentguard/telemetry/sessions/<agent>/<session-key>/
@@ -260,9 +261,10 @@ AgentGuard publishes native, policy-free integration assets:
 The declarative fragments contain only AgentGuard hook activation: native event
 names and matchers, timeouts, runtime identity, session identity, and hook
 commands. They intentionally exclude permissions, models, MCP servers, UI
-settings, and machine policy. Consumers choose whether to enable an integration
-and remain responsible for merging or installing the asset without overwriting
-unmanaged configuration. AgentGuard never mutates an agent's configuration.
+settings, and machine policy; a hook may answer permission prompts only behind
+an opt-in knob. Consumers choose whether to enable an integration and remain
+responsible for merging or installing the asset without overwriting unmanaged
+configuration. AgentGuard never mutates an agent's configuration.
 Declarative consumers should apply the shared reconciler so the current
 provider generation can replace changed commands and retire events while
 preserving user hooks and runtime-owned state.
@@ -504,7 +506,9 @@ Extension scripts are sourced, not executed:
 - `-work` files are a second, site-local extension slot, for example for an
   employer's policy.
 
-Each hook emits one JSON response through `_hook_finish`.
+Each hook emits one JSON response through `_hook_finish`, except that a
+switched-off `agent-hook-permission-request` prints `{}` from the helpers'
+knob gate before anything else runs.
 
 ## Shared Helpers
 
@@ -533,7 +537,8 @@ Each hook emits one JSON response through `_hook_finish`.
   read as not working
 - target directory setup: `_hook_cd_to_target`
 - extension loading: `_hook_source_agent`, `_hook_source_work`
-- final JSON emission: `_hook_finish`
+- final JSON emission: `_hook_finish`; `_hook_allow_permission` makes it
+  answer a PermissionRequest with allow (unless the hook also blocked)
 
 The per-session state directory is computed once at source time and refreshed
 after hook JSON is read. A neutral `AGENTGUARD_SESSION_ID` wins when a launcher
@@ -710,6 +715,15 @@ To add a new managed agent runtime:
   sync extensions.
 - `agent-hook-compact` handles PreCompact: it tells Hive Memory the host is
   about to drop earlier context (see delivery tracking below).
+- `agent-hook-permission-request` (PermissionRequest) does nothing, not even
+  an audit record, unless `AGENTGUARD_PERMISSION_REQUEST_ALLOW=1` is set in
+  the hook/launcher environment. Then, in a Claude Code `bypassPermissions`
+  session, it allows any Bash or Monitor prompt, such as one for an `rm`
+  whose target Claude cannot rule out, which headless and nested sessions
+  would otherwise deny. `agent-hook-pre-bash` still blocks the destructive
+  `rm -rf` targets listed under Default Policy (see agent-hook-pre-bash(1)).
+  See `agent-hook-permission-request(1)` and
+  `agent-hook-permission-request-claude(1)`.
 - `agent-hook-prompt-submit` lets `hm hook prompt-submit` handle memory-intent
   reminders and context refresh decisions, then resets prompt-cycle state used
   by once-per-prompt guidance. The hook passes prompt text and path facts; it

@@ -1,0 +1,64 @@
+.TH AGENT-HOOK-PERMISSION-REQUEST-CLAUDE 1 "2026-11-18" "agentguard" "User Commands"
+.SH NAME
+agent-hook-permission-request-claude \- allow Claude Code bypass-mode Bash and Monitor prompts
+.SH SYNOPSIS
+.B agent-hook-permission-request-claude
+.SH DESCRIPTION
+.B agent-hook-permission-request-claude
+is sourced by
+.BR agent-hook-permission-request (1)
+when the active runtime is Claude and
+.B AGENTGUARD_PERMISSION_REQUEST_ALLOW
+is enabled. It is not a standalone hook adapter and should not be configured
+directly as the PermissionRequest command.
+.PP
+It calls
+.B _hook_allow_permission
+when the payload is one JSON object whose
+.B permission_mode
+is exactly
+.B bypassPermissions
+and whose
+.B tool_name
+is exactly
+.B Bash
+or
+.BR Monitor .
+Anything else, including a payload that cannot be parsed, leaves the prompt to
+the user.
+.PP
+In that mode Claude Code still asks before some commands, such as an
+.B rm
+whose target Claude cannot rule out, and a headless
+.B claude \-p
+run, a nested session, or a teammate that nobody answers denies them. With the
+knob on, they run. The extension does not look at the command or at why Claude
+asked, so it answers any Bash or Monitor prompt raised in bypass mode,
+including one from an explicit
+.B ask
+permission rule.
+.B agent-hook-pre-bash
+still blocks the destructive
+.B rm -rf
+targets listed under Default Policy (see
+.BR agent-hook-pre-bash (1)).
+.PP
+Claude's permission-modes documentation states that its own
+.B CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS
+has no effect while a PermissionRequest hook with any matcher is registered
+(AgentGuard's telemetry recorder is one), in a session started from another
+session, or when set in a settings file's
+.B env
+block.
+.PP
+The Claude Code integration registers the hook with matcher
+.BR Bash|Monitor ;
+Monitor must be named for an allow to apply to Monitor commands.
+.SH EXIT STATUS
+.TP
+.B 0
+Always; the extension only decides whether to call
+.BR _hook_allow_permission .
+.SH SEE ALSO
+.BR agent-hook-permission-request (1),
+.BR agent-hook-pre-bash (1)

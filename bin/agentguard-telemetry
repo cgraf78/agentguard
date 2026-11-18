@@ -325,6 +325,7 @@ _TELEMETRY_TIMELINE_JQ='
         | if ($m | length) > 0 then $m | join(" | ")
           elif .command then "$ " + .command
           elif .edit_files then "files: " + (.edit_files | join(", "))
+          elif .decision then "decision: " + (.decision | tostring)
           else "" end
       else
         ($p.prompt // $p.userPrompt // $p.message // $p.reason

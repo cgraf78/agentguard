@@ -37,6 +37,16 @@
       {
         "hooks": [
           {
+            "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=claude AGENTGUARD_SESSION_ID=\"${CLAUDE_CODE_CURRENT_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}\" agent-hook-permission-request",
+            "timeout": 10,
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash|Monitor"
+      },
+      {
+        "hooks": [
+          {
             "command": "env -u BASH_ENV -u ENV AGENTGUARD_NAME=claude AGENTGUARD_SESSION_ID=\"${CLAUDE_CODE_CURRENT_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}\" agent-hook-telemetry",
             "timeout": 10,
             "type": "command"
