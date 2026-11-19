@@ -75,68 +75,70 @@ if _hook_read_input && [ -n "${_HOOK_INPUT:-}" ]; then
     ' 2>/dev/null
   ) || true
 fi
-case "$_notify_event:$_notify_type" in
-  PermissionRequest:* | *:permission_prompt | *:elicitation_dialog | *:elicitation_url_dialog | \
-    *:question_prompt | *:ToolPermission)
-    if [ -n "$_notify_child" ]; then
-      _hook_attention_actor _notify_actor "$_notify_child"
-    elif _hook_agent_name _notify_agent && [ "$_notify_agent" = claude ]; then
-      # Claude's permission notifications carry no agent_id, a subagent's
-      # included. A permission prompt follows its PermissionRequest, which
-      # agent-hook-telemetry recorded with the actor, by about 6 s. Without
-      # a fresh record (an elicitation has none) the actor is unknown and
-      # any actor's next tool or child end retires the mark.
-      _notify_actor=any
-      if [ "$_notify_type" = permission_prompt ]; then
-        _hook_attention_request_actor _notify_actor || _notify_actor=any
+if ! _hook_hm_backend; then
+  case "$_notify_event:$_notify_type" in
+    PermissionRequest:* | *:permission_prompt | *:elicitation_dialog | *:elicitation_url_dialog | \
+      *:question_prompt | *:ToolPermission)
+      if [ -n "$_notify_child" ]; then
+        _hook_attention_actor _notify_actor "$_notify_child"
+      elif _hook_agent_name _notify_agent && [ "$_notify_agent" = claude ]; then
+        # Claude's permission notifications carry no agent_id, a subagent's
+        # included. A permission prompt follows its PermissionRequest, which
+        # agent-hook-telemetry recorded with the actor, by about 6 s. Without
+        # a fresh record (an elicitation has none) the actor is unknown and
+        # any actor's next tool or child end retires the mark.
+        _notify_actor=any
+        if [ "$_notify_type" = permission_prompt ]; then
+          _hook_attention_request_actor _notify_actor || _notify_actor=any
+        fi
+      else
+        _hook_attention_payload_actor _notify_actor
       fi
-    else
-      _hook_attention_payload_actor _notify_actor
-    fi
-    # A permission prompt names no tool, but the same actor's fresh
-    # PermissionRequest record does (Claude and Muse). Questions get no
-    # fingerprint, so only the other clearers retire them; elicitations
-    # record themselves below.
-    if [ "$_notify_type" = permission_prompt ] &&
-      _hook_attention_request_actor _notify_request_actor _notify_request_fp &&
-      [ "$_notify_request_actor" = "$_notify_actor" ]; then
-      _notify_fp="$_notify_request_fp"
-    fi
-    [ "$_notify_actor" != any ] || _notify_fp=''
-    # An elicitation's own answer notification retires it (below), so its
-    # raise records the elicitation in place of a tool fingerprint.
-    case "$_notify_type" in
-      elicitation_dialog | elicitation_url_dialog) _notify_fp="$_HOOK_ATTENTION_ELICITATION" ;;
-    esac
-    _hook_attention_raise_fenced waiting "$_notify_actor" "$_notify_fp"
-    ;;
-  *:elicitation_response | *:elicitation_complete)
-    # Claude sends elicitation_response once the user answers, declines or
-    # cancels an MCP elicitation (after any ElicitationResult hook), and
-    # elicitation_complete when a URL elicitation's server confirms it. The
-    # agent works on, so neither rings; each clears only the waiting mark an
-    # elicitation raised, never a permission prompt raised since.
-    if [ -n "$_notify_child" ]; then
-      _hook_attention_actor _notify_actor "$_notify_child"
-    elif _hook_agent_name _notify_agent && [ "$_notify_agent" = claude ]; then
-      _notify_actor=any
-    else
-      _hook_attention_payload_actor _notify_actor
-    fi
-    _hook_attention_elicitation_done "$_notify_actor"
-    ;;
-  *:idle_prompt)
-    if _hook_activity_is_foreground; then
-      _hook_attention_clear waiting
-      _hook_attention_claim_ring "done" || true
-    fi
-    ;;
-  *:auth_success) ;;
-  *)
-    # --owner: an agent this one launched cannot mark this agent's pane.
-    _hook_attention_notify "done" || true
-    ;;
-esac
+      # A permission prompt names no tool, but the same actor's fresh
+      # PermissionRequest record does (Claude and Muse). Questions get no
+      # fingerprint, so only the other clearers retire them; elicitations
+      # record themselves below.
+      if [ "$_notify_type" = permission_prompt ] &&
+        _hook_attention_request_actor _notify_request_actor _notify_request_fp &&
+        [ "$_notify_request_actor" = "$_notify_actor" ]; then
+        _notify_fp="$_notify_request_fp"
+      fi
+      [ "$_notify_actor" != any ] || _notify_fp=''
+      # An elicitation's own answer notification retires it (below), so its
+      # raise records the elicitation in place of a tool fingerprint.
+      case "$_notify_type" in
+        elicitation_dialog | elicitation_url_dialog) _notify_fp="$_HOOK_ATTENTION_ELICITATION" ;;
+      esac
+      _hook_attention_raise_fenced waiting "$_notify_actor" "$_notify_fp"
+      ;;
+    *:elicitation_response | *:elicitation_complete)
+      # Claude sends elicitation_response once the user answers, declines or
+      # cancels an MCP elicitation (after any ElicitationResult hook), and
+      # elicitation_complete when a URL elicitation's server confirms it. The
+      # agent works on, so neither rings; each clears only the waiting mark an
+      # elicitation raised, never a permission prompt raised since.
+      if [ -n "$_notify_child" ]; then
+        _hook_attention_actor _notify_actor "$_notify_child"
+      elif _hook_agent_name _notify_agent && [ "$_notify_agent" = claude ]; then
+        _notify_actor=any
+      else
+        _hook_attention_payload_actor _notify_actor
+      fi
+      _hook_attention_elicitation_done "$_notify_actor"
+      ;;
+    *:idle_prompt)
+      if _hook_activity_is_foreground; then
+        _hook_attention_clear waiting
+        _hook_attention_claim_ring "done" || true
+      fi
+      ;;
+    *:auth_success) ;;
+    *)
+      # --owner: an agent this one launched cannot mark this agent's pane.
+      _hook_attention_notify "done" || true
+      ;;
+  esac
+fi
 
 _hook_source_extensions
 _hook_finish

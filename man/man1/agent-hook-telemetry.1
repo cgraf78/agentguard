@@ -25,6 +25,12 @@ entry point writes a companion
 record with its decision (exit status, block and warning messages, injected
 context) but not the payload.
 .PP
+Hive Memory backend jobs set
+.BR HIVE_MEMORY_HOOK_ACTIVE=1 .
+Their events are still recorded, but do not change busy marks, waiting or
+blocked attention, permission-request records, or child routing state, for
+any agent type.
+.PP
 When the payload looks like a session start, a background pass deletes
 sessions idle for longer than
 .B AGENTGUARD_TELEMETRY_RETENTION_DAYS

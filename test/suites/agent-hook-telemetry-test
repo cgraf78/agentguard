@@ -77,6 +77,27 @@ else
 fi
 
 echo ""
+echo "=== memory backends: observation and safety stay enabled ==="
+
+for agent in codex claude gemini grok muse opencode unknown; do
+  _fresh_root
+  _RUN_HOOK_ENV=(AGENTGUARD_SESSION_ID="$TEST_SID" TMPDIR="$TEST_TMPDIR"
+    AGENTGUARD_NAME="$agent" HIVE_MEMORY_HOOK_ACTIVE=1)
+  _run_hook_env "$TELEMETRY_HOOK" "$PRE_TOOL"
+  # Identity precedence differs by host: inspect the one record in this
+  # fresh audit root rather than guessing its storage key from the adapter.
+  backend_record=$(cat "$AGENTGUARD_TELEMETRY_DIR"/sessions/*/*/*.json)
+  _assert_eq "backend ($agent): telemetry exits normally" 0 "$HOOK_EXIT"
+  _assert_eq "backend ($agent): telemetry still records the event" PreToolUse \
+    "$(jq -r .event <<<"$backend_record")"
+  _assert_eq "backend ($agent): telemetry retains full payload" \
+    "$(jq -cS . <<<"$PRE_TOOL")" "$(jq -cS .payload <<<"$backend_record")"
+  _run_hook_env "$PRE_BASH" \
+    '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}'
+  _assert_eq "backend ($agent): destructive-command enforcement remains active" 2 "$HOOK_EXIT"
+done
+
+echo ""
 echo "=== telemetry hook: payload edge cases ==="
 
 _fresh_root
