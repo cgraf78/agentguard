@@ -103,6 +103,15 @@ that rejects
 .B \-\-kind
 (exit status 64) is called again without it, which rings and sets a plain
 pending mark, and no flag is recorded.
+.SH ENVIRONMENT
+.TP
+.B HIVE_MEMORY_HOOK_ACTIVE
+When exactly
+.BR 1 ,
+identifies a Hive Memory backend job. Its notifications neither ring nor raise
+or clear attention marks, regardless of agent type or payload validity.
+Extensions and telemetry still run. Otherwise the usual notification rules
+apply, including interactive child permission prompts.
 .SH EXIT STATUS
 .TP
 .B 0

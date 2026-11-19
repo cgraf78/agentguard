@@ -59,7 +59,7 @@ _hook_read_input || true
 # A message from a teammate can start a foreground turn without a prompt
 # submit. PreToolUse is the first universal hook that can observe that work;
 # the pane helper caches the turn identity to avoid touching tmux per tool.
-if command -v term-pane-mark >/dev/null 2>&1; then
+if ! _hook_hm_backend && command -v term-pane-mark >/dev/null 2>&1; then
   case "${_HOOK_INPUT:-}" in
     *PreToolUse* | *SubagentStart* | *SubagentStop* | *StopFailure* | *idle_prompt* | *PermissionRequest*)
       _busy_event=$(printf '%s' "$_HOOK_INPUT" | jq -r '.hook_event_name // .hookEventName // empty' 2>/dev/null)
@@ -176,7 +176,7 @@ fi
 # StopFailure and Interrupt end a turn without a Stop callback, and this is the
 # only hook wired to them, so it also ends the agent's busy pane mark. That is
 # a terminal display effect, not a guard, so the observe-only contract holds.
-if _hook_turn_aborted; then
+if ! _hook_hm_backend && _hook_turn_aborted; then
   if [ "${AGENTGUARD_NAME:-}" = muse ]; then
     # The killed turn's children deliver no SubagentStop; retire their
     # tracking first, or the stale veto blocks this very clear.

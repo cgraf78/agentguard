@@ -1188,6 +1188,7 @@ _hook_turn_aborted() {
 # kind. An older tmux-tools rejects --kind with 64 before ringing, so retry
 # once without it: the bell and a plain pending mark still land, as before.
 _hook_attention_notify() {
+  _hook_hm_backend && return 1
   local status=0
   term-notify-sound --owner "$PPID" --kind "$1" >/dev/null 2>&1 || status=$?
   [ "$status" = 64 ] || return "$status"
@@ -1639,6 +1640,7 @@ _hook_muse_child_reap() {
 # for state dirs owned by a child (sticky owner entry present), where the
 # marker still routes follow-ups.
 _hook_muse_child_reap_turn() {
+  _hook_hm_backend && return 0
   local _muse_child_prompt_session='' _muse_child_stale=''
   [ "${AGENTGUARD_NAME:-}" = muse ] || return 0
   _hook_hm_read_input
@@ -1672,6 +1674,14 @@ _hook_muse_child_reap_turn() {
   _hook_team_busy root end || true
 }
 
+# Hive Memory marks every backend CLI, regardless of vendor or operation, to
+# prevent recursive memory hooks. Those jobs can inherit the user's pane and
+# session identity, but must neither ring nor change that session's attention.
+# Do not skip safety hooks, telemetry, or extensions: this is display admission.
+_hook_hm_backend() {
+  [ "${HIVE_MEMORY_HOOK_ACTIVE:-0}" = 1 ]
+}
+
 # Return whether this lifecycle event belongs to foreground work. Busy marks,
 # notification settlement, and prompt rearming must share this admission rule.
 # Codex runs background agents (memory consolidation, task-title
@@ -1681,6 +1691,7 @@ _hook_muse_child_reap_turn() {
 # The cost is that `codex exec --ephemeral` run directly in a pane, also
 # transcript-less, is not marked either.
 _hook_activity_is_foreground() {
+  _hook_hm_backend && return 1
   case "$_HOOK_ACTIVITY_FOREGROUND" in 1) return 0 ;; 0) return 1 ;; esac
   _HOOK_ACTIVITY_FOREGROUND=0
   local _busy_agent_name
@@ -2944,7 +2955,7 @@ _hook_hm_available() {
   # `hm hook` may run lower-level `hm` maintenance commands. If those commands
   # themselves trigger agent hooks, skip here so a refresh/render cycle cannot
   # recursively call back into Hive Memory.
-  [ "${HIVE_MEMORY_HOOK_ACTIVE:-0}" != "1" ] || return 1
+  _hook_hm_backend && return 1
   command -v hm >/dev/null 2>&1 || return 1
   _hook_hm_resolve_config || return 1
   [ -n "$_HOOK_HM_CONFIG_PATH" ] || return 1

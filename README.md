@@ -358,6 +358,13 @@ clear it independently (both commands come from
 `claude-templates` enables a Claude-specific maintenance hook when that
 command is installed.
 
+Hive Memory's backend CLI jobs set `HIVE_MEMORY_HOOK_ACTIVE=1`. For every
+agent type, these jobs neither ring nor change terminal attention, even when
+they inherit the user's pane or session ID. They also leave the parent
+session's startup state intact. Safety guards, telemetry, and extensions
+still run; ordinary interactive agents and their child notifications retain
+their usual behavior when the marker is unset or differs from `1`.
+
 When the host supplies session and turn IDs, busy marks carry a length-prefixed
 session/turn token so a delayed Stop cannot clear newer work. The foreground-terminal
 ownership check remains mandatory. Codex's shared app-server executes hooks

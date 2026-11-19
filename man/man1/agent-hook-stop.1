@@ -88,6 +88,13 @@ its bell to the next idle notification (see
 .BR agent-hook-notification (1)).
 .SH ENVIRONMENT
 .TP
+.B HIVE_MEMORY_HOOK_ACTIVE
+When exactly
+.BR 1 ,
+identifies a Hive Memory backend job. Across all agent types, its hooks neither
+ring nor change terminal attention, even with an inherited pane or session ID.
+Safety guards, telemetry, and extensions still run.
+.TP
 .B AGENTGUARD_STOP_BLOCK_ENDS_TURN
 Set to
 .B 1

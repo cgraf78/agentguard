@@ -12,7 +12,7 @@ AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/
 
 ATT_DIR=$(_tmpdir)
 _install_hook_fixture "$ATT_DIR" agent-hook-notification agent-hook-telemetry \
-  agent-hook-stop agent-hook-prompt-submit agent-hook-session-end
+  agent-hook-stop agent-hook-prompt-submit agent-hook-session-end agent-hook-session-start
 
 # term-notify-sound: ATT_LEGACY_KIND=1 behaves like a release without --kind
 # (usage error 64 before ringing). Each call also records whether the flag
@@ -911,5 +911,113 @@ _case
 _hook agent-hook-notification codex "$(codex_payload A '{hook_event_name:"PermissionRequest"}')"
 _assert_eq "tagged: a session with no recorded turn still rings waiting" \
   "--owner $(_owner) --kind waiting flag=absent" "$(_notify_calls)"
+
+echo ""
+echo "=== attention: Hive Memory backends never own terminal attention ==="
+
+# Attention suppression must leave both extension axes running.
+printf '%s\n' \
+  'if [ "${HIVE_MEMORY_HOOK_ACTIVE:-0}" = 1 ]; then _hook_attention_raise waiting root; fi' \
+  'printf "work\n" >>"$ATT_LOG.extension"' \
+  >"$ATT_DIR/bin/agent-hook-stop-work"
+
+# A backend can inherit the foreground session as well as its pane. Exercise
+# the public hooks with that collision, not just the low-level bell helper.
+for agent in codex claude gemini grok muse opencode unknown; do
+  extension_agent=$agent
+  [ "$agent" != unknown ] || extension_agent=agent
+  printf '%s\n' 'printf "agent\n" >>"$ATT_LOG.extension"' \
+    >"$ATT_DIR/bin/agent-hook-stop-$extension_agent"
+  # A backend with its own session must be silent too. In particular, don't
+  # let a seeded Muse child veto hide a missing backend admission check.
+  for spec in \
+    'agent-hook-stop|{hook_event_name:"Stop"}' \
+    'agent-hook-telemetry|{hook_event_name:"StopFailure"}' \
+    'agent-hook-notification|{notification_type:"ToolPermission"}'; do
+    _case
+    _hook agent-hook-prompt-submit "$agent" \
+      "$(_payload '{prompt:"Classify.",transcript_path:"/tmp/backend.jsonl"}')" \
+      HIVE_MEMORY_HOOK_ACTIVE=1
+    _hook "${spec%%|*}" "$agent" \
+      "$(_payload "{transcript_path:\"/tmp/backend.jsonl\"} + (${spec#*|})")" \
+      HIVE_MEMORY_HOOK_ACTIVE=1
+    _assert_eq "fresh backend ($agent ${spec#*|}): never rings" "" "$(_notify_calls)"
+    _assert_file_missing "fresh backend ($agent): never creates sticky attention" "$ATT_FLAG"
+    if [ "${spec%%|*}" = agent-hook-stop ]; then
+      _assert_file_content "backend ($agent): extensions still execute in order" \
+        $'agent\nwork' "$ATT_LOG.extension"
+    fi
+  done
+  for payload in '' 'not-json' '{'; do
+    _case
+    _hook agent-hook-notification "$agent" "$payload" HIVE_MEMORY_HOOK_ACTIVE=1
+    _assert_eq "backend ($agent invalid/absent payload): never rings" "" "$(_notify_calls)"
+  done
+  _case
+  _hook agent-hook-prompt-submit "$agent" \
+    "$(_payload '{prompt:"Work.",prompt_id:"parent",transcript_path:"/tmp/parent.jsonl"}')" \
+    HIVE_MEMORY_HOOK_ACTIVE=0
+  : >"$ATT_LOG"
+  _seed waiting any
+  state_dir=${ATT_FLAG%/*}
+  mkdir -p "$state_dir/prompt-cycle" "$state_dir/muse-child"
+  printf 'parent\n' >"$state_dir/prompt-cycle/sentinel"
+  printf 'parent\n' >"$state_dir/attention-request"
+  printf 'parent\n' >"$state_dir/edit-churn-bypass"
+  printf 'any elicitation\n' >"$state_dir/attention-tool"
+  printf 'child\n' >"$state_dir/muse-child/child.kid"
+  : >"$state_dir/muse-child-session"
+
+  for spec in \
+    'agent-hook-session-start|{hook_event_name:"SessionStart"}' \
+    'agent-hook-prompt-submit|{prompt:"Classify.",prompt_id:"backend"}' \
+    'agent-hook-stop|{hook_event_name:"Stop"}' \
+    'agent-hook-notification|{notification_type:"agent_message"}' \
+    'agent-hook-notification|{notification_type:"permission_prompt"}' \
+    'agent-hook-notification|{hook_event_name:"PermissionRequest",agent_id:"kid"}' \
+    'agent-hook-notification|{notification_type:"idle_prompt"}' \
+    'agent-hook-notification|{notification_type:"elicitation_response"}' \
+    'agent-hook-telemetry|{hook_event_name:"PreToolUse",tool_name:"Read"}' \
+    'agent-hook-telemetry|{hook_event_name:"PermissionRequest",tool_name:"Bash"}' \
+    'agent-hook-telemetry|{hook_event_name:"SubagentStart",agent_id:"kid"}' \
+    'agent-hook-telemetry|{hook_event_name:"SubagentStop",agent_id:"kid"}' \
+    'agent-hook-telemetry|{hook_event_name:"StopFailure"}' \
+    'agent-hook-telemetry|{hook_event_name:"Interrupt"}' \
+    'agent-hook-session-end|{hook_event_name:"SessionEnd"}'; do
+    _hook "${spec%%|*}" "$agent" \
+      "$(_payload "{transcript_path:\"/tmp/backend.jsonl\"} + (${spec#*|})")" \
+      HIVE_MEMORY_HOOK_ACTIVE=1
+    _assert_eq "backend ($agent ${spec%%|*}): exits normally" 0 "$?"
+    _assert_eq "backend ($agent ${spec#*|}): never rings" "" "$(_notify_calls)"
+    _assert_eq "backend ($agent ${spec#*|}): leaves pane marks alone" "" "$(cat "$ATT_LOG")"
+    _assert_eq "backend ($agent ${spec#*|}): preserves parent waiting" "waiting any" "$(_flag)"
+    _assert_file_content "backend ($agent): preserves prompt cycle" parent "$state_dir/prompt-cycle/sentinel"
+    _assert_file_content "backend ($agent): preserves permission request" parent "$state_dir/attention-request"
+    _assert_file_content "backend ($agent): preserves parent's bypass" parent "$state_dir/edit-churn-bypass"
+    _assert_file_content "backend ($agent): preserves elicitation" "any elicitation" "$state_dir/attention-tool"
+    _assert_file_content "backend ($agent): preserves Muse children" child "$state_dir/muse-child/child.kid"
+  done
+
+  # Suppression must not spill into ordinary work, including child prompts.
+  for active in 0 unset; do
+    active_env=(HIVE_MEMORY_HOOK_ACTIVE=0)
+    [ "$active" != unset ] || active_env=(-u HIVE_MEMORY_HOOK_ACTIVE)
+    _case
+    _hook agent-hook-notification "$agent" \
+      "$(_payload '{hook_event_name:"PermissionRequest",agent_id:"kid",transcript_path:"/tmp/child.jsonl"}')" \
+      "${active_env[@]}"
+    _assert_eq "interactive child ($agent flag=$active): still rings waiting" \
+      "--owner $(_owner) --kind waiting flag=absent" "$(_notify_calls)"
+    _case
+    _hook agent-hook-prompt-submit "$agent" \
+      "$(_payload '{prompt:"Work.",transcript_path:"/tmp/parent.jsonl"}')" \
+      "${active_env[@]}"
+    _hook agent-hook-stop "$agent" \
+      "$(_payload '{hook_event_name:"Stop",transcript_path:"/tmp/parent.jsonl"}')" \
+      "${active_env[@]}"
+    _assert_eq "interactive Stop ($agent flag=$active): still rings done" \
+      "--owner $(_owner) --kind done flag=absent" "$(_notify_calls)"
+  done
+done
 
 _test_summary

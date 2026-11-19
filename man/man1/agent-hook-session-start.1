@@ -35,6 +35,13 @@ Every start also removes the session's edit-churn bypass marker (see
 .BR agentguard-churn-bypass (1))
 from every state root, so a reused session key never inherits a
 previous session's bypass.
+.PP
+Hive Memory backend jobs set
+.BR HIVE_MEMORY_HOOK_ACTIVE=1 .
+Their startup leaves existing edit-churn bypass and Muse child tracking
+intact: an inherited session key belongs to the live parent, not a stale
+session being restarted. Safety checks, extensions, telemetry, and ordinary
+state retention still run.
 .SH ENVIRONMENT
 .TP
 .B AGENTGUARD_HIVE_MEMORY_HOOKS

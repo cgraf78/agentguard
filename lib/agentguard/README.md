@@ -147,6 +147,13 @@ clear it early (both commands come from
 `claude-templates` enables a Claude-specific maintenance hook when that
 command is installed.
 
+Hive Memory's backend CLI jobs set `HIVE_MEMORY_HOOK_ACTIVE=1`. For every
+agent type, these jobs neither ring nor change terminal attention, even when
+they inherit the user's pane or session ID. They also leave the parent
+session's startup state intact. Safety guards, telemetry, and extensions
+still run; ordinary interactive agents and their child notifications retain
+their usual behavior when the marker is unset or differs from `1`.
+
 Notifications pass tmux-tools the kind of attention: `done` for a ringing Stop
 and unclassified notifications, `waiting` for permission prompts and questions
 (Notification `permission_prompt`, `elicitation_dialog` or
