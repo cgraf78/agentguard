@@ -393,11 +393,7 @@ class NativeRunnerTest(unittest.TestCase):
 
         def trace(frame, event, _arg):
             nonlocal fired
-            if (
-                event == "line"
-                and frame.f_code is module.Runner.replay_log.__code__
-                and not fired
-            ):
+            if event == "line" and frame.f_code is module.Runner.replay_log.__code__ and not fired:
                 fired = True
                 sys.settrace(None)
                 runner.interrupt(signal.SIGTERM, None)
@@ -643,9 +639,9 @@ class NativeRunnerTest(unittest.TestCase):
             self.assertTrue(ready, "runner did not begin replay")
             self.assertEqual(runner.stdout.read(1), b"x")
             runner.terminate()
-            # The exit takes tens of milliseconds even on one contended CPU;
-            # without the interrupt it blocks forever on the full pipe. A 2 s
-            # bound still failed once on a stalled CI VM, so allow 10 s.
+            # A prompt exit takes well under a second; the generous bound only
+            # keeps a loaded CI host from failing a runner that does respond.
+            # Without the polled replay it blocks forever on the full pipe.
             try:
                 status = runner.wait(timeout=10)
             except subprocess.TimeoutExpired:
