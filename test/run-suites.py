@@ -12,6 +12,7 @@ if sys.version_info < (3, 9):  # noqa: UP036
 import errno
 import os
 import re
+import select
 import signal
 import subprocess
 import tempfile
@@ -20,6 +21,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 HANDLED_SIGNALS = (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM)
+# Bound on how long a backpressured replay waits before re-checking for a
+# recorded signal. Keeps TERM response far inside the caller's 2s bound.
+REPLAY_POLL_TIMEOUT = 0.05
 _libc_waitid = None
 
 
@@ -151,10 +155,6 @@ def live_members(groups: set[int]) -> dict[int, list[int]]:
     return members
 
 
-class ReplayInterrupted(Exception):
-    """Interrupt output writes only after all owned workers are settled."""
-
-
 @dataclass
 class Worker:
     """Own a child and its reserved group ID until teardown has finished."""
@@ -194,16 +194,49 @@ class Runner:
         self.root = root
         self.workers: list[Worker] = []
         self.interrupted: int | None = None
+        # Retained so the boundary test can observe the replay phase. The
+        # handler no longer consults it: see interrupt().
         self.replaying = False
 
     def interrupt(self, signum: int, _frame: object) -> None:
-        """Defer cleanup until a partially launched worker is registered."""
+        """Record cancellation; running work notices the flag at its next poll.
+
+        The handler must never raise. An exception raised here can land on a
+        bytecode the enclosing try/except does not cover (the replay loop's
+        jump bytecodes fall between exception-table entries), so it escapes
+        run() uncaught instead of reporting 128 + signum. It can also be
+        lost entirely: a signal that arrives just before a blocking write
+        sets the flag, but the handler cannot run again until the write
+        returns, and the write never returns while the reader is gone.
+        Recording only, with replay polling for the flag, closes both holes.
+        """
         if self.interrupted is None:
             self.interrupted = signum
-        if self.replaying:
-            # A second signal must not interrupt unwinding or its cleanup.
-            self.replaying = False
-            raise ReplayInterrupted
+
+    def replay_log(self, output) -> bool:
+        """Replay one suite log to stdout; True when a signal stopped replay.
+
+        stdout runs non-blocking for the replay so a backpressured pipe
+        cannot wedge the runner: a write either transfers bytes or reports
+        it would block, and the wait for writability polls with a short
+        timeout so a recorded signal is noticed promptly.
+        """
+        while chunk := output.read(65536):
+            pending = memoryview(chunk)
+            while pending:
+                if self.interrupted is not None:
+                    return True
+                try:
+                    pending = pending[os.write(1, pending) :]
+                except BlockingIOError:
+                    select.select([], [1], [], REPLAY_POLL_TIMEOUT)
+                except BrokenPipeError:
+                    # The reader went away. A TERM recorded before the write
+                    # still reports 143; without one, the pipe error stands.
+                    if self.interrupted is not None:
+                        return True
+                    raise
+        return self.interrupted is not None
 
     def launch(self, suite: str) -> Worker:
         """Use one child-side setsid; Bash monitor mode races on Darwin 27."""
@@ -331,23 +364,28 @@ class Runner:
             return 128 + self.interrupted
         failed = 0
         try:
+            was_blocking = os.get_blocking(1)
+            os.set_blocking(1, False)
+            nonblocking = True
+        except (AttributeError, OSError, ValueError):
+            # A stdout that cannot go non-blocking keeps blocking writes.
+            # The flag is still checked between chunks, so cancellation is
+            # noticed as soon as a write completes.
+            nonblocking = False
+        try:
             self.replaying = True
             if self.interrupted is not None:
                 return 128 + self.interrupted
             for worker in self.workers:
                 with worker.log.open("rb") as output:
-                    while chunk := output.read(65536):
-                        pending = memoryview(chunk)
-                        while pending:
-                            pending = pending[os.write(1, pending) :]
+                    if self.replay_log(output):
+                        return 128 + self.interrupted
                 if failed == 0 and worker.status:
                     failed = worker.status
-            # Clear the exceptional phase while still inside its handler.
-            self.replaying = False
-        except ReplayInterrupted:
-            return 128 + self.interrupted
         finally:
             self.replaying = False
+            if nonblocking:
+                os.set_blocking(1, was_blocking)
         return failed if self.interrupted is None else 128 + self.interrupted
 
 
