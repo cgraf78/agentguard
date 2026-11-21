@@ -596,7 +596,16 @@ class NativeRunnerTest(unittest.TestCase):
             self.assertTrue(ready, "runner did not begin replay")
             self.assertEqual(runner.stdout.read(1), b"x")
             runner.terminate()
-            self.assertEqual(runner.wait(timeout=2), 143)
+            # The exit takes tens of milliseconds even on one contended CPU;
+            # without the interrupt it blocks forever on the full pipe. A 2 s
+            # bound still failed once on a stalled CI VM, so allow 10 s.
+            try:
+                status = runner.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                runner.kill()
+                runner.wait(timeout=2)
+                self.fail(f"runner ignored TERM during replay; stderr: {runner.stderr.read()!r}")
+            self.assertEqual(status, 143)
         finally:
             if runner.poll() is None:
                 runner.kill()
