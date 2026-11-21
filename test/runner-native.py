@@ -367,6 +367,49 @@ class NativeRunnerTest(unittest.TestCase):
             self.assertTrue(fired, seam)
             self.assertEqual(status, 143, seam)
 
+    def test_interrupt_records_without_raising(self) -> None:
+        # The handler must never raise: an exception raised from a signal
+        # handler can land on a bytecode the replay try/except does not
+        # cover, so it escapes run() uncaught instead of reporting 143.
+        # It can also be lost when the signal arrives just before a blocking
+        # write. Recording only, with the replay loop polling for the flag,
+        # is the whole contract; assert both halves directly.
+        module = self.load_runner()
+        runner = module.Runner(self.root)
+        runner.replaying = True
+        runner.interrupt(signal.SIGTERM, None)
+        self.assertEqual(runner.interrupted, signal.SIGTERM)
+        self.assertTrue(runner.replaying)
+        self.assertEqual(runner.run([], 1), 143)
+
+    def test_interrupt_during_replay_reports_term_and_restores_stdout(self) -> None:
+        # Fire the interrupt from inside replay_log itself, so the poll loop,
+        # the non-blocking setup, and the blocking-mode restoration are all
+        # exercised — not just the handler's no-raise half.
+        module = self.load_runner()
+        suite = self.suite("large-output", "import os\nos.write(1,b'x'*(4*65536))\n")
+        runner = module.Runner(self.root)
+        fired = False
+
+        def trace(frame, event, _arg):
+            nonlocal fired
+            if event == "line" and frame.f_code is module.Runner.replay_log.__code__ and not fired:
+                fired = True
+                sys.settrace(None)
+                runner.interrupt(signal.SIGTERM, None)
+            return trace
+
+        before = os.get_blocking(1)
+        previous = sys.gettrace()
+        sys.settrace(trace)
+        try:
+            status = runner.run([suite], 1)
+        finally:
+            sys.settrace(previous)
+        self.assertTrue(fired)
+        self.assertEqual(status, 143)
+        self.assertEqual(os.get_blocking(1), before)
+
     def test_late_member_is_killed_before_leader_is_reaped(self) -> None:
         module = self.load_runner()
         process = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
@@ -596,7 +639,16 @@ class NativeRunnerTest(unittest.TestCase):
             self.assertTrue(ready, "runner did not begin replay")
             self.assertEqual(runner.stdout.read(1), b"x")
             runner.terminate()
-            self.assertEqual(runner.wait(timeout=2), 143)
+            # A prompt exit takes well under a second; the generous bound only
+            # keeps a loaded CI host from failing a runner that does respond.
+            # Without the polled replay it blocks forever on the full pipe.
+            try:
+                status = runner.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                runner.kill()
+                runner.wait(timeout=2)
+                self.fail(f"runner ignored TERM during replay; stderr: {runner.stderr.read()!r}")
+            self.assertEqual(status, 143)
         finally:
             if runner.poll() is None:
                 runner.kill()
