@@ -377,13 +377,13 @@ EOF
       local path="$1" dir target parent
       while [[ -L "$path" ]]; do
         _agentguard_script_parent "$path" parent
-        dir=$(cd -P -- "$parent" && pwd) || return 1
+        dir=$(CDPATH='' cd -P -- "$parent" && pwd) || return 1
         target=$(readlink "$path") || return 1
         [[ "$target" == /* ]] || target="$dir/$target"
         path="$target"
       done
       _agentguard_script_parent "$path" parent
-      cd -P -- "$parent" && pwd
+      CDPATH='' cd -P -- "$parent" && pwd
     }
     # END GENERATED LAUNCHER BOOTSTRAP
 
