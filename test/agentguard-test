@@ -6,6 +6,9 @@ set -euo pipefail
 test_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 root="${test_dir%/test}"
 
+# shellcheck source=test/git-fixture-env.sh
+. "$test_dir/git-fixture-env.sh"
+
 # Keep runtime entry points explicit so additions require a lint review.
 runtime_shell_files=(
   "$root/bin/agent-hook-compact"

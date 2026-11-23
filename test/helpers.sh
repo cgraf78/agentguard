@@ -10,6 +10,9 @@
 #   ...
 #   _test_summary  # prints results, exits 0 or 1
 
+# shellcheck source=test/git-fixture-env.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/git-fixture-env.sh"
+
 PASS=0
 FAIL=0
 CLEANUP_DIRS=()
