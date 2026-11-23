@@ -323,6 +323,7 @@ printf '%s\n' '_hook_context "target-directory extension sourced"' \
   >"$_codex_repo/bin/agent-hook-pre-bash-work"
 _relative_result=$(
   cd -- "$_relative_install" || exit 1
+  export CDPATH=.
   _run_hook_named_agent codex bin/agent-hook-pre-bash "$(jq -nc --arg cwd "$_codex_repo" \
     '{cwd:$cwd,tool_input:{command:"true"}}')"
   printf 'exit=%s\n%s\n%s\n' "$HOOK_EXIT" "$HOOK_STDOUT" "$HOOK_STDERR"
