@@ -2,7 +2,7 @@
 # agent-hook-bash-sleep-test — pre-bash long foreground sleep warning.
 
 # shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
-AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+AGENTGUARD_TEST_HELPERS="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
 . "$AGENTGUARD_TEST_HELPERS"
 
 # The warning names wait-until; that pointer is the contract agents act on.

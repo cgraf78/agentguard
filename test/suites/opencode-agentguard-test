@@ -8,7 +8,7 @@ if ! command -v node >/dev/null 2>&1; then
   exit 0
 fi
 
-test_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+test_dir="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 root="${test_dir%/test/suites}"
 test_root=$(mktemp -d 2>/dev/null || mktemp -d -t opencode-agentguard-test) || exit 1
 # The native probe changes directories, so keep fixture paths rooted at launch.

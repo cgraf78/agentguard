@@ -11,7 +11,7 @@
 # so a block would be both useless and misleadingly worded.
 
 # shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
-AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+AGENTGUARD_TEST_HELPERS="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
 . "$AGENTGUARD_TEST_HELPERS"
 
 POST_BASH="$BIN_DIR/agent-hook-post-bash"

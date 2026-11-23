@@ -9,7 +9,7 @@
 # status.
 
 # shellcheck disable=SC1090,SC1091,SC2016 # dynamic helper path; literal shell text.
-AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+AGENTGUARD_TEST_HELPERS="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
 . "$AGENTGUARD_TEST_HELPERS"
 
 _fc_root="$TEST_TMPDIR/fail-closed"

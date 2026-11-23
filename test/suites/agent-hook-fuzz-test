@@ -11,7 +11,7 @@
 # AGENTGUARD_FUZZ_SEED and AGENTGUARD_FUZZ_COUNT reproduce or widen a run.
 
 # shellcheck disable=SC1003,SC1090,SC1091,SC2016 # dynamic helper path; literal shell text.
-AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+AGENTGUARD_TEST_HELPERS="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
 . "$AGENTGUARD_TEST_HELPERS"
 _mock_protected_bare_git_home
 

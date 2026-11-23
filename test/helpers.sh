@@ -211,6 +211,13 @@ _stdin_contains() {
 # Temp directory management
 # ---------------------------------------------------------------------------
 
+# Suites put their mock command directories on PATH.
+case "${TMPDIR:-/tmp}" in
+  *:*)
+    printf '%s\n' "agentguard test TMPDIR must not contain ':' for mock PATH entries" >&2
+    exit 2
+    ;;
+esac
 _TEST_TMP_ROOT=$(mktemp -d) || {
   echo "failed to create test temp root" >&2
   exit 1

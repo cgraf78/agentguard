@@ -6,7 +6,7 @@
 # pre-edit secrets file guard.
 
 # shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
-AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+AGENTGUARD_TEST_HELPERS="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
 . "$AGENTGUARD_TEST_HELPERS"
 
 # Pager fixtures must not depend on the invoking terminal's manual-page setup.
