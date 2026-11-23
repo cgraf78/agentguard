@@ -86,4 +86,9 @@ jobs:
           version=$(opencode --version)
           version=${version##* }
           test "${version#v}" = "$OPENCODE_TEST_VERSION"
-          test/suites/opencode-agentguard-test
+          # A caller's OpenCode override takes precedence over HOME unless
+          # the fixture isolates it. Make leakage fail in both native lanes.
+          ambient_config=$(mktemp "$RUNNER_TEMP/opencode-caller.XXXXXX")
+          trap 'rm -f "$ambient_config"' EXIT
+          printf '%s\n' '{ invalid JSON' >"$ambient_config"
+          OPENCODE_CONFIG="$ambient_config" test/suites/opencode-agentguard-test
