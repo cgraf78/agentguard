@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify that a suite can run from a Git hook without writing to its repository.
+# Verify that installer fixtures own their Git environment and command paths.
 
 set -euo pipefail
 
@@ -51,5 +51,14 @@ if [[ -e "$marker" ]]; then
 else
   _pass "fixture ignores inherited Git hook configuration"
 fi
+
+colon_tmp="$(_tmpdir)/tmp:parent"
+mkdir "$colon_tmp"
+status=0
+output=$(TMPDIR="$colon_tmp" "$BASH" "$test_dir/suites/install-test" 2>&1) || status=$?
+_assert_exit "fixture rejects TMPDIR that cannot contain a mock PATH entry" 2 "$status"
+_assert_contains "fixture explains why TMPDIR cannot be used" \
+  "test TMPDIR must not contain ':'" "$output"
+_assert_eq "fixture leaves rejected TMPDIR empty" "" "$(ls -A "$colon_tmp")"
 
 _test_summary
