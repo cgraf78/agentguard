@@ -11,6 +11,8 @@ fi
 test_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 root="${test_dir%/test/suites}"
 test_root=$(mktemp -d 2>/dev/null || mktemp -d -t opencode-agentguard-test) || exit 1
+# The native probe changes directories, so keep fixture paths rooted at launch.
+[[ "$test_root" == /* ]] || test_root="$PWD/$test_root"
 trap 'rm -rf "$test_root"' EXIT
 
 fixture_home="$test_root/home"
@@ -3905,7 +3907,15 @@ mkdir -p "$test_root/workspace"
     node "$test_root/test.mjs"
 ) || exit 1
 
-if command -v opencode >/dev/null 2>&1; then
+if opencode_cli=$(type -P opencode); then
+  [[ "$opencode_cli" == /* ]] || opencode_cli="$PWD/$opencode_cli"
+  # Both native versions must use this suite's configuration. OpenCode
+  # environment overrides can otherwise take precedence over its private HOME.
+  while IFS= read -r name; do
+    case "$name" in
+      OPENCODE_*) unset "$name" ;;
+    esac
+  done < <(compgen -e)
   load_home="$test_root/load-home"
   load_plugins="$load_home/.config/opencode/plugins"
   load_marker="$test_root/global-plugin-loaded"
@@ -3962,22 +3972,22 @@ export default {
   },
 };
 LOAD_PLUGIN
-  native_version=$(opencode --version) || exit 1
+  export HOME="$load_home"
+  export XDG_CONFIG_HOME="$load_home/.config" XDG_DATA_HOME="$load_home/data"
+  export XDG_STATE_HOME="$load_home/state" XDG_CACHE_HOME="$load_home/cache"
+  export TMPDIR="$load_home/tmp" AGENTGUARD_TEST_OPENCODE_LOAD_MARKER="$load_marker"
+  cd "$load_home" || exit 1
+  native_version=$("$opencode_cli" --version) || exit 1
   native_version=${native_version##* }
   native_version=${native_version#v}
   case "$native_version" in
     1.*)
-      HOME="$load_home" \
-        XDG_CONFIG_HOME="$load_home/.config" XDG_DATA_HOME="$load_home/data" \
-        XDG_STATE_HOME="$load_home/state" XDG_CACHE_HOME="$load_home/cache" \
-        TMPDIR="$load_home/tmp" \
-        AGENTGUARD_TEST_OPENCODE_LOAD_MARKER="$load_marker" \
-        opencode debug config >/dev/null || exit 1
+      "$opencode_cli" debug config >/dev/null || exit 1
       ;;
     2.*)
       # V2 inventory reads do not activate plugins. Exercise the normal TUI
       # startup under an owned terminal, with bounded process-group cleanup.
-      if ! python3 - "$load_home" "$load_marker" "$(command -v opencode)" <<'LOAD_V2'
+      if ! python3 - "$load_home" "$load_marker" "$opencode_cli" <<'LOAD_V2'
 import errno
 import os
 from pathlib import Path
@@ -3989,11 +3999,8 @@ import sys
 import time
 
 home, marker, executable = sys.argv[1:]
-env = {key: value for key, value in os.environ.items() if not key.startswith("OPENCODE_")}
-env.update(HOME=home, XDG_CONFIG_HOME=home + "/.config", XDG_DATA_HOME=home + "/data",
-           XDG_STATE_HOME=home + "/state", XDG_CACHE_HOME=home + "/cache",
-           TMPDIR=home + "/tmp", TERM="xterm-256color",
-           AGENTGUARD_TEST_OPENCODE_LOAD_MARKER=marker)
+env = os.environ.copy()
+env["TERM"] = "xterm-256color"
 master, slave = pty.openpty()
 child = None
 capture = bytearray()
