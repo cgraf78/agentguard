@@ -39,6 +39,7 @@ program	support/script-resolver.sh.template
 program	support/secure-launcher.sh.template
 program	support/sync-hook-bootstrap
 program	test/agentguard-test
+program	test/git-fixture-env.sh
 program	test/helpers.sh
 program	test/run-suites
 program	test/suites/agent-bash-reexec-test
@@ -85,6 +86,7 @@ program	test/suites/agentguard-api-test
 program	test/suites/bootstrap-test
 program	test/suites/examples-test
 program	test/suites/integration-assets-test
+program	test/suites/git-fixture-isolation-test
 program	test/suites/install-test
 program	test/suites/manpage-test
 program	test/suites/opencode-agentguard-test
