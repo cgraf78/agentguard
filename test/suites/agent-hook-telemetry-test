@@ -2,7 +2,7 @@
 # agent-hook-telemetry-test — audit telemetry records and the read-side CLI.
 
 # shellcheck disable=SC1090,SC1091,SC2030,SC2031 # dynamic helper path; subshell env fixtures.
-AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+AGENTGUARD_TEST_HELPERS="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
 . "$AGENTGUARD_TEST_HELPERS"
 
 TELEMETRY_HOOK="$BIN_DIR/agent-hook-telemetry"

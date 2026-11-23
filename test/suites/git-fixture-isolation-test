@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-test_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+test_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 # shellcheck source=test/helpers.sh
 . "$test_dir/helpers.sh"
 
@@ -25,7 +25,10 @@ run_installer_fixture() {
   local description=$1 log
   shift
   log=$(_tmpdir)/installer.log
-  if env "$@" "$BASH" "$test_dir/suites/install-test" >"$log" 2>&1; then
+  if (
+    cd -P -- "$test_dir/.." || exit 1
+    env CDPATH=. "$@" "$BASH" test/suites/install-test
+  ) >"$log" 2>&1; then
     _pass "$description"
   else
     _fail "$description"

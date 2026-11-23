@@ -3,7 +3,7 @@
 
 set -u
 
-test_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+test_dir="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 root="${test_dir%/test/suites}"
 
 # shellcheck source=../helpers.sh

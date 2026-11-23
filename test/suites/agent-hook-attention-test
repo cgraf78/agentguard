@@ -7,7 +7,7 @@
 
 # shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
 # shellcheck disable=SC2016 # child snippets expand in the child shell.
-AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+AGENTGUARD_TEST_HELPERS="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
 . "$AGENTGUARD_TEST_HELPERS"
 
 ATT_DIR=$(_tmpdir)

@@ -2,7 +2,7 @@
 # agent-hook-bash-fast-test — cheap pre-bash paths for common safe commands.
 
 # shellcheck disable=SC1090,SC1091 # dynamic helper path resolved at runtime.
-AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+AGENTGUARD_TEST_HELPERS="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
 . "$AGENTGUARD_TEST_HELPERS"
 
 fast_install="$TEST_TMPDIR/fast-install"

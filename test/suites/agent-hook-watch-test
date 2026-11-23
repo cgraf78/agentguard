@@ -4,7 +4,7 @@
 # lib/agentguard/watch-github.sh).
 
 # shellcheck disable=SC1090,SC1091,SC2016,SC2034 # dynamic sources, literal backticks, dynamic-scope arrays
-AGENTGUARD_TEST_HELPERS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
+AGENTGUARD_TEST_HELPERS="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/agent-hook-helpers.sh"
 . "$AGENTGUARD_TEST_HELPERS"
 
 # Settings a developer's environment may export for real sessions.
