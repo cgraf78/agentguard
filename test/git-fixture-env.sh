@@ -7,3 +7,10 @@ unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_DIR GIT_GRAFT_FILE
 unset GIT_IMPLICIT_WORK_TREE GIT_INDEX_FILE GIT_NAMESPACE GIT_OBJECT_DIRECTORY
 unset GIT_NO_REPLACE_OBJECTS GIT_PREFIX GIT_REPLACE_REF_BASE GIT_SHALLOW_FILE GIT_WORK_TREE
 unset GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_TEMPLATE_DIR
+
+# Container fixtures can have a different uid from the owned checkout.
+_test_checkout_files() {
+  local checkout=$1
+  shift
+  git -C "$checkout" -c "safe.directory=$checkout" ls-files -z -- "$@"
+}

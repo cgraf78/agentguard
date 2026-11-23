@@ -12,18 +12,48 @@ AGENTGUARD_REPO_ROOT="$(cd -- "$AGENTGUARD_TEST_DIR/.." && pwd -P)"
 
 echo "=== agentguard: manpages ==="
 
-while IFS= read -r command; do
-  page="$AGENTGUARD_REPO_ROOT/man/man1/$command.1"
-  _assert_file_exists "manpage exists: $command" "$page"
-  content=$(cat "$page")
-  _assert_contains "manpage NAME section: $command" ".SH NAME" "$content"
-  _assert_contains "manpage names command: $command" "$command \\" "$content"
-done < <(
-  git -C "$AGENTGUARD_REPO_ROOT" ls-files -- 'bin/*' |
-    xargs -n 1 basename |
-    grep -v '^README.md$' |
-    sort
-)
+_check_manpages() {
+  local inventory="$_TEST_TMP_ROOT/manpage-paths" file command page content found=0
+
+  _test_checkout_files "$AGENTGUARD_REPO_ROOT" 'bin/*' >"$inventory" || return
+  while IFS= read -r -d '' file; do
+    command=${file##*/}
+    [[ "$command" != README.md ]] || continue
+    found=1
+    page="$AGENTGUARD_REPO_ROOT/man/man1/$command.1"
+    _assert_file_exists "manpage exists: $command" "$page"
+    content=$(cat "$page")
+    _assert_contains "manpage NAME section: $command" ".SH NAME" "$content"
+    _assert_contains "manpage names command: $command" "$command \\" "$content"
+  done <"$inventory"
+  [[ "$found" == 1 ]]
+}
+
+inventory_status=0
+inventory_output=$(
+  # shellcheck disable=SC2329 # Called by _test_checkout_files.
+  git() {
+    printf '%s\0' 'bin/agentguard-telemetry'
+    return 17
+  }
+  _check_manpages
+) || inventory_status=$?
+_assert_eq "propagates failed manpage inventory status" 17 "$inventory_status"
+_assert_eq "does not check a partial manpage inventory" "" "$inventory_output"
+
+inventory_status=0
+(
+  # shellcheck disable=SC2329 # Called by _test_checkout_files.
+  git() {
+    printf '%s\0' 'bin/README.md'
+  }
+  _check_manpages
+) || inventory_status=$?
+_assert_eq "rejects an inventory with only the README" 1 "$inventory_status"
+
+# Exercise command-scoped checkout trust even when the test uid owns the checkout.
+GIT_TEST_ASSUME_DIFFERENT_OWNER=1 _check_manpages ||
+  _fail "cannot enumerate tracked commands for manpage checks"
 
 echo ""
 echo "=== agentguard: launcher security boundary documentation ==="

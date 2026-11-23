@@ -53,38 +53,52 @@ example_shell_files=(
   "$root/examples/hooks/agent-hook-pre-bash-work"
 )
 
+discover_runtime_shell_files() (
+  local inventory file first_line
+  if [[ -n "${TMPDIR:-}" ]]; then
+    inventory=$(mktemp -- "${TMPDIR%/}/runtime-inventory.XXXXXX") || exit
+  else
+    inventory=$(mktemp) || exit
+  fi
+  trap 'rm -f -- "$inventory"' EXIT
+
+  _test_checkout_files "$root" bin lib share support >"$inventory" || exit
+  while IFS= read -r -d '' file; do
+    case "$file" in
+      *.sh | *.sh.template)
+        printf '%q\n' "$file"
+        continue
+        ;;
+    esac
+    first_line=""
+    IFS= read -r first_line <"$root/$file" || true
+    if [[ "$first_line" == '#!'*bash* ||
+      "$first_line" == '#!'*dash* ||
+      "$first_line" == '#!'*ksh* ||
+      "$first_line" == '#!'*/sh ||
+      "$first_line" == '#!'*'/sh '* ||
+      "$first_line" == '#!'*' sh' ||
+      "$first_line" == '#!'*' sh '* ||
+      "$first_line" == '# shellcheck shell=bash' ||
+      "$first_line" == '# shellcheck shell=dash' ||
+      "$first_line" == '# shellcheck shell=ksh' ||
+      "$first_line" == '# shellcheck shell=sh' ]]; then
+      printf '%q\n' "$file"
+    fi
+  done <"$inventory"
+)
+
 check_runtime_shell_inventory() {
-  local file first_line listed discovered
+  local file listed discovered
   listed=$(
-    for file in "${runtime_shell_files[@]}"; do
-      printf '%s\n' "${file#"$root"/}"
+    for file in "$@"; do
+      printf '%q\n' "${file#"$root"/}"
     done | LC_ALL=C sort
   )
-  discovered=$(
-    while IFS= read -r file; do
-      case "$file" in
-        *.sh | *.sh.template)
-          printf '%s\n' "$file"
-          continue
-          ;;
-      esac
-      first_line=""
-      IFS= read -r first_line <"$root/$file" || true
-      if [[ "$first_line" == '#!'*bash* ||
-        "$first_line" == '#!'*dash* ||
-        "$first_line" == '#!'*ksh* ||
-        "$first_line" == '#!'*/sh ||
-        "$first_line" == '#!'*'/sh '* ||
-        "$first_line" == '#!'*' sh' ||
-        "$first_line" == '#!'*' sh '* ||
-        "$first_line" == '# shellcheck shell=bash' ||
-        "$first_line" == '# shellcheck shell=dash' ||
-        "$first_line" == '# shellcheck shell=ksh' ||
-        "$first_line" == '# shellcheck shell=sh' ]]; then
-        printf '%s\n' "$file"
-      fi
-    done < <(git -C "$root" ls-files -- bin lib share support)
-  )
+  discovered=$(discover_runtime_shell_files) || {
+    printf 'agentguard-test: cannot enumerate tracked runtime shell files\n' >&2
+    return 1
+  }
   discovered=$(printf '%s\n' "$discovered" | sed '/^$/d' | LC_ALL=C sort)
 
   if [[ "$listed" != "$discovered" ]]; then
@@ -96,7 +110,40 @@ check_runtime_shell_inventory() {
   fi
 }
 
-check_runtime_shell_inventory
+inventory_status=0
+inventory_output=$(
+  # shellcheck disable=SC2329 # Called by _test_checkout_files.
+  git() {
+    printf '%s\0' 'lib/agentguard/agentguard.sh'
+    return 17
+  }
+  discover_runtime_shell_files
+) || inventory_status=$?
+if [[ "$inventory_status" != 17 || -n "$inventory_output" ]]; then
+  printf 'agentguard-test: failed discovery exposed partial runtime inventory (status %s, output %q)\n' \
+    "$inventory_status" "$inventory_output" >&2
+  exit 1
+fi
+
+# A literal newline within one tracked path must never satisfy two entries.
+inventory_status=0
+inventory_output=$(
+  # shellcheck disable=SC2329 # Called by _test_checkout_files.
+  git() {
+    printf '%s\0' $'lib/agentguard/agentguard.sh\nlib/agentguard/detect.sh'
+  }
+  check_runtime_shell_inventory \
+    "$root/lib/agentguard/agentguard.sh" \
+    "$root/lib/agentguard/detect.sh" 2>&1
+) || inventory_status=$?
+if [[ "$inventory_status" != 1 || "$inventory_output" != *'runtime shell inventory is stale'* ]]; then
+  printf 'agentguard-test: runtime inventory did not reject a newline path alias (status %s, output %q)\n' \
+    "$inventory_status" "$inventory_output" >&2
+  exit 1
+fi
+
+# Exercise command-scoped checkout trust even when the test uid owns the checkout.
+GIT_TEST_ASSUME_DIFFERENT_OWNER=1 check_runtime_shell_inventory "${runtime_shell_files[@]}"
 # Shared CI lints once in its dedicated job; local runs still lint by default.
 if [[ "${AGENTGUARD_SKIP_SHELLCHECK:-0}" != 1 ]]; then
   shellcheck -x -P SCRIPTDIR \
