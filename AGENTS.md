@@ -48,8 +48,8 @@ protocol). AgentGuard never mutates an agent's configuration.
   (`AGENTGUARD_TEST_JOBS` workers, default 4).
 - CI shell job, full matrix, profiles `base,jq,python`:
   `AGENTGUARD_SKIP_SHELLCHECK=1 test/agentguard-test`.
-- CI OpenCode job, once per pinned version (`opencode-ai@1.18.13`,
-  `@opencode/cli@2.0.22`): `npm install --prefix "$p" --no-save
+- CI OpenCode job, once per version pinned in `.github/workflows/test.yml`:
+  `npm install --prefix "$p" --no-save
   --package-lock=false <package>@<version>`, then
   `PATH="$p/node_modules/.bin:$PATH" test/suites/opencode-agentguard-test`.
   Without `node`, that suite prints SKIP locally.
