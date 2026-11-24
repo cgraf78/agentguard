@@ -2230,6 +2230,67 @@ else
   kill -KILL "$timeout_target_pid" "$timeout_watchdog_pid" 2>/dev/null || true
 fi
 
+# Deliver TERM after a real child starts and before the timeout wrapper
+# assigns its PID. Only the wrapper reads this startup file.
+timeout_launch_debug="$TIMEOUT_CLEAN_BIN/interrupt-launch"
+timeout_launch_signal="$TIMEOUT_CLEAN_BIN/launch-interrupted"
+cat >"$timeout_launch_debug" <<'SCRIPT'
+unset BASH_ENV
+set -T
+interrupt_launch() {
+  [[ $BASH_COMMAND == "$TIMEOUT_LAUNCH_HANDLE=\$!" ]] || return 0
+  trap - DEBUG
+  for _ in {1..250}; do
+    if [[ -s "$TIMEOUT_TARGET_PID_FILE" &&
+      ($TIMEOUT_LAUNCH_HANDLE == target_pid || -s "$TIMEOUT_WATCHDOG_PID_FILE") ]]; then
+      printf '%s\n' reached >"$TIMEOUT_LAUNCH_SIGNAL"
+      builtin kill -TERM "$$"
+      return
+    fi
+    /bin/sleep 0.01
+  done
+}
+trap interrupt_launch DEBUG
+SCRIPT
+for timeout_launch_handle in target_pid watchdog_pid; do
+  : >"$timeout_target_pid_file"
+  : >"$timeout_watchdog_pid_file"
+  : >"$timeout_launch_signal"
+  PATH="$TIMEOUT_CLEAN_BIN" TIMEOUT_REAL_SLEEP="$TIMEOUT_REAL_SLEEP" \
+    TIMEOUT_TARGET_PID_FILE="$timeout_target_pid_file" \
+    TIMEOUT_WATCHDOG_PID_FILE="$timeout_watchdog_pid_file" \
+    TIMEOUT_LAUNCH_HANDLE="$timeout_launch_handle" TIMEOUT_LAUNCH_SIGNAL="$timeout_launch_signal" \
+    bash -c '
+      source "$1"
+      _hook_timeout_prefix 5
+      BASH_ENV="$2" "${_HOOK_TIMEOUT_PREFIX[@]}" bash -c '\''
+        trap "" TERM
+        printf "%s\n" "$$" >"$TIMEOUT_TARGET_PID_FILE"
+        exec /bin/sleep 30
+      '\''
+    ' _ "$HELPERS" "$timeout_launch_debug" \
+    >"$TIMEOUT_CLEAN_BIN/launch.log" 2>&1
+  timeout_launch_rc=$?
+  _assert_eq "hook timeout prefix: $timeout_launch_handle boundary preserves TERM status" \
+    "143" "$timeout_launch_rc"
+  if [[ -s "$timeout_launch_signal" ]]; then
+    _pass "hook timeout prefix: signal reached the $timeout_launch_handle boundary"
+  else
+    _fail "hook timeout prefix: did not reach the $timeout_launch_handle boundary"
+  fi
+  for timeout_launch_pid_file in "$timeout_target_pid_file" "$timeout_watchdog_pid_file"; do
+    timeout_launch_pid=$(<"$timeout_launch_pid_file")
+    [[ $timeout_launch_pid =~ ^[1-9][0-9]*$ ]] || continue
+    timeout_launch_state=$(ps -p "$timeout_launch_pid" -o stat= 2>/dev/null || true)
+    if [[ -z $timeout_launch_state || $timeout_launch_state == Z* ]]; then
+      _pass "hook timeout prefix: $timeout_launch_handle interruption stops $timeout_launch_pid"
+    else
+      _fail "hook timeout prefix: $timeout_launch_handle interruption left $timeout_launch_pid alive ($timeout_launch_state)"
+      kill -KILL "$timeout_launch_pid" 2>/dev/null || true
+    fi
+  done
+done
+
 # BusyBox `timeout` returns 143 after its TERM signal instead of GNU's 124.
 # Exercise the detected implementation through the selected prefix so Alpine
 # cannot silently change the timeout status contract again.

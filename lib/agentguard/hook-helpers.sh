@@ -3166,6 +3166,8 @@ _HOOK_PORTABLE_TIMEOUT_SCRIPT='
   target_pid=""
   target_pgid=""
   watchdog_pid=""
+  handles_ready=0
+  interrupt_status=0
   timed_out=0
   timer_failed=0
 
@@ -3185,7 +3187,7 @@ _HOOK_PORTABLE_TIMEOUT_SCRIPT='
 
   stop_watchdog() {
     [ -n "$watchdog_pid" ] || return 0
-    kill -TERM "$watchdog_pid" 2>/dev/null || true
+    kill -TERM -- "-$watchdog_pid" 2>/dev/null || true
     wait "$watchdog_pid" 2>/dev/null || true
     watchdog_pid=""
   }
@@ -3211,11 +3213,19 @@ _HOOK_PORTABLE_TIMEOUT_SCRIPT='
     stop_target
   }
 
+  interrupt() {
+    # Bash can deliver a signal after fork and before the following assignment.
+    # Keep the first status and let launch publish both groups before exiting.
+    ((interrupt_status == 0)) || return 0
+    interrupt_status=$1
+    ((handles_ready == 0)) || exit "$interrupt_status"
+  }
+
   trap cleanup EXIT
-  trap "exit 129" HUP
-  trap "exit 130" INT
-  trap "exit 131" QUIT
-  trap "exit 143" TERM
+  trap "interrupt 129" HUP
+  trap "interrupt 130" INT
+  trap "interrupt 131" QUIT
+  trap "interrupt 143" TERM
   trap expire USR1
   trap timer_error USR2
 
@@ -3228,6 +3238,8 @@ _HOOK_PORTABLE_TIMEOUT_SCRIPT='
   case $- in
     *m*) monitor_was_on=1 ;;
   esac
+  # A shell can inherit the monitor flag without active job control.
+  set +m
   set -m
   (
     [ "$monitor_was_on" -eq 1 ] || set +m
@@ -3235,33 +3247,23 @@ _HOOK_PORTABLE_TIMEOUT_SCRIPT='
   ) &
   target_pid=$!
   target_pgid=$target_pid
-  [ "$monitor_was_on" -eq 1 ] || set +m
   wrapper_pid=$$
 
   (
-    timer_pid=""
-    stop_timer() {
-      # As in wrapper cleanup, the first signal owns cleanup to completion.
-      trap "" HUP INT QUIT TERM
-      [ -n "$timer_pid" ] && kill -TERM "$timer_pid" 2>/dev/null || true
-      [ -n "$timer_pid" ] && wait "$timer_pid" 2>/dev/null || true
-      exit 0
-    }
-    trap stop_timer HUP INT QUIT TERM
-    sleep "$seconds" &
-    timer_pid=$!
-    if wait "$timer_pid"; then
-      timer_status=0
-    else
-      timer_status=$?
-    fi
-    if [ "$timer_status" -eq 0 ]; then
+    # The timer stays in the watchdog group. Waiting in the foreground lets
+    # Bash reap sleep before running the trap after a group-wide stop.
+    set +m
+    trap "exit 0" HUP INT QUIT TERM
+    if sleep "$seconds"; then
       kill -USR1 "$wrapper_pid" 2>/dev/null || true
     else
       kill -USR2 "$wrapper_pid" 2>/dev/null || true
     fi
-  ) &
+  ) </dev/null >/dev/null 2>&1 &
   watchdog_pid=$!
+  [ "$monitor_was_on" -eq 1 ] || set +m
+  handles_ready=1
+  ((interrupt_status == 0)) || exit "$interrupt_status"
 
   if wait "$target_pid"; then
     target_status=0
