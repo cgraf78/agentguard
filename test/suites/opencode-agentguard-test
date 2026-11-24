@@ -3942,8 +3942,10 @@ export default {
     };
   },
   async setup(ctx) {
-    const dispose = await AgentGuard.setup(ctx);
+    const marker = process.env.AGENTGUARD_TEST_OPENCODE_LOAD_MARKER;
+    let dispose;
     try {
+      dispose = await AgentGuard.setup(ctx);
       // Exercise the native Promise -> Effect -> shell boundary: a direct mock
       // would miss async-local identity loss inside the host's executor.
       const shell = (await ctx.tool.list()).find((tool) => tool.id === "shell");
@@ -3958,15 +3960,20 @@ export default {
           signal: new AbortController().signal, progress: async () => {} },
       )));
       results.forEach((result, index) => {
-        assert.equal(result.output.exit, 0);
+        // OpenCode renamed the shell output field from exit to exitCode.
+        // The tool result metadata reports the exit code in both runtimes.
+        assert.equal(result.metadata.exit, 0);
         assert.equal(result.output.output, `identity=opencode:${sessions[index].id}\n`);
       });
       await Promise.all(sessions.map((session) => ctx.session.remove({ sessionID: session.id })));
       // This marker follows registration and actual concurrent shell execution.
-      fs.writeFileSync(process.env.AGENTGUARD_TEST_OPENCODE_LOAD_MARKER, "configured");
+      fs.writeFileSync(marker, "configured");
       return dispose;
     } catch (error) {
-      await dispose();
+      // The TUI can keep running after a plugin failure. Surface the cause
+      // through the same private fixture directory instead of timing out.
+      fs.writeFileSync(marker + ".error", String(error?.stack ?? error));
+      await dispose?.();
       throw error;
     }
   },
@@ -3999,6 +4006,7 @@ import sys
 import time
 
 home, marker, executable = sys.argv[1:]
+registration_error = Path(marker + ".error")
 env = os.environ.copy()
 env["TERM"] = "xterm-256color"
 master, slave = pty.openpty()
@@ -4011,6 +4019,10 @@ try:
     slave = None
     deadline = time.monotonic() + 30
     while not Path(marker).exists():
+        if registration_error.is_file():
+            detail = registration_error.read_text(errors="replace")
+            if detail:
+                raise RuntimeError("V2 adapter registration failed: " + detail)
         if child.poll() is not None or time.monotonic() >= deadline:
             raise RuntimeError("V2 adapter did not complete registration; terminal output: " +
                                capture.decode(errors="replace")[-2000:])

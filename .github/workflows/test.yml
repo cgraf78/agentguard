@@ -57,6 +57,8 @@ jobs:
             package: opencode-ai
           - version: 2.0.22
             package: '@opencode/cli'
+          - version: 2.3.2
+            package: '@opencode/cli'
     env:
       OPENCODE_TEST_VERSION: ${{ matrix.version }}
       OPENCODE_TEST_PACKAGE: ${{ matrix.package }}
