@@ -177,12 +177,20 @@ _run_hook_env() {
   HOOK_STDOUT=""
   HOOK_STDERR=""
   HOOK_EXIT=0
-  local out_file err_file
+  local out_file err_file in_file
   out_file=$(mktemp "$TEST_TMPDIR/out.XXXXXX")
   err_file=$(mktemp "$TEST_TMPDIR/err.XXXXXX")
   if [ -n "$input" ]; then
-    printf '%s' "$input" |
-      env "${_RUN_HOOK_ENV[@]}" "$hook" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
+    # Feed stdin from a file, not a pipe: a hook that legitimately exits
+    # without reading stdin (the permission-request gate answers `{}` and
+    # exits before the rest of the library runs) leaves a pipe writer with
+    # nowhere to write, and under pipefail its SIGPIPE (141) masquerades as
+    # the hook's exit status. A file has no writer to kill, so the reported
+    # status is always the hook's own.
+    in_file=$(mktemp "$TEST_TMPDIR/in.XXXXXX")
+    printf '%s' "$input" >"$in_file"
+    env "${_RUN_HOOK_ENV[@]}" "$hook" <"$in_file" >"$out_file" 2>"$err_file" || HOOK_EXIT=$?
+    rm -f "$in_file"
   else
     env "${_RUN_HOOK_ENV[@]}" "$hook" >"$out_file" 2>"$err_file" </dev/null || HOOK_EXIT=$?
   fi

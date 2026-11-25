@@ -1359,6 +1359,34 @@ else
 fi
 _assert_eq "hm hook: open empty stdin does not wait for EOF" "0" "$open_stdin_fast"
 
+# _run_hook_env used to pipe the payload into the hook: a hook that exits
+# without reading stdin (the permission-request gate answers `{}` and exits
+# before the rest of the library runs) closed the pipe while printf still
+# held the payload, so printf died of SIGPIPE and, under pipefail, 141
+# masqueraded as the hook's exit status. Scheduled run 45567775438 (Termux)
+# hit exactly that: knob '' got 141 with a small payload when the emulator
+# descheduled the writer. Stdin now comes from a file, so no writer can be
+# killed; a payload larger than the pipe buffer makes the old failure
+# deterministic here.
+early_exit_hook=$(_tmpdir)/early-exit-hook
+printf '#!/usr/bin/env bash\nexit 0\n' >"$early_exit_hook"
+chmod +x "$early_exit_hook"
+early_exit_payload=$(head -c 200000 /dev/zero | tr '\0' 'x')
+# Guard the payload length: an empty payload would take the </dev/null
+# branch inside _run_hook_env and the assertions below would pass without
+# ever exercising the file-stdin path.
+_assert_eq "run_hook_env: early-exit payload is 200KB" "200000" "${#early_exit_payload}"
+# shellcheck disable=SC2034  # read by _run_hook_env via dynamic scope.
+_RUN_HOOK_ENV=(
+  AGENTGUARD_SESSION_ID="$TEST_SID"
+  TMPDIR="$TEST_TMPDIR"
+  AGENTGUARD_NAME="agent"
+)
+_run_hook_env "$early_exit_hook" "$early_exit_payload"
+_assert_eq "run_hook_env: a hook that exits without reading stdin exits 0" "0" "$HOOK_EXIT"
+_assert_eq "run_hook_env: a hook that exits without reading stdin writes nothing" "" "$HOOK_STDOUT"
+unset _RUN_HOOK_ENV
+
 : >"$HM_LOG"
 printf '%s' '{"session_id":"json-hm-session","workspace":{"current_dir":"/tmp/workspace"}}' |
   env -u CLAUDE_CODE_CURRENT_SESSION_ID \
